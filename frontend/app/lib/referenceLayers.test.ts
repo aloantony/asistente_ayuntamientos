@@ -1,11 +1,19 @@
 import { describe, expect, it } from "vitest";
 import {
+  applyLocalBaseMapSelection,
   buildReferenceIdentifyPath,
   buildReferenceLayerTree,
+  buildReferenceMetadataUrl,
   buildReferenceTileUrl,
   buildSiurMapLayers,
+  listLocalBaseMapLayers,
+  parseStoredMapBaseLayerPreference,
   parseReferenceLayerBounds,
+  referenceLayerBlocker,
   reconcileSiurPreferences,
+  resolveLocalBaseMapLayerId,
+  serializeMapBaseLayerPreference,
+  selectLocalBaseMapLayer,
   selectTopIdentifyLayer,
   tileCoordinatesForProjectedPoint,
   validateReferenceCatalog,
@@ -44,6 +52,24 @@ function makeLayer(overrides: Partial<ReferenceLayer>): ReferenceLayer {
     available_style_ids: [],
     legend_available: true,
     metadata_available: false,
+    source_substitution_status: null,
+    source_substitution_notice: null,
+    source_substitution_selected_layer: null,
+    source_substitution_profile: null,
+    source_substitution_scope: null,
+    source_substitution_attribution: null,
+    source_substitution_content_sha256: null,
+    mirror_status: "active",
+    active_version_id: 21,
+    active_generation: 1,
+    active_source_version: "v1",
+    active_reference_at: UPDATED_AT,
+    active_created_at: UPDATED_AT,
+    last_run_status: "succeeded",
+    last_checked_at: UPDATED_AT,
+    last_sync_error_code: null,
+    last_sync_error_summary: null,
+    next_check_at: null,
     status: "active",
     updated_at: UPDATED_AT,
     ...overrides,
@@ -102,9 +128,12 @@ function makeCatalog(
 }
 
 function makeMapLayer(overrides: Partial<SiurMapLayer>): SiurMapLayer {
-  return {
+  const layer = {
     organizationId: 7,
     layerId: 1,
+    versionId: 1,
+    generation: 1,
+    role: "overlay",
     title: "Capa",
     tileUrl: "/api/organizations/7/reference-layers/1/tiles/{z}/{x}/{y}.png",
     styleId: null,
@@ -118,7 +147,218 @@ function makeMapLayer(overrides: Partial<SiurMapLayer>): SiurMapLayer {
     zIndex: 1,
     ...overrides,
   };
+  return {
+    ...layer,
+    tileUrl:
+      overrides.tileUrl ??
+      buildReferenceTileUrl(
+        layer.organizationId,
+        layer.layerId,
+        layer.styleId,
+        layer.versionId,
+        layer.generation,
+      ),
+  };
 }
+
+describe("local base map selection", () => {
+  it("selects the requested local layer id independently of input order", () => {
+    const image = makeMapLayer({
+      layerId: 10,
+      role: "base",
+      title: "IMAGEN",
+      zIndex: 1,
+    });
+    const map = makeMapLayer({
+      layerId: 11,
+      role: "base",
+      title: "MAPA",
+      zIndex: 2,
+    });
+    const relief = makeMapLayer({
+      layerId: 12,
+      role: "base",
+      title: "RELIEVE",
+      zIndex: 3,
+    });
+    const overlay = makeMapLayer({ layerId: 13, role: "overlay", zIndex: 4 });
+
+    expect(
+      selectLocalBaseMapLayer([relief, overlay, image, map], relief.layerId),
+    ).toBe(relief);
+    expect(selectLocalBaseMapLayer([overlay], image.layerId)).toBeNull();
+    expect(selectLocalBaseMapLayer([image, map, relief], null)).toBeNull();
+  });
+
+  it("never renders a hidden, transparent, unavailable, or remote base", () => {
+    const hidden = makeMapLayer({
+      layerId: 10,
+      role: "base",
+      visible: false,
+      zIndex: 1,
+    });
+    const transparent = makeMapLayer({
+      layerId: 11,
+      opacity: 0,
+      role: "base",
+      visible: true,
+      zIndex: 2,
+    });
+    const remote = makeMapLayer({
+      layerId: 12,
+      role: "base",
+      tileUrl: "https://tiles.example.test/{z}/{x}/{y}.png",
+      visible: true,
+      zIndex: 3,
+    });
+
+    expect(selectLocalBaseMapLayer([hidden], hidden.layerId)).toBeNull();
+    expect(
+      selectLocalBaseMapLayer([transparent], transparent.layerId),
+    ).toBeNull();
+    expect(selectLocalBaseMapLayer([remote], remote.layerId)).toBeNull();
+    expect(listLocalBaseMapLayers([transparent, remote])).toEqual([]);
+  });
+
+  it("lists all selectable local bases in canonical order", () => {
+    const image = makeMapLayer({
+      layerId: 10,
+      role: "base",
+      title: "IMAGEN",
+      visible: true,
+      zIndex: 1,
+    });
+    const map = makeMapLayer({
+      layerId: 11,
+      role: "base",
+      title: "MAPA",
+      visible: false,
+      zIndex: 2,
+    });
+    const relief = makeMapLayer({
+      layerId: 12,
+      role: "base",
+      title: "RELIEVE",
+      visible: false,
+      zIndex: 3,
+    });
+
+    expect(
+      listLocalBaseMapLayers([relief, map, image]).map((layer) => layer.title),
+    ).toEqual(["IMAGEN", "MAPA", "RELIEVE"]);
+  });
+
+  it("migrates legacy preferences to a stable id and fails closed safely", () => {
+    const image = makeMapLayer({
+      layerId: 10,
+      role: "base",
+      title: "IMAGEN",
+      visible: true,
+      zIndex: 1,
+    });
+    const map = makeMapLayer({
+      layerId: 11,
+      role: "base",
+      title: "MAPA",
+      visible: false,
+      zIndex: 2,
+    });
+    const relief = makeMapLayer({
+      layerId: 12,
+      role: "base",
+      title: "RELIEVE",
+      visible: false,
+      zIndex: 3,
+    });
+    const shuffled = [relief, image, map];
+
+    expect(
+      resolveLocalBaseMapLayerId(
+        shuffled,
+        parseStoredMapBaseLayerPreference({ baseLayer: "street" }),
+      ),
+    ).toBe(image.layerId);
+    expect(
+      resolveLocalBaseMapLayerId(
+        shuffled,
+        parseStoredMapBaseLayerPreference({ baseLayer: "topographic" }),
+      ),
+    ).toBe(map.layerId);
+    expect(
+      resolveLocalBaseMapLayerId(
+        shuffled,
+        parseStoredMapBaseLayerPreference({ baseLayerId: relief.layerId }),
+      ),
+    ).toBe(relief.layerId);
+    expect(resolveLocalBaseMapLayerId(shuffled, 999)).toBe(image.layerId);
+    expect(resolveLocalBaseMapLayerId(shuffled, null)).toBeNull();
+    expect(
+      parseStoredMapBaseLayerPreference({
+        baseLayerId: "11",
+        baseLayer: "topographic",
+      }),
+    ).toBeUndefined();
+    expect(
+      serializeMapBaseLayerPreference("topographic", map.layerId, false),
+    ).toEqual({ baseLayer: "topographic" });
+    expect(
+      serializeMapBaseLayerPreference("topographic", map.layerId, true),
+    ).toEqual({ baseLayerId: map.layerId });
+  });
+
+  it("makes a selected base exclusive without changing overlay controls", () => {
+    const bases = [10, 11, 12].map((layerId, index) =>
+      makeMapLayer({
+        layerId,
+        role: "base",
+        visible: layerId === 10,
+        zIndex: index + 1,
+      }),
+    );
+    const overlay = makeMapLayer({
+      layerId: 20,
+      role: "overlay",
+      visible: true,
+      zIndex: 4,
+    });
+    const preferences = {
+      layers: Object.fromEntries(
+        [...bases, overlay].map((layer) => [
+          String(layer.layerId),
+          {
+            opacity: layer.opacity,
+            styleId: layer.styleId,
+            visible: layer.visible,
+          },
+        ]),
+      ),
+      stackOrder: [...bases, overlay].map((layer) => layer.layerId),
+    };
+
+    const selected = applyLocalBaseMapSelection(
+      [overlay, ...bases],
+      preferences,
+      12,
+    );
+    expect(selected.layers["10"].visible).toBe(false);
+    expect(selected.layers["11"].visible).toBe(false);
+    expect(selected.layers["12"].visible).toBe(true);
+    expect(selected.layers["20"].visible).toBe(true);
+
+    const withoutBackground = applyLocalBaseMapSelection(
+      [overlay, ...bases],
+      selected,
+      null,
+    );
+    expect(
+      bases.every(
+        (layer) =>
+          withoutBackground.layers[String(layer.layerId)].visible === false,
+      ),
+    ).toBe(true);
+    expect(withoutBackground.layers["20"].visible).toBe(true);
+  });
+});
 
 describe("reference catalog integrity and hierarchy", () => {
   it("fails closed when snapshot counts differ from the returned arrays", () => {
@@ -172,12 +412,15 @@ describe("reference catalog integrity and hierarchy", () => {
 });
 
 describe("approved SIUR delivery descriptors", () => {
-  it("falls back to the first allowed numeric style and builds only internal paths", () => {
+  it("normalizes the style preference but rejects a backend-declared incomplete delivery", () => {
     const group = makeLayer({
       id: 1,
       node_type: "group",
       source_key: "group:planning",
       title: "Planeamiento",
+      mirror_status: "not_applicable",
+      active_version_id: null,
+      active_generation: null,
     });
     const layer = makeLayer({
       id: 2,
@@ -208,13 +451,97 @@ describe("approved SIUR delivery descriptors", () => {
 
     expect(preferences.layers["2"].styleId).toBe(12);
     expect(preferences.stackOrder).toEqual([2]);
+    expect(referenceLayerBlocker(catalog, layer)).toBe("style_unsupported");
+    expect(descriptors).toEqual([]);
+  });
+
+  it("builds only internal paths for complete active local style coverage", () => {
+    const layer = makeLayer({
+      id: 2,
+      service_id: 8,
+      available_style_ids: [12],
+      effective_visible: true,
+      effective_opacity: 0.65,
+      source_substitution_attribution:
+        "Obra derivada de PNOA 2020 CC-BY 4.0 scne.es",
+      source_substitution_status: "exact",
+      source_substitution_scope: "active_delivery",
+      source_substitution_content_sha256: "a".repeat(64),
+    });
+    const catalog = makeCatalog(
+      [layer],
+      [makeStyle({ id: 12, is_default: true, title: "Verificado" })],
+    );
+    const preferences = reconcileSiurPreferences(catalog, {
+      layers: {
+        "2": { visible: true, opacity: 0.4, styleId: 12 },
+      },
+      stackOrder: [2],
+    });
+
+    const descriptors = buildSiurMapLayers(catalog, preferences);
+
     expect(descriptors).toHaveLength(1);
     expect(descriptors[0].tileUrl).toBe(
-      "/api/organizations/7/reference-layers/2/tiles/{z}/{x}/{y}.png?style_id=12",
+      "/api/organizations/7/reference-layers/2/tiles/{z}/{x}/{y}.png?style_id=12&version_id=21&generation=1",
     );
-    expect(descriptors[0].attribution).toContain("&lt;script&gt;");
-    expect(descriptors[0].attribution).not.toContain("<script>");
+    expect(descriptors[0].attribution).toBe(
+      "Obra derivada de PNOA 2020 CC-BY 4.0 scne.es",
+    );
     expect(() => buildReferenceTileUrl(7, 2, -1)).toThrow(TypeError);
+    expect(buildReferenceTileUrl(7, 2, 12, 21, 4)).toBe(
+      "/api/organizations/7/reference-layers/2/tiles/{z}/{x}/{y}.png?style_id=12&version_id=21&generation=4",
+    );
+    expect(() => buildReferenceTileUrl(7, 2, 12, 21, null)).toThrow(
+      TypeError,
+    );
+    expect(buildReferenceMetadataUrl(7, 2)).toBe(
+      "/api/organizations/7/reference-layers/2/metadata.json",
+    );
+    expect(() => buildReferenceMetadataUrl(0, 2)).toThrow(TypeError);
+  });
+
+  it("rejects locally active layers with only partial style coverage", () => {
+    const layer = makeLayer({
+      id: 2,
+      service_id: 8,
+      available_style_ids: [11],
+      delivery_available: true,
+      delivery_blocker: "style_unsupported",
+    });
+    const catalog = makeCatalog(
+      [layer],
+      [
+        makeStyle({ id: 11, is_default: true, title: "Principal" }),
+        makeStyle({ id: 12, sort_order: 2, title: "Alternativo" }),
+      ],
+    );
+    const preferences = reconcileSiurPreferences(catalog);
+
+    expect(referenceLayerBlocker(catalog, layer)).toBe(
+      "style_coverage_incomplete",
+    );
+    expect(buildSiurMapLayers(catalog, preferences)).toEqual([]);
+  });
+
+  it("does not turn an attested remote proxy into a map descriptor", () => {
+    const layer = makeLayer({
+      id: 2,
+      service_id: 8,
+      delivery_available: true,
+      mirror_status: "legacy",
+      active_version_id: null,
+      active_generation: null,
+    });
+    const catalog = makeCatalog([layer]);
+    const preferences = reconcileSiurPreferences(catalog);
+    const descriptors = buildSiurMapLayers(catalog, preferences);
+
+    expect(referenceLayerBlocker(catalog, layer)).toBe(
+      "local_delivery_not_active",
+    );
+    expect(descriptors).toEqual([]);
+    expect(selectTopIdentifyLayer(descriptors, 8, 42, -4)).toBeNull();
   });
 
   it("uses only the top visible queryable layer within zoom and bounds", () => {
@@ -253,14 +580,18 @@ describe("approved SIUR delivery descriptors", () => {
     expect([...query.keys()].sort()).toEqual(
       [
         "feature_count",
+        "generation",
         "pixel_x",
         "pixel_y",
         "style_id",
+        "version_id",
         "x",
         "y",
         "z",
       ].sort(),
     );
+    expect(query.get("version_id")).toBe("1");
+    expect(query.get("generation")).toBe("1");
     for (const forbidden of [
       "bbox",
       "crs",

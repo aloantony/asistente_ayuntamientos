@@ -1,0 +1,96 @@
+# Proxy inverso de producción. Ver ADR-031.
+#
+# Un único hostname sirve el frontend en / y la API bajo /api. No es una
+# preferencia estética, son dos restricciones:
+#
+#   1. La cookie de sesión es httpOnly, SameSite=Lax y sin Domain, así que
+#      frontend y API tienen que compartir host (ADR-010).
+#   2. La API no puede vivir en la raíz: el backend sirve /admin/users,
+#      /admin/roles, /admin/groups y /admin/permissions, y el frontend sirve las
+#      páginas /admin, /admin/usuarios, /admin/grupos y /admin/roles.
+#      /admin/roles colisiona literalmente.
+#
+# Variables de entorno que hay que definir (docker-compose.prod.yml las pasa):
+#   PUBLIC_HOSTNAME  hostname canónico, con www: www.miconcejo.es
+#   APEX_HOSTNAME    dominio a secas, que redirige al canónico: miconcejo.es
+#   ACME_EMAIL       correo para los avisos de Let's Encrypt
+
+{
+	email {$ACME_EMAIL}
+	# Descomentar para probar sin gastar cupo de Let's Encrypt:
+	# acme_ca https://acme-staging-v02.api.letsencrypt.org/directory
+}
+
+# El canónico es www (PUBLIC_HOSTNAME=www.miconcejo.es) y el dominio a secas
+# redirige. Ambos tienen que resolver a este servidor: Caddy necesita validar los
+# dos para emitir sus certificados.
+{$APEX_HOSTNAME} {
+	redir https://{$PUBLIC_HOSTNAME}{uri} permanent
+}
+
+{$PUBLIC_HOSTNAME} {
+	encode zstd gzip
+
+	# Tope de cuerpo en el borde. El límite de 25 MiB de la aplicación se aplica
+	# mientras escribe el fichero, pero Starlette ya ha volcado el multipart
+	# completo a /tmp antes de que corra el handler: sin este corte, una sesión
+	# válida puede llenar el disco.
+	request_body {
+		max_size 30MB
+	}
+
+	header {
+		# HSTS: un año. Añadir preload solo cuando el dominio esté estable.
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		X-Content-Type-Options "nosniff"
+		X-Frame-Options "DENY"
+		Referrer-Policy "strict-origin-when-cross-origin"
+		# El micrófono se usa para el modo voz; cámara y geolocalización no.
+		Permissions-Policy "microphone=(self), camera=(), geolocation=()"
+		# No revelar el servidor.
+		-Server
+	}
+
+	# --- API -----------------------------------------------------------------
+	# handle_path elimina el prefijo /api antes de reenviar, que es el montaje
+	# canónico documentado por FastAPI: el backend arranca con --root-path /api
+	# para que sus redirecciones no pierdan el prefijo.
+	handle_path /api/* {
+		header {
+			# Las respuestas de la API no son documentos navegables. Neutraliza
+			# cualquier fichero subido que se sirviera con un tipo ejecutable,
+			# como segunda capa sobre el Content-Disposition del backend.
+			Content-Security-Policy "default-src 'none'; sandbox; frame-ancestors 'none'"
+			# El asistente responde por SSE: nada de buffering.
+			-X-Powered-By
+		}
+		reverse_proxy backend:8000 {
+			# Sin esto el limitador de login vería la IP de Caddy para todos y
+			# la traza de seguridad registraría siempre la misma dirección.
+			header_up X-Forwarded-For {remote_host}
+			header_up X-Real-IP {remote_host}
+			flush_interval -1
+		}
+	}
+
+	# --- Frontend ------------------------------------------------------------
+	handle {
+		header {
+			# script-src necesita 'unsafe-inline': Next.js App Router inyecta
+			# scripts inline para hidratar y el script de tema de layout.tsx
+			# también es inline. Apretar esto a CSP con nonce exige un
+			# frontend/middleware.ts y queda como deuda registrada en ADR-032.
+			#
+			# img-src incluye las teselas de OpenStreetMap que carga Leaflet en
+			# MunicipalMap.tsx. Las tipografías IBM Plex las sirve next/font
+			# desde nuestro propio host, así que font-src 'self' basta.
+			Content-Security-Policy "default-src 'self'; base-uri 'self'; object-src 'none'; frame-ancestors 'none'; form-action 'self'; img-src 'self' data: blob: https://*.tile.openstreetmap.org; font-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline'; connect-src 'self'; media-src 'self' blob:; worker-src 'self' blob:; upgrade-insecure-requests"
+		}
+		reverse_proxy frontend:3000
+	}
+
+	log {
+		output stderr
+		format console
+	}
+}

@@ -36,6 +36,7 @@ All AI egress continues through the internal gateway. Contractually approved ext
 - `Document`: uploaded file linked to an organization and a project.
 - `Requirement`: structured functional or product need linked to an organization and optionally to a project.
 - `Ordinance`: structured municipal ordinance linked to a municipality and optionally to a document.
+- `MunicipalProfile` and `MunicipalBlock`: an organization's editable town hall chrome — display name, shield and weather switch, plus a generic parent/position block tree that currently holds the configurable municipal menu.
 - `User`, `Group`, `Role`, `Permission`: access control model used to assign capabilities to people and groups.
 
 ## 5. Implemented modules
@@ -49,6 +50,7 @@ All AI egress continues through the internal gateway. Contractually approved ext
 - Requirements: structured intake for needs, product ideas and stakeholder requests.
 - Municipalities: global reference data for real-world municipalities.
 - Ordinances: structured ordinance records linked to municipalities and optionally documents.
+- Configurable town hall bar (`/ayuntamiento`): on top of the municipal workspace, each organization sets the display name, uploads its shield by dropping an image on it, enables a block with today's temperature and defines its own sections — created, renamed, reordered by drag and drop and deleted — which appear as tabs beside the fixed areas. Section content is not implemented yet. Gated by `town_hall.view`, `town_hall.edit` and `town_hall.manage`. See ADR-034.
 - Ordinance import and comparison: official-source import jobs run through a Redis/RQ worker, create pending-review ordinances, split legal text into reviewable/vectorized chunks and expose a thematic comparison matrix between municipalities.
 - AI Requirements Intake Assistant: Anacleto is a model-first Spanish assistant that captures stakeholder needs as draft requirements. It streams web turns over SSE, calls the configured LLM runtime only through the Privacy/AI Gateway (`app/assistant/gateway.py`) and executes tools with the calling user's RBAC permissions. Requirements are always created as drafts with `source_type=conversation`, `create_requirement` requires a later human confirmation turn, and every tool call leaves an auditable JSON trail. Conversations are private to their author. Gated by the `assistant.use` permission; disabled (503) unless the selected runtime is configured.
 - The capability-parity scope, security gates and phased delivery plan for web reading, attachments, code/data analysis, images, connectors, browser automation and durable agents are maintained in [docs/herramientas-asistente.md](docs/herramientas-asistente.md).
@@ -80,6 +82,8 @@ Documents are stored on our own server in the current architecture. They are not
 `DOCUMENT_STORAGE_ROOT` controls the filesystem path used by the backend to store uploaded files. In Docker Compose, the `document_storage` volume is mounted at `/var/lib/asistente_ayuntamientos/documents`, which is the default path configured in `.env.example`.
 
 The `document_storage` Docker volume persists uploaded files across container rebuilds and restarts. PostgreSQL stores metadata only, not raw file bytes.
+
+Municipal shields share this volume under `organizations/<id>/brand/`, capped by `MUNICIPAL_SHIELD_MAX_UPLOAD_BYTES` (2 MiB by default) and restricted to images. They deliberately bypass the `Document` model, which requires a project.
 
 ## 8. Local development setup
 
@@ -249,7 +253,7 @@ Run the backend test suite (PostgreSQL test database, fully isolated from dev da
 
 ```bash
 docker compose run --rm -T -v "$(pwd)/backend:/app" backend \
-  sh -c "pip install -q -r requirements-dev.txt && python -m pytest tests/ -q"
+  sh -c "pip install -q -r requirements-dev.txt && python -m pytest tests/ -q -o cache_dir=/tmp/pytest_cache"
 ```
 
 The runtime backend image intentionally does not include `pytest`; the command
@@ -258,17 +262,68 @@ above installs dev-only dependencies in a disposable container. Unless
 `app_test_<uuid>` database and drops it after the run. Custom test databases
 must keep an `app_test` prefix.
 
-## 10. Operational cautions
+## 10. Production deployment
 
-- Never commit `.env`.
+The public deployment serves the frontend at `/` and the API under `/api` behind a
+single hostname, with Caddy terminating TLS. Two facts force that shape: the
+session cookie is `httpOnly`, `SameSite=Lax` and carries no `Domain`, so frontend
+and API must share a host (ADR-010); and the API cannot live at the root because
+the backend serves `/admin/roles`, `/admin/users`, `/admin/groups` and
+`/admin/permissions` while the frontend serves the pages `/admin`,
+`/admin/usuarios`, `/admin/grupos` and `/admin/roles` — `/admin/roles` collides.
+
+Full runbook (server hardening, DNS, secrets, bootstrap retirement, backups and
+restore drill): `docs/despliegue.md`. Decisions: ADR-035 (topology and TLS),
+ADR-036 (hardening), ADR-037 (backups). Data-protection posture and the gates that
+remain open before widening the pilot: `docs/proteccion-datos.md`.
+
+Production runs from a separate Compose file, so the local development workflow in
+section 8 is unchanged:
+
+```bash
+docker compose --env-file .env.production -f docker-compose.prod.yml up -d --build
+docker compose --env-file .env.production -f docker-compose.prod.yml exec backend alembic upgrade head
+```
+
+`.env.production.example` is the documented template; the real file lives only on
+the server, owned by root with mode 0600, and is gitignored. The backend refuses to
+boot in production with the placeholder `SECRET_KEY`, with non-https CORS origins,
+or with `ALLOWED_HOSTS=*`.
+
+`NEXT_PUBLIC_API_BASE_URL` is baked into the browser bundle at build time, so
+changing the domain requires rebuilding the frontend image.
+
+Backups and restore:
+
+```bash
+sudo ops/backup.sh                                  # nightly via systemd timer
+sudo ops/restore.sh --list
+sudo ops/restore.sh --from daily/<stamp>             # drill: restores to a scratch DB
+sudo ops/restore.sh --from daily/<stamp> --production --with-documents
+```
+
+Backups stay on the server, so the VPS provider's snapshots must be enabled — they
+are the only copy off the machine (ADR-037).
+
+Production shares the VPS with development (ADR-035), which imposes two operational
+rules on **everyone working on this machine**: never `down` the production stack
+(use `stop`/`start`, so its containers keep referencing their volumes), and never
+run `docker system prune -a --volumes` (use `docker builder prune`, which is where
+the reclaimable space actually is). Details in `docs/despliegue.md` §7 bis.
+
+## 11. Operational cautions
+
+- Never commit `.env` or `.env.production`.
 - Do not use `docker compose down -v` unless intentionally deleting volumes.
 - `document_storage` contains uploaded files and must be treated as persistent user data.
 - Run migrations after pulling backend changes that include Alembic or model updates.
-- Keep backend and frontend bound to localhost unless deployment is intentionally changed.
-- Do not expose PostgreSQL or Redis publicly.
+- In local development keep backend and frontend bound to localhost.
+- Never publish PostgreSQL or Redis; in production they sit on an internal network with no published ports.
+- Containers run as non-root. Reusing an existing `document_storage` volume needs a one-time `chown` to uid 10001 (see `docs/despliegue.md`); never delete the volume.
+- Retire `BOOTSTRAP_ADMIN_TOKEN` from the environment file once the first superuser exists.
 - Avoid destructive database or storage actions unless the data loss is intentional and understood.
 
-## 11. Current roadmap
+## 12. Current roadmap
 
 The roadmap follows the transition from the current supervised assistant to the product defined in `docs/vision-producto.md`:
 
@@ -281,7 +336,7 @@ The roadmap follows the transition from the current supervised assistant to the 
 - Build the anonymized improvement network and central fleet control plane.
 - Add owned model runtimes and a separate citizen assistant only in later phases.
 
-## 12. Developer handoff checklist
+## 13. Developer handoff checklist
 
 ```bash
 git pull

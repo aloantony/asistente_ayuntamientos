@@ -2,6 +2,11 @@ import { adminRequest, API_BASE_URL } from "./api";
 
 const SIUR_PROVIDER_KEY = "siur";
 const TILE_SIZE = 256;
+const LOCALLY_SERVING_MIRROR_STATUSES = new Set([
+  "active",
+  "serving_previous",
+  "syncing",
+]);
 
 export type ReferenceCatalogSnapshot = {
   id: number;
@@ -52,6 +57,37 @@ export type ReferenceLayer = {
   available_style_ids: number[];
   legend_available: boolean;
   metadata_available: boolean;
+  source_substitution_status:
+    | "exact"
+    | "substitute_degraded"
+    | "blocked"
+    | "invalid"
+    | null;
+  source_substitution_notice: string | null;
+  source_substitution_selected_layer: string | null;
+  source_substitution_profile: string | null;
+  source_substitution_scope: "candidate" | "active_delivery" | null;
+  source_substitution_attribution: string | null;
+  source_substitution_content_sha256: string | null;
+  mirror_status:
+    | "not_applicable"
+    | "legacy"
+    | "pending"
+    | "syncing"
+    | "active"
+    | "serving_previous"
+    | "error"
+    | "disabled";
+  active_version_id: number | null;
+  active_generation: number | null;
+  active_source_version: string | null;
+  active_reference_at: string | null;
+  active_created_at: string | null;
+  last_run_status: string | null;
+  last_checked_at: string | null;
+  last_sync_error_code: string | null;
+  last_sync_error_summary: string | null;
+  next_check_at: string | null;
   status: string;
   updated_at: string;
 };
@@ -108,6 +144,9 @@ export type SiurMapPreferences = {
 export type SiurMapLayer = {
   organizationId: number;
   layerId: number;
+  versionId: number;
+  generation: number;
+  role: string | null;
   title: string;
   tileUrl: string;
   styleId: number | null;
@@ -120,6 +159,14 @@ export type SiurMapLayer = {
   identifyAvailable: boolean;
   zIndex: number;
 };
+
+export type LegacyMapBaseLayerPreference = "street" | "topographic";
+
+export type StoredMapBaseLayerPreference =
+  | number
+  | null
+  | LegacyMapBaseLayerPreference
+  | undefined;
 
 export type SiurIdentifyPoint = {
   layer: SiurMapLayer;
@@ -162,11 +209,30 @@ function requireNonNegativeInteger(value: number, label: string) {
   return value;
 }
 
-function optionalStyleQuery(styleId: number | null | undefined) {
-  if (styleId == null) {
-    return "";
+function referenceDeliveryQuery(
+  styleId: number | null | undefined,
+  versionId?: number | null,
+  generation?: number | null,
+) {
+  if ((versionId == null) !== (generation == null)) {
+    throw new TypeError("versionId and generation must be provided together");
   }
-  return `?style_id=${requirePositiveInteger(styleId, "styleId")}`;
+  const query = new URLSearchParams();
+  if (styleId != null) {
+    query.set("style_id", String(requirePositiveInteger(styleId, "styleId")));
+  }
+  if (versionId != null && generation != null) {
+    query.set(
+      "version_id",
+      String(requirePositiveInteger(versionId, "versionId")),
+    );
+    query.set(
+      "generation",
+      String(requirePositiveInteger(generation, "generation")),
+    );
+  }
+  const encoded = query.toString();
+  return encoded ? `?${encoded}` : "";
 }
 
 function compareCatalogOrder(
@@ -235,17 +301,59 @@ export function validateReferenceCatalog(
   }
 
   for (const layer of catalog.layers) {
+    const availableStyleIds = new Set<number>();
+    const hasSubstitution = layer.source_substitution_status !== null;
+    if (
+      hasSubstitution !== (layer.source_substitution_scope !== null) ||
+      (layer.source_substitution_scope === "candidate" &&
+        layer.source_substitution_content_sha256 !== null) ||
+      (layer.source_substitution_scope === "active_delivery" &&
+        (layer.active_version_id === null ||
+          layer.source_substitution_content_sha256 === null ||
+          !/^[0-9a-f]{64}$/.test(
+            layer.source_substitution_content_sha256,
+          ))) ||
+      ((layer.source_substitution_status === "exact" ||
+        layer.source_substitution_status === "substitute_degraded") &&
+        !layer.source_substitution_attribution)
+    ) {
+      throw new ReferenceCatalogIntegrityError(
+        "La clasificación de la sustitución no corresponde a los bytes anunciados.",
+      );
+    }
+    if (
+      (layer.node_type === "group" && layer.mirror_status !== "not_applicable") ||
+      (layer.node_type === "layer" && layer.mirror_status === "not_applicable")
+    ) {
+      throw new ReferenceCatalogIntegrityError(
+        "El estado del espejo local no corresponde al tipo de nodo SIUR.",
+      );
+    }
+    if (
+      (layer.active_version_id === null) !==
+        (layer.active_generation === null) ||
+      (layer.active_version_id !== null &&
+        (!Number.isInteger(layer.active_version_id) ||
+          layer.active_version_id < 1 ||
+          !Number.isInteger(layer.active_generation) ||
+          (layer.active_generation ?? 0) < 1))
+    ) {
+      throw new ReferenceCatalogIntegrityError(
+        "La versión activa del espejo local no es coherente.",
+      );
+    }
     if (layer.service_id !== null && !serviceIds.has(layer.service_id)) {
       throw new ReferenceCatalogIntegrityError(
         "Una capa SIUR referencia un servicio ausente.",
       );
     }
     for (const styleId of layer.available_style_ids) {
-      if (!styleIds.has(styleId)) {
+      if (availableStyleIds.has(styleId) || !styleIds.has(styleId)) {
         throw new ReferenceCatalogIntegrityError(
-          "Una capa SIUR anuncia un estilo interno ausente.",
+          "Una capa SIUR anuncia un estilo interno ausente o duplicado.",
         );
       }
+      availableStyleIds.add(styleId);
     }
   }
   const layersById = new Map(catalog.layers.map((layer) => [layer.id, layer]));
@@ -295,11 +403,17 @@ export function buildReferenceTileUrl(
   organizationId: number,
   layerId: number,
   styleId?: number | null,
+  versionId?: number | null,
+  generation?: number | null,
 ) {
   return (
     `${API_BASE_URL}/organizations/${requirePositiveInteger(organizationId, "organizationId")}` +
     `/reference-layers/${requirePositiveInteger(layerId, "layerId")}` +
-    `/tiles/{z}/{x}/{y}.png${optionalStyleQuery(styleId)}`
+    `/tiles/{z}/{x}/{y}.png${referenceDeliveryQuery(
+      styleId,
+      versionId,
+      generation,
+    )}`
   );
 }
 
@@ -307,11 +421,24 @@ export function buildReferenceLegendUrl(
   organizationId: number,
   layerId: number,
   styleId?: number | null,
+  versionId?: number | null,
+  generation?: number | null,
 ) {
   return (
     `${API_BASE_URL}/organizations/${requirePositiveInteger(organizationId, "organizationId")}` +
     `/reference-layers/${requirePositiveInteger(layerId, "layerId")}` +
-    `/legend.png${optionalStyleQuery(styleId)}`
+    `/legend.png${referenceDeliveryQuery(styleId, versionId, generation)}`
+  );
+}
+
+export function buildReferenceMetadataUrl(
+  organizationId: number,
+  layerId: number,
+) {
+  return (
+    `${API_BASE_URL}/organizations/${requirePositiveInteger(organizationId, "organizationId")}` +
+    `/reference-layers/${requirePositiveInteger(layerId, "layerId")}` +
+    "/metadata.json"
   );
 }
 
@@ -334,6 +461,14 @@ export function buildReferenceIdentifyPath(point: SiurIdentifyPoint) {
       String(requirePositiveInteger(layer.styleId, "styleId")),
     );
   }
+  query.set(
+    "version_id",
+    String(requirePositiveInteger(layer.versionId, "versionId")),
+  );
+  query.set(
+    "generation",
+    String(requirePositiveInteger(layer.generation, "generation")),
+  );
   return (
     `/organizations/${requirePositiveInteger(layer.organizationId, "organizationId")}` +
     `/reference-layers/${requirePositiveInteger(layer.layerId, "layerId")}` +
@@ -507,14 +642,28 @@ export function referenceLayerBlocker(
   if (layer.status !== "active" && layer.status !== "degraded") {
     return layer.status;
   }
-  if (
-    !layer.delivery_available &&
-    !(
-      layer.delivery_blocker === "style_unsupported" &&
-      availableStylesForLayer(catalog, layer).length > 0
-    )
-  ) {
+  if (!layer.delivery_available) {
     return layer.delivery_blocker ?? "not_deliverable";
+  }
+  if (
+    layer.active_version_id === null ||
+    layer.active_generation === null ||
+    !LOCALLY_SERVING_MIRROR_STATUSES.has(layer.mirror_status)
+  ) {
+    return "local_delivery_not_active";
+  }
+  const availableStyleIds = new Set(layer.available_style_ids);
+  const hasIncompleteStyleCoverage = catalog.styles.some(
+    (style) =>
+      style.layer_id === layer.id &&
+      (style.status === "active" || style.status === "degraded") &&
+      !availableStyleIds.has(style.id),
+  );
+  if (hasIncompleteStyleCoverage) {
+    return "style_coverage_incomplete";
+  }
+  if (layer.delivery_blocker) {
+    return layer.delivery_blocker;
   }
   return null;
 }
@@ -629,17 +778,31 @@ export function buildSiurMapLayers(
       return;
     }
     const attribution =
-      layer.service_id === null
+      (layer.source_substitution_scope === "active_delivery"
+        ? layer.source_substitution_attribution
+        : null) ??
+      (layer.service_id === null
         ? null
-        : (servicesById.get(layer.service_id)?.attribution ?? null);
+        : (servicesById.get(layer.service_id)?.attribution ?? null));
     result.push({
       organizationId,
       layerId: layer.id,
+      versionId: requirePositiveInteger(
+        layer.active_version_id ?? 0,
+        "versionId",
+      ),
+      generation: requirePositiveInteger(
+        layer.active_generation ?? 0,
+        "generation",
+      ),
+      role: layer.role,
       title: layer.title,
       tileUrl: buildReferenceTileUrl(
         organizationId,
         layer.id,
         validStyleId,
+        layer.active_version_id,
+        layer.active_generation,
       ),
       styleId: validStyleId,
       attribution: attribution ? escapeLeafletAttribution(attribution) : null,
@@ -653,6 +816,146 @@ export function buildSiurMapLayers(
     });
   });
   return result;
+}
+
+function isLocalReferenceTileLayer(layer: SiurMapLayer) {
+  try {
+    return (
+      layer.tileUrl ===
+      buildReferenceTileUrl(
+        layer.organizationId,
+        layer.layerId,
+        layer.styleId,
+        layer.versionId,
+        layer.generation,
+      )
+    );
+  } catch {
+    return false;
+  }
+}
+
+export function listLocalBaseMapLayers(layers: SiurMapLayer[]) {
+  return layers
+    .filter(
+      (layer) =>
+        layer.role === "base" &&
+        layer.opacity > 0 &&
+        isLocalReferenceTileLayer(layer),
+    )
+    .sort(
+      (left, right) =>
+        left.zIndex - right.zIndex || left.layerId - right.layerId,
+    );
+}
+
+export function parseStoredMapBaseLayerPreference(
+  preferences: unknown,
+): StoredMapBaseLayerPreference {
+  if (
+    !preferences ||
+    typeof preferences !== "object" ||
+    Array.isArray(preferences)
+  ) {
+    return undefined;
+  }
+  const record = preferences as Record<string, unknown>;
+  if (Object.prototype.hasOwnProperty.call(record, "baseLayerId")) {
+    if (record.baseLayerId === null) {
+      return null;
+    }
+    return Number.isInteger(record.baseLayerId) &&
+      (record.baseLayerId as number) > 0
+      ? (record.baseLayerId as number)
+      : undefined;
+  }
+  return record.baseLayer === "street" || record.baseLayer === "topographic"
+    ? record.baseLayer
+    : undefined;
+}
+
+export function resolveLocalBaseMapLayerId(
+  layers: SiurMapLayer[],
+  preference: StoredMapBaseLayerPreference,
+) {
+  const candidates = listLocalBaseMapLayers(layers);
+  const defaultCandidate =
+    candidates.find((layer) => layer.visible) ?? candidates[0] ?? null;
+  if (preference === null) {
+    return null;
+  }
+  if (typeof preference === "number") {
+    return candidates.some((layer) => layer.layerId === preference)
+      ? preference
+      : defaultCandidate?.layerId ?? null;
+  }
+  if (preference === "street" || preference === "topographic") {
+    const legacyIndex = preference === "topographic" ? 1 : 0;
+    return candidates[legacyIndex]?.layerId ?? defaultCandidate?.layerId ?? null;
+  }
+  return defaultCandidate?.layerId ?? null;
+}
+
+export function serializeMapBaseLayerPreference(
+  preference: StoredMapBaseLayerPreference,
+  resolvedLayerId: number | null,
+  resolved: boolean,
+): {
+  baseLayerId?: number | null;
+  baseLayer?: LegacyMapBaseLayerPreference;
+} {
+  if (resolved) {
+    return { baseLayerId: resolvedLayerId };
+  }
+  if (preference === "street" || preference === "topographic") {
+    return { baseLayer: preference };
+  }
+  if (preference === null || typeof preference === "number") {
+    return { baseLayerId: preference };
+  }
+  return {};
+}
+
+export function applyLocalBaseMapSelection(
+  layers: SiurMapLayer[],
+  preferences: SiurMapPreferences,
+  selectedLayerId: number | null,
+) {
+  const candidates = listLocalBaseMapLayers(layers);
+  const candidateIds = new Set(candidates.map((layer) => layer.layerId));
+  const validSelectedLayerId =
+    selectedLayerId !== null && candidateIds.has(selectedLayerId)
+      ? selectedLayerId
+      : null;
+  let changed = false;
+  const nextLayers = { ...preferences.layers };
+  for (const layerId of candidateIds) {
+    const key = String(layerId);
+    const control = preferences.layers[key];
+    if (!control) {
+      continue;
+    }
+    const visible = layerId === validSelectedLayerId;
+    if (control.visible !== visible) {
+      changed = true;
+      nextLayers[key] = { ...control, visible };
+    }
+  }
+  return changed ? { ...preferences, layers: nextLayers } : preferences;
+}
+
+export function selectLocalBaseMapLayer(
+  layers: SiurMapLayer[],
+  selectedLayerId: number | null,
+) {
+  if (selectedLayerId === null) {
+    return null;
+  }
+  return (
+    listLocalBaseMapLayers(layers).find(
+      (layer) => layer.layerId === selectedLayerId && layer.visible,
+    ) ?? null
+  );
 }
 
 export function selectTopIdentifyLayer(

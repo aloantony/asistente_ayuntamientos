@@ -6,7 +6,7 @@ import { visibleTopNavSections, type TopNavSection } from "../lib/topNav";
 import { TopBarWeather } from "./TopBarWeather";
 import styles from "./TopBar.module.css";
 
-// Barra superior institucional (ADR-034): escudo y nombre del municipio a la
+// Barra superior institucional (ADR-048): escudo y nombre del municipio a la
 // izquierda, navegación municipal fija en el centro y la temperatura a la
 // derecha, leída en vivo de Open-Meteo (ADR-038).
 

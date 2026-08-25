@@ -6,6 +6,7 @@ from urllib import request as urlrequest
 from xml.sax.saxutils import escape
 
 from app.core.config import settings
+from app.core.http import urlopen_without_redirects
 
 logger = logging.getLogger(__name__)
 
@@ -73,9 +74,25 @@ class NvidiaNimSpeechTranscriber:
             max_alternatives=1,
         )
 
+        # `future=True` devuelve el rendezvous de gRPC, que sí admite deadline y
+        # cancelación. La llamada síncrona no acepta timeout, así que sin esto
+        # una conexión colgada bloquearía el worker para siempre (ADR-036).
         try:
-            response = riva.client.ASRService(auth).offline_recognize(audio, config)
+            call = riva.client.ASRService(auth).offline_recognize(
+                audio,
+                config,
+                future=True,
+            )
         except Exception as exc:  # pragma: no cover - network/client specific
+            logger.warning("NVIDIA speech transcription failed", exc_info=True)
+            raise SpeechTranscriptionError("Speech transcription failed") from exc
+
+        try:
+            response = call.result(
+                timeout=settings.speech_transcription_timeout_seconds
+            )
+        except Exception as exc:  # pragma: no cover - network/client specific
+            call.cancel()
             logger.warning("NVIDIA speech transcription failed", exc_info=True)
             raise SpeechTranscriptionError("Speech transcription failed") from exc
 
@@ -112,7 +129,7 @@ class AzureSpeechSynthesizer:
             method="POST",
         )
         try:
-            with urlrequest.urlopen(
+            with urlopen_without_redirects(
                 request,
                 timeout=settings.speech_synthesis_timeout_seconds,
             ) as response:
@@ -194,7 +211,13 @@ def transcode_to_wav_pcm(audio: bytes) -> bytes:
             input=audio,
             capture_output=True,
             check=True,
+            timeout=settings.speech_transcode_timeout_seconds,
         )
+    except subprocess.TimeoutExpired as exc:
+        # Un audio malformado puede dejar ffmpeg atascado; sin timeout eso
+        # inmoviliza el único worker de uvicorn (ADR-036).
+        logger.warning("Audio transcoding timed out")
+        raise SpeechTranscriptionError("Audio transcoding timed out") from exc
     except (FileNotFoundError, subprocess.CalledProcessError) as exc:
         raise SpeechTranscriptionError("Audio format is not supported") from exc
     return completed.stdout

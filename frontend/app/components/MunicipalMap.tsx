@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import type {
   Circle,
   CircleMarker,
@@ -15,6 +15,7 @@ import type {
   TileLayer,
 } from "leaflet";
 import {
+  selectLocalBaseMapLayer,
   selectTopIdentifyLayer,
   tileCoordinatesForProjectedPoint,
   type SiurIdentifyPoint,
@@ -29,8 +30,6 @@ export type MapBounds = {
   west: number;
 };
 
-export type MapBaseLayer = "street" | "topographic";
-
 type MunicipalMapProps = {
   items: GeoMapItem[];
   focusLocation?: {
@@ -41,7 +40,7 @@ type MunicipalMapProps = {
   initialZoom?: number | null;
   selectedItemId?: string | null;
   markerColors?: Record<string, string>;
-  baseLayer?: MapBaseLayer;
+  baseLayerId?: number | null;
   fitRequest?: number;
   locateRequest?: number;
   areaSelectionEnabled?: boolean;
@@ -50,6 +49,8 @@ type MunicipalMapProps = {
   onAreaSelectionChange?: (bounds: MapBounds | null) => void;
   onLocationError?: (message: string) => void;
   onSiurIdentify?: (point: SiurIdentifyPoint) => void;
+  onSiurTileError?: (layerId: number, layerTitle: string) => void;
+  onSiurTileLoad?: (layerId: number) => void;
   onSelectItem: (item: GeoMapItem) => void;
   onMapContextMenu?: (payload: {
     latitude: number;
@@ -71,6 +72,7 @@ type SiurTileLayerRecord = {
   layer: TileLayer;
   signature: string;
   url: string;
+  errorNotified: boolean;
 };
 
 type AreaDragState = {
@@ -86,28 +88,6 @@ const FALLBACK_ZOOM = 12;
 const SINGLE_ITEM_ZOOM = 16;
 const MAX_MAP_ZOOM = 24;
 const AREA_DRAG_THRESHOLD = 4;
-
-const BASE_LAYERS: Record<
-  MapBaseLayer,
-  {
-    attribution: string;
-    maxNativeZoom: number;
-    url: string;
-  }
-> = {
-  street: {
-    attribution:
-      '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors',
-    maxNativeZoom: 19,
-    url: "https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png",
-  },
-  topographic: {
-    attribution:
-      'Map data: &copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors, SRTM | Map style: &copy; <a href="https://opentopomap.org">OpenTopoMap</a> (CC-BY-SA)',
-    maxNativeZoom: 17,
-    url: "https://{s}.tile.opentopomap.org/{z}/{x}/{y}.png",
-  },
-};
 
 function getItemKey(item: GeoMapItem) {
   return `${item.entity_type}-${item.entity_id}-${item.role}`;
@@ -388,7 +368,7 @@ function locationErrorMessage(error: LeafletLocationErrorEvent) {
 export function MunicipalMap({
   areaBounds,
   areaSelectionEnabled = false,
-  baseLayer = "street",
+  baseLayerId = null,
   fitRequest,
   focusLocation,
   initialZoom,
@@ -402,11 +382,19 @@ export function MunicipalMap({
   onMapContextMenu,
   onSelectItem,
   onSiurIdentify,
+  onSiurTileError,
+  onSiurTileLoad,
 }: MunicipalMapProps) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const mapRef = useRef<LeafletMap | null>(null);
   const leafletRef = useRef<LeafletModule | null>(null);
   const tileLayerRef = useRef<TileLayer | null>(null);
+  const baseTileLayerRecordRef = useRef<{
+    layerId: number;
+    signature: string;
+    url: string;
+    errorNotified: boolean;
+  } | null>(null);
   const siurTileLayersRef = useRef<Map<number, SiurTileLayerRecord>>(new Map());
   const markerRecordsRef = useRef<Map<string, MarkerRecord>>(new Map());
   const markerBoundsRef = useRef<LatLngBounds | null>(null);
@@ -421,6 +409,10 @@ export function MunicipalMap({
   const lastFitRequestRef = useRef<number | undefined>(fitRequest);
   const lastLocateRequestRef = useRef<number | undefined>(locateRequest);
   const [mapReady, setMapReady] = useState(false);
+  const selectedBaseMap = useMemo(
+    () => selectLocalBaseMapLayer(siurLayers, baseLayerId),
+    [baseLayerId, siurLayers],
+  );
 
   const focusLocationRef = useRef(focusLocation);
   const initialZoomRef = useRef(initialZoom);
@@ -433,6 +425,8 @@ export function MunicipalMap({
   const onMapContextMenuRef = useRef(onMapContextMenu);
   const onSelectItemRef = useRef(onSelectItem);
   const onSiurIdentifyRef = useRef(onSiurIdentify);
+  const onSiurTileErrorRef = useRef(onSiurTileError);
+  const onSiurTileLoadRef = useRef(onSiurTileLoad);
   const siurLayersRef = useRef(siurLayers);
 
   focusLocationRef.current = focusLocation;
@@ -446,6 +440,8 @@ export function MunicipalMap({
   onMapContextMenuRef.current = onMapContextMenu;
   onSelectItemRef.current = onSelectItem;
   onSiurIdentifyRef.current = onSiurIdentify;
+  onSiurTileErrorRef.current = onSiurTileError;
+  onSiurTileLoadRef.current = onSiurTileLoad;
   siurLayersRef.current = siurLayers;
 
   const focusLatitude = focusLocation?.latitude;
@@ -717,6 +713,7 @@ export function MunicipalMap({
       mapRef.current = null;
       leafletRef.current = null;
       tileLayerRef.current = null;
+      baseTileLayerRecordRef.current = null;
       siurTileLayers.clear();
       markerRecords.clear();
       markerBoundsRef.current = null;
@@ -734,15 +731,71 @@ export function MunicipalMap({
       return;
     }
 
+    if (!selectedBaseMap) {
+      tileLayerRef.current?.remove();
+      tileLayerRef.current = null;
+      baseTileLayerRecordRef.current = null;
+      return;
+    }
+    const signature = JSON.stringify([
+      selectedBaseMap.layerId,
+      selectedBaseMap.attribution,
+      selectedBaseMap.minZoom,
+      selectedBaseMap.maxZoom,
+      selectedBaseMap.bounds,
+    ]);
+    const existing = baseTileLayerRecordRef.current;
+    if (
+      existing &&
+      tileLayerRef.current &&
+      existing.layerId === selectedBaseMap.layerId &&
+      existing.signature === signature
+    ) {
+      if (existing.url !== selectedBaseMap.tileUrl) {
+        tileLayerRef.current.setUrl(selectedBaseMap.tileUrl);
+        existing.url = selectedBaseMap.tileUrl;
+        existing.errorNotified = false;
+      }
+      return;
+    }
     tileLayerRef.current?.remove();
-    const config = BASE_LAYERS[baseLayer];
-    tileLayerRef.current = L.tileLayer(config.url, {
-      attribution: config.attribution,
-      maxNativeZoom: config.maxNativeZoom,
-      maxZoom: MAX_MAP_ZOOM,
-    }).addTo(map);
-    tileLayerRef.current.setZIndex(0);
-  }, [baseLayer, mapReady]);
+    tileLayerRef.current = null;
+    baseTileLayerRecordRef.current = null;
+    const bounds = selectedBaseMap.bounds
+      ? L.latLngBounds(
+          [selectedBaseMap.bounds.south, selectedBaseMap.bounds.west],
+          [selectedBaseMap.bounds.north, selectedBaseMap.bounds.east],
+        )
+      : undefined;
+    const tileLayer = L.tileLayer(selectedBaseMap.tileUrl, {
+      attribution: selectedBaseMap.attribution ?? undefined,
+      bounds,
+      maxZoom: selectedBaseMap.maxZoom ?? MAX_MAP_ZOOM,
+      minZoom: selectedBaseMap.minZoom ?? 0,
+    });
+    const record = {
+      layerId: selectedBaseMap.layerId,
+      signature,
+      url: selectedBaseMap.tileUrl,
+      errorNotified: false,
+    };
+    tileLayer.on("tileerror", () => {
+      if (!record.errorNotified) {
+        record.errorNotified = true;
+        onSiurTileErrorRef.current?.(
+          selectedBaseMap.layerId,
+          selectedBaseMap.title,
+        );
+      }
+    });
+    tileLayer.on("tileload", () => {
+      record.errorNotified = false;
+      onSiurTileLoadRef.current?.(selectedBaseMap.layerId);
+    });
+    tileLayerRef.current = tileLayer.addTo(map);
+    baseTileLayerRecordRef.current = record;
+    tileLayer.setZIndex(0);
+  }, [mapReady, selectedBaseMap]);
 
   useEffect(() => {
     const L = leafletRef.current;
@@ -751,7 +804,8 @@ export function MunicipalMap({
       return;
     }
 
-    const desiredIds = new Set(siurLayers.map((layer) => layer.layerId));
+    const overlayLayers = siurLayers.filter((layer) => layer.role !== "base");
+    const desiredIds = new Set(overlayLayers.map((layer) => layer.layerId));
     for (const [layerId, record] of siurTileLayersRef.current) {
       if (!desiredIds.has(layerId)) {
         record.layer.remove();
@@ -759,7 +813,7 @@ export function MunicipalMap({
       }
     }
 
-    for (const descriptor of siurLayers) {
+    for (const descriptor of overlayLayers) {
       const signature = JSON.stringify([
         descriptor.attribution,
         descriptor.minZoom,
@@ -779,22 +833,39 @@ export function MunicipalMap({
               [descriptor.bounds.north, descriptor.bounds.east],
             )
           : undefined;
+        const tileLayer = L.tileLayer(descriptor.tileUrl, {
+          attribution: descriptor.attribution ?? undefined,
+          bounds,
+          maxZoom: descriptor.maxZoom ?? MAX_MAP_ZOOM,
+          minZoom: descriptor.minZoom ?? 0,
+          opacity: descriptor.opacity,
+          pane: "siurPane",
+        });
         record = {
-          layer: L.tileLayer(descriptor.tileUrl, {
-            attribution: descriptor.attribution ?? undefined,
-            bounds,
-            maxZoom: descriptor.maxZoom ?? MAX_MAP_ZOOM,
-            minZoom: descriptor.minZoom ?? 0,
-            opacity: descriptor.opacity,
-            pane: "siurPane",
-          }),
+          layer: tileLayer,
           signature,
           url: descriptor.tileUrl,
+          errorNotified: false,
         };
+        const tileRecord = record;
+        tileLayer.on("tileerror", () => {
+          if (!tileRecord.errorNotified) {
+            tileRecord.errorNotified = true;
+            onSiurTileErrorRef.current?.(
+              descriptor.layerId,
+              descriptor.title,
+            );
+          }
+        });
+        tileLayer.on("tileload", () => {
+          tileRecord.errorNotified = false;
+          onSiurTileLoadRef.current?.(descriptor.layerId);
+        });
         siurTileLayersRef.current.set(descriptor.layerId, record);
       } else if (record.url !== descriptor.tileUrl) {
         record.layer.setUrl(descriptor.tileUrl);
         record.url = descriptor.tileUrl;
+        record.errorNotified = false;
       }
 
       record.layer.setOpacity(descriptor.opacity);
@@ -1089,6 +1160,11 @@ export function MunicipalMap({
         ref={containerRef}
         role="region"
       />
+      {!selectedBaseMap ? (
+        <p className="municipal-map-local-base-note" role="status">
+          Fondo cartográfico local pendiente de sincronización.
+        </p>
+      ) : null}
     </div>
   );
 }

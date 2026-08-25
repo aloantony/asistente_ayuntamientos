@@ -180,7 +180,17 @@ def catalog_delivery_availability(
     services: list[ReferenceService],
     layers: list[ReferenceLayer],
     styles: list[ReferenceLayerStyle],
+    enabled: bool,
 ) -> dict[int, LayerDeliveryAvailability]:
+    if not enabled:
+        return {
+            layer.id: _unavailable(
+                "remote_proxy_disabled"
+                if layer.node_type == "layer"
+                else None
+            )
+            for layer in layers
+        }
     services_by_id = {service.id: service for service in services}
     styles_by_layer: dict[int, list[ReferenceLayerStyle]] = {}
     for style in styles:

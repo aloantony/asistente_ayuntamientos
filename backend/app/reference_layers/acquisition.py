@@ -1,0 +1,8944 @@
+"""Fail-closed acquisition of immutable local reference-layer inputs.
+
+The catalog discovery code proposes a source and the probe code proves the
+remote collection.  This module performs the next boundary: bounded HTTPS
+downloads into private staging files, validation before content-addressed
+publication, deterministic manifests and optional append-only database links.
+
+It deliberately does *not* decide whether redistribution is authorized: that
+decision belongs to the caller and is neither asserted nor inferred here.  It
+also does not promote delivery versions; lifecycle fencing and publication
+remain separate concerns.
+"""
+
+from __future__ import annotations
+
+from collections.abc import Callable, Iterator, Mapping
+from contextlib import contextmanager
+import copy
+from dataclasses import dataclass, field, replace
+from datetime import datetime, timezone
+from email.utils import format_datetime, parsedate_to_datetime
+import hashlib
+import io
+import json
+import math
+from pathlib import Path
+from pathlib import PurePosixPath
+import re
+import sqlite3
+import struct
+from typing import Any, Literal, Protocol, cast
+from urllib.parse import parse_qsl, quote, urlencode, urljoin, urlsplit, urlunsplit
+from xml.etree import ElementTree
+import zipfile
+
+from sqlalchemy import select
+from sqlalchemy.orm import Session
+
+from app.reference_layers.blob_store import (
+    ReferenceBlobStore,
+    ReferenceBlobTooLargeError,
+    ReferenceStagingBatch,
+    ReferenceStagingWriter,
+    StoredReferenceBlob,
+)
+from app.reference_layers.geopackage_archive import (
+    GeoPackageArchiveError,
+    inspect_geopackage_zip,
+)
+from app.reference_layers.local_style_adaptation import (
+    LocalStyleAdaptationError,
+    generate_reviewed_local_styles,
+    local_style_package_metadata,
+)
+from app.reference_layers.masked_geopackage import (
+    MaskIdentity,
+    MaskedGeoPackageError,
+    MaskedGeoPackageSpec,
+    derive_masked_geopackage_files,
+    parse_masked_geopackage_spec,
+    validate_reviewed_mask,
+)
+from app.reference_layers.models import (
+    ReferenceLayerSource,
+    ReferenceSourceArtifact,
+    ReferenceSyncRun,
+    ReferenceSyncRunArtifact,
+)
+from app.reference_layers.mirror_coverage import (
+    SIUR_WMS_SUPERTILE_COVERAGE_PROFILES,
+)
+from app.reference_layers.safe_download import (
+    HTTPSDownloadPolicy,
+    HTTPSDownloadResult,
+    SafeHTTPSDownloader,
+    normalize_https_url,
+)
+from app.reference_layers.source_content_parity import (
+    SourceContentParityError,
+    configured_parity_spec,
+    evaluate_acquisition_parity,
+)
+from app.reference_layers.source_discovery import (
+    SourceCandidate,
+    candidate_definition,
+    reviewed_cross_origin_style_source,
+)
+from app.reference_layers.source_probes import (
+    MAX_PROBE_BYTES,
+    SourceProbe,
+    SourceProbeError,
+    probe_candidate_document,
+)
+from app.reference_layers.reviewed_ortho_evidence import (
+    CATALOG_CAPABILITIES_URL,
+    ReviewedOrthoEvidenceError,
+    reviewed_ign_ortho_catalog_capabilities_gate,
+    reviewed_ign_ortho_live_capabilities_gate,
+    reviewed_ign_ortho_source_projection,
+)
+from app.reference_layers.reviewed_archive_integrity import (
+    ReviewedArchiveIntegrityError,
+    configured_reviewed_archive_integrity,
+    inspect_reviewed_archive,
+    validate_reviewed_archive_response,
+)
+from app.reference_layers.reviewed_archive_styles import (
+    ReviewedArchiveStyleError,
+    ReviewedArchiveStyleSpec,
+    reviewed_archive_style_specs,
+)
+
+
+ArtifactKind = Literal[
+    "capabilities",
+    "manifest",
+    "dataset",
+    "style",
+    "style_package",
+    "style_resource",
+    "metadata",
+    "tile_archive",
+]
+ArtifactRole = Literal[
+    "observation",
+    "input",
+    "style",
+    "style_package",
+    "style_resource",
+    "metadata",
+]
+
+_SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
+_SAFE_REMOTE_NAME_RE = re.compile(r"^[^\x00-\x1f\x7f]{1,1000}$")
+_XYZ_TOKEN_RE = re.compile(r"\{(?:z|x|y|-y)\}", re.IGNORECASE)
+_ANY_TEMPLATE_TOKEN_RE = re.compile(r"\{[^{}]+\}")
+_MAX_JSON_NODES = 1_000_000
+_MAX_JSON_DEPTH = 96
+_MAX_MANIFEST_BYTES = 8 * 1024 * 1024
+_DEFAULT_MAX_TILE_COUNT = 25_000_000
+_ABSOLUTE_MAX_TILE_COUNT = 250_000_000
+_MAX_ETAG_CHARS = 4096
+_MAX_SOURCE_VERSION_CHARS = 2048
+_MAX_RUN_STATS_BYTES = 1024 * 1024
+_MAX_ARTIFACT_METADATA_BYTES = 4 * 1024 * 1024
+_MAX_STYLES_PER_SOURCE = 256
+_MAX_SLD_ELEMENTS = 100_000
+_MAX_SLD_DEPTH = 64
+_MAX_SLD_TEXT_BYTES = 4 * 1024 * 1024
+_MAX_SLD_EXTRACTED_BYTES = 2 * MAX_PROBE_BYTES
+_MAX_STYLE_RESOURCE_BYTES = 4 * 1024 * 1024
+_MAX_STYLE_RESOURCES_PER_SOURCE = 512
+_MAX_DOWNLOAD_RESOURCES = 256
+_DOWNLOAD_RESOURCE_KEY_RE = re.compile(
+    r"^[a-z0-9][a-z0-9_.-]{0,127}$",
+    re.ASCII,
+)
+_DOWNLOAD_RESOURCE_VALIDATION_KEYS = frozenset(
+    {
+        "archive_member",
+        "archive_style_archive_sha256",
+        "input_layer",
+        "reviewed_archive_integrity",
+        "source_content_parity",
+    }
+)
+_STYLE_NAME_RE = re.compile(r"^[A-Za-z0-9_.:]{1,255}$")
+_STYLE_SOURCE_KEY_RE = re.compile(r"^[a-z0-9][a-z0-9_.:/-]{0,254}$")
+_WFS_IDENTITY_PROPERTY_RE = re.compile(
+    r"^[A-Za-z_][A-Za-z0-9_.-]{0,254}$",
+    re.ASCII,
+)
+_MAX_NESTED_ATOM_FEEDS = 100
+_DBF_FIELD_NAME_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_]{0,10}$")
+_MAX_RASTER_VAT_BYTES = 8 * 1024 * 1024
+_MAX_RASTER_VAT_FIELDS = 64
+_MAX_RASTER_VAT_ROWS = 10_000
+_EXTERNAL_SLD_TEXT_RE = re.compile(
+    r"(?:\b(?:https?|ftp|file|data|jar):|\burl\s*\()",
+    re.IGNORECASE,
+)
+_SLD_NAMESPACE = "http://www.opengis.net/sld"
+_XLINK_HREF = "{http://www.w3.org/1999/xlink}href"
+_STYLE_RESOURCE_MEDIA_TYPES = frozenset(
+    {
+        "image/gif",
+        "image/jpeg",
+        "image/png",
+        "image/svg+xml",
+        "image/webp",
+        "application/octet-stream",
+    }
+)
+_XML_MEDIA_TYPES = frozenset(
+    {
+        "application/xml",
+        "text/xml",
+        "application/vnd.ogc.wfs_xml",
+        "application/vnd.ogc.wms_xml",
+        "application/vnd.ogc.sld+xml",
+        "application/atom+xml",
+        "application/octet-stream",
+    }
+)
+_JSON_MEDIA_TYPES = frozenset(
+    {
+        "application/json",
+        "application/geo+json",
+        "application/vnd.geo+json",
+        "text/json",
+        "application/octet-stream",
+    }
+)
+_RASTER_MEDIA_TYPES = frozenset(
+    {
+        "image/tiff",
+        "image/geotiff",
+        "application/geotiff",
+        "application/octet-stream",
+    }
+)
+
+
+class ReferenceAcquisitionError(RuntimeError):
+    """Classified acquisition failure for durable retry/failure policy."""
+
+    def __init__(self, message: str, *, code: str, retryable: bool = False) -> None:
+        super().__init__(message)
+        self.code = code
+        self.retryable = retryable
+
+
+class AcquisitionConfigurationError(ReferenceAcquisitionError, ValueError):
+    def __init__(self, message: str, *, code: str = "invalid_source") -> None:
+        super().__init__(message, code=code, retryable=False)
+
+
+class AcquisitionValidationError(ReferenceAcquisitionError):
+    def __init__(
+        self,
+        message: str,
+        *,
+        code: str = "invalid_upstream_data",
+        retryable: bool = False,
+    ) -> None:
+        super().__init__(message, code=code, retryable=retryable)
+
+
+class AcquisitionLimitError(ReferenceAcquisitionError):
+    def __init__(self, message: str, *, code: str) -> None:
+        super().__init__(message, code=code, retryable=False)
+
+
+class AcquisitionPersistenceError(ReferenceAcquisitionError):
+    def __init__(self, message: str, *, code: str) -> None:
+        super().__init__(message, code=code, retryable=False)
+
+
+@dataclass(frozen=True)
+class AcquisitionLimits:
+    """Hard limits applied independently of remote server declarations."""
+
+    max_probe_bytes: int = MAX_PROBE_BYTES
+    max_page_bytes: int = 64 * 1024 * 1024
+    max_dataset_bytes: int = 20 * 1024 * 1024 * 1024
+    max_total_bytes: int = 40 * 1024 * 1024 * 1024
+    max_dataset_uncompressed_bytes: int = 40 * 1024 * 1024 * 1024
+    max_total_uncompressed_bytes: int = 160 * 1024 * 1024 * 1024
+    page_size: int = 2_000
+    max_pages: int = 10_000
+    max_features: int = 20_000_000
+    timeout_seconds: float = 1800.0
+    idle_timeout_seconds: float = 90.0
+    max_redirects: int = 3
+
+    def __post_init__(self) -> None:
+        for name in (
+            "max_probe_bytes",
+            "max_page_bytes",
+            "max_dataset_bytes",
+            "max_total_bytes",
+            "max_dataset_uncompressed_bytes",
+            "max_total_uncompressed_bytes",
+            "page_size",
+            "max_pages",
+            "max_features",
+        ):
+            value = getattr(self, name)
+            if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+                raise ValueError(f"{name} must be a positive integer")
+        if self.max_probe_bytes > self.max_page_bytes:
+            raise ValueError("max_probe_bytes cannot exceed max_page_bytes")
+        if self.max_page_bytes > self.max_dataset_bytes:
+            raise ValueError("max_page_bytes cannot exceed max_dataset_bytes")
+        if self.max_dataset_bytes > self.max_total_bytes:
+            raise ValueError("max_dataset_bytes cannot exceed max_total_bytes")
+        if (
+            self.max_dataset_uncompressed_bytes
+            > self.max_total_uncompressed_bytes
+        ):
+            raise ValueError(
+                "max_dataset_uncompressed_bytes cannot exceed "
+                "max_total_uncompressed_bytes"
+            )
+        for name in ("timeout_seconds", "idle_timeout_seconds"):
+            value = getattr(self, name)
+            if (
+                isinstance(value, bool)
+                or not isinstance(value, (int, float))
+                or not math.isfinite(value)
+                or value <= 0
+            ):
+                raise ValueError(f"{name} must be finite and positive")
+        if not 0 <= self.max_redirects <= 10:
+            raise ValueError("max_redirects must be between 0 and 10")
+
+
+@dataclass(frozen=True)
+class ConditionalRequest:
+    source_url: str
+    etag: str | None = None
+    last_modified: str | None = None
+
+    def __post_init__(self) -> None:
+        normalize_https_url(self.source_url)
+        for name, value in (("etag", self.etag), ("last_modified", self.last_modified)):
+            if value is not None and (
+                not isinstance(value, str)
+                or not value
+                or len(value) > 1024
+                or any(ord(character) < 32 or ord(character) == 127 for character in value)
+            ):
+                raise ValueError(f"{name} is not a safe HTTP header value")
+
+    @classmethod
+    def from_run(
+        cls,
+        run: ReferenceSyncRun | None,
+        *,
+        source_url: str,
+    ) -> "ConditionalRequest | None":
+        if run is None or (run.observed_etag is None and run.observed_last_modified is None):
+            return None
+        last_modified = None
+        if run.observed_last_modified is not None:
+            value = run.observed_last_modified
+            if value.tzinfo is None:
+                value = value.replace(tzinfo=timezone.utc)
+            last_modified = format_datetime(value.astimezone(timezone.utc), usegmt=True)
+        return cls(
+            source_url=source_url,
+            etag=run.observed_etag,
+            last_modified=last_modified,
+        )
+
+    @classmethod
+    def from_artifact(
+        cls,
+        artifact: ReferenceSourceArtifact | None,
+    ) -> "ConditionalRequest | None":
+        if (
+            artifact is None
+            or artifact.source_url is None
+            or (artifact.upstream_etag is None and artifact.upstream_last_modified is None)
+        ):
+            return None
+        modified = artifact.upstream_last_modified
+        return cls(
+            source_url=artifact.source_url,
+            etag=artifact.upstream_etag,
+            last_modified=(
+                format_datetime(_aware_utc(modified), usegmt=True)
+                if modified is not None
+                else None
+            ),
+        )
+
+
+@dataclass(frozen=True)
+class DownloadResourceSpec:
+    """One exact, ordered member of a composite direct-download source."""
+
+    resource_key: str
+    page_index: int
+    source_url: str
+    media_type: str
+    data_format: str
+    max_download_bytes: int
+    max_uncompressed_bytes: int
+    validation: dict[str, Any]
+
+    def __post_init__(self) -> None:
+        if (
+            not isinstance(self.resource_key, str)
+            or _DOWNLOAD_RESOURCE_KEY_RE.fullmatch(self.resource_key) is None
+        ):
+            raise ValueError("download resource key is invalid")
+        if (
+            isinstance(self.page_index, bool)
+            or not isinstance(self.page_index, int)
+            or self.page_index < 0
+        ):
+            raise ValueError("download resource page index is invalid")
+        normalize_https_url(self.source_url)
+        for name, value, maximum in (
+            ("media_type", self.media_type, 200),
+            ("data_format", self.data_format, 100),
+        ):
+            if (
+                not isinstance(value, str)
+                or not value
+                or value != value.strip()
+                or len(value) > maximum
+                or any(ord(character) < 32 for character in value)
+            ):
+                raise ValueError(f"download resource {name} is invalid")
+        for name, value in (
+            ("max_download_bytes", self.max_download_bytes),
+            ("max_uncompressed_bytes", self.max_uncompressed_bytes),
+        ):
+            if (
+                isinstance(value, bool)
+                or not isinstance(value, int)
+                or value <= 0
+            ):
+                raise ValueError(f"download resource {name} is invalid")
+        _bounded_json_object(
+            self.validation,
+            "download resource validation",
+            _MAX_ARTIFACT_METADATA_BYTES,
+        )
+
+
+@dataclass(frozen=True)
+class ReusableDownloadResource:
+    """Immutable active dataset plus its latest per-resource validators."""
+
+    resource_key: str
+    page_index: int
+    source_url: str
+    final_url: str | None
+    media_type: str
+    blob: StoredReferenceBlob
+    metadata: dict[str, Any]
+    upstream_etag: str | None = None
+    upstream_last_modified: datetime | None = None
+    source_version: str | None = None
+    retrieved_at: datetime = field(
+        default_factory=lambda: datetime.now(timezone.utc)
+    )
+
+    def __post_init__(self) -> None:
+        if (
+            not isinstance(self.resource_key, str)
+            or _DOWNLOAD_RESOURCE_KEY_RE.fullmatch(self.resource_key) is None
+        ):
+            raise ValueError("reusable download resource key is invalid")
+        if (
+            isinstance(self.page_index, bool)
+            or not isinstance(self.page_index, int)
+            or self.page_index < 0
+        ):
+            raise ValueError("reusable download resource index is invalid")
+        normalize_https_url(self.source_url)
+        if self.final_url is not None:
+            normalize_https_url(self.final_url)
+        if (
+            not isinstance(self.media_type, str)
+            or not self.media_type
+            or self.media_type != self.media_type.strip()
+            or len(self.media_type) > 200
+        ):
+            raise ValueError("reusable download media type is invalid")
+        if (
+            not isinstance(self.blob, StoredReferenceBlob)
+            or self.blob.storage_backend != "filesystem"
+            or _SHA256_RE.fullmatch(self.blob.sha256) is None
+            or self.blob.size_bytes <= 0
+        ):
+            raise ValueError("reusable download blob identity is invalid")
+        _bounded_optional_text(
+            self.upstream_etag,
+            "reusable download ETag",
+            _MAX_ETAG_CHARS,
+        )
+        _bounded_optional_text(
+            self.source_version,
+            "reusable download source version",
+            _MAX_SOURCE_VERSION_CHARS,
+        )
+        if (
+            self.upstream_last_modified is not None
+            and self.upstream_last_modified.tzinfo is None
+        ):
+            raise ValueError(
+                "reusable download Last-Modified must be timezone-aware"
+            )
+        if self.retrieved_at.tzinfo is None:
+            raise ValueError(
+                "reusable download retrieval time must be timezone-aware"
+            )
+        _bounded_json_object(
+            self.metadata,
+            "reusable download metadata",
+            _MAX_ARTIFACT_METADATA_BYTES,
+        )
+
+    @property
+    def conditional(self) -> ConditionalRequest | None:
+        if (
+            self.upstream_etag is None
+            and self.upstream_last_modified is None
+        ):
+            return None
+        return ConditionalRequest(
+            source_url=self.source_url,
+            etag=self.upstream_etag,
+            last_modified=(
+                format_datetime(
+                    self.upstream_last_modified.astimezone(timezone.utc),
+                    usegmt=True,
+                )
+                if self.upstream_last_modified is not None
+                else None
+            ),
+        )
+
+
+@dataclass(frozen=True)
+class DownloadConditionalRequest:
+    """Complete active state for one exact composite-download definition."""
+
+    resources: tuple[ReusableDownloadResource, ...]
+
+    def __post_init__(self) -> None:
+        if (
+            not isinstance(self.resources, tuple)
+            or not 1 <= len(self.resources) <= _MAX_DOWNLOAD_RESOURCES
+            or [item.page_index for item in self.resources]
+            != list(range(len(self.resources)))
+            or len({item.resource_key for item in self.resources})
+            != len(self.resources)
+            or len({item.source_url for item in self.resources})
+            != len(self.resources)
+        ):
+            raise ValueError(
+                "composite download conditional state is not exact and ordered"
+            )
+
+
+@dataclass(frozen=True)
+class AcquiredArtifact:
+    artifact_kind: ArtifactKind
+    role: ArtifactRole
+    media_type: str
+    blob: StoredReferenceBlob
+    source_url: str | None = None
+    final_url: str | None = None
+    source_version: str | None = None
+    upstream_etag: str | None = None
+    upstream_last_modified: datetime | None = None
+    metadata: dict[str, Any] = field(default_factory=dict)
+    retrieved_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+
+    def __post_init__(self) -> None:
+        _bounded_optional_text(
+            self.source_version,
+            "artifact source version",
+            _MAX_SOURCE_VERSION_CHARS,
+        )
+        _bounded_optional_text(
+            self.upstream_etag,
+            "artifact ETag",
+            _MAX_ETAG_CHARS,
+        )
+        _bounded_json_object(
+            self.metadata,
+            "artifact metadata",
+            _MAX_ARTIFACT_METADATA_BYTES,
+        )
+
+
+@dataclass(frozen=True)
+class AcquisitionResult:
+    source_key: str
+    source_definition_sha256: str
+    protocol: str
+    target_kind: str
+    not_modified: bool
+    artifacts: tuple[AcquiredArtifact, ...]
+    manifest_sha256: str | None
+    probe: SourceProbe | None
+    observed_etag: str | None
+    observed_last_modified: datetime | None
+    observed_version: str | None
+    feature_count: int | None
+    total_bytes: int
+    stats: dict[str, Any]
+
+    def __post_init__(self) -> None:
+        _bounded_optional_text(
+            self.observed_etag,
+            "observed ETag",
+            _MAX_ETAG_CHARS,
+        )
+        _bounded_optional_text(
+            self.observed_version,
+            "observed source version",
+            _MAX_SOURCE_VERSION_CHARS,
+        )
+        _bounded_json_object(
+            self.stats,
+            "acquisition stats",
+            _MAX_RUN_STATS_BYTES,
+        )
+
+
+@dataclass(frozen=True)
+class TileSourceProbeRequest:
+    """Bounded capabilities request needed to derive one tile descriptor."""
+
+    url: str
+    accept: str
+    allowed_content_types: frozenset[str]
+
+
+class _Downloader(Protocol):
+    def download(
+        self,
+        url: str,
+        sink,
+        *,
+        etag: str | None = None,
+        last_modified: str | None = None,
+        accept: str | None = None,
+    ) -> HTTPSDownloadResult: ...
+
+
+DownloaderFactory = Callable[[HTTPSDownloadPolicy], _Downloader]
+Validator = Callable[[bytes], Any]
+FileValidator = Callable[[Path, int], Any]
+ResultValidator = Callable[[HTTPSDownloadResult], Any]
+
+
+@dataclass(frozen=True)
+class _Downloaded:
+    result: HTTPSDownloadResult
+    blob: StoredReferenceBlob | None
+    parsed: Any = None
+
+
+@dataclass(frozen=True)
+class _TransientDownloaded:
+    result: HTTPSDownloadResult
+    local_path: Path | None
+    sha256: str | None
+    size_bytes: int
+    parsed: Any = None
+    workspace_store: ReferenceBlobStore | None = None
+
+
+@dataclass(frozen=True)
+class _StagedDownloadResource:
+    spec: DownloadResourceSpec
+    result: HTTPSDownloadResult
+    path: Path
+    sha256: str
+    size_bytes: int
+    parsed: dict[str, Any]
+
+
+@dataclass(frozen=True)
+class _ObservedDownloadResource:
+    spec: DownloadResourceSpec
+    result: HTTPSDownloadResult
+    dataset: AcquiredArtifact
+    parsed: dict[str, Any]
+    changed: bool
+
+
+@contextmanager
+def _strict_staging(
+    store: ReferenceBlobStore,
+    *,
+    max_bytes: int,
+) -> Iterator[ReferenceStagingWriter]:
+    staging = store.stage(max_bytes=max_bytes)
+    path = staging.staging_path
+    try:
+        with staging:
+            yield staging
+    finally:
+        _require_staging_removed(path)
+
+
+def _require_staging_removed(path: Path) -> None:
+    try:
+        path.lstat()
+    except FileNotFoundError:
+        return
+    except OSError as error:
+        raise AcquisitionPersistenceError(
+            "staging cleanup could not be verified",
+            code="staging_cleanup_failed",
+        ) from error
+    try:
+        path.unlink()
+    except OSError as error:
+        raise AcquisitionPersistenceError(
+            "staging artifact could not be removed",
+            code="staging_cleanup_failed",
+        ) from error
+    try:
+        path.lstat()
+    except FileNotFoundError:
+        return
+    except OSError as error:
+        raise AcquisitionPersistenceError(
+            "staging cleanup could not be verified",
+            code="staging_cleanup_failed",
+        ) from error
+    raise AcquisitionPersistenceError(
+        "staging artifact remains after cleanup",
+        code="staging_cleanup_failed",
+    )
+
+
+@dataclass(frozen=True)
+class _FeaturePage:
+    count: int
+    number_matched: int | None
+    next_url: str | None
+    feature_ids: tuple[str, ...]
+    collection: dict[str, Any]
+
+
+@dataclass(frozen=True)
+class _WFSSnapshotSpec:
+    mode: Literal["single_response", "paged"]
+    identity_properties: tuple[str, ...]
+    sort_by: str | None
+
+
+@dataclass(frozen=True)
+class _CanonicalWFSPage:
+    document: dict[str, Any]
+    identity_records: tuple[bytes, ...]
+    identity_sort_keys: tuple[tuple[tuple[int, Any], ...], ...]
+    content_records: tuple[bytes, ...]
+    identity_sha256: str
+    content_sha256: str
+
+
+@dataclass(frozen=True)
+class _StagedWFSPage:
+    path: Path
+    sha256: str
+    size_bytes: int
+    observed: HTTPSDownloadResult
+    source_version: str
+    metadata: dict[str, Any]
+
+
+@dataclass(frozen=True)
+class _WFSSnapshotPass:
+    staged_pages: tuple[_StagedWFSPage, ...]
+    page_count: int
+    feature_count: int
+    number_matched: int
+    source_feature_ids_observed: int
+    identity_sha256: str
+    content_sha256: str
+    page_identity_sha256: tuple[str, ...]
+    page_content_sha256: tuple[str, ...]
+    observed_bytes: int
+    observed: HTTPSDownloadResult
+
+
+@dataclass(frozen=True)
+class _OGCQueryScope:
+    bbox: tuple[float, float, float, float] | None
+    bbox_text: str | None
+    bbox_crs: str | None
+    require_number_matched: bool
+
+
+@dataclass(frozen=True)
+class _ArcGISIds:
+    object_id_field: str
+    object_ids: tuple[int, ...]
+
+
+@dataclass(frozen=True)
+class _StyleSpec:
+    catalog_style_source_key: str
+    remote_name: str
+
+
+@dataclass(frozen=True)
+class _StyleRequest:
+    endpoint_url: str
+    layer_name: str
+    styles: tuple[_StyleSpec, ...]
+    expected_bundle_sha256: str | None
+
+
+@dataclass(frozen=True)
+class _ParsedStyleBundle:
+    sld_version: str
+    standalone_slds: tuple[tuple[str, bytes], ...]
+    resource_hrefs: tuple[tuple[str, tuple[str, ...]], ...]
+
+
+@dataclass(frozen=True)
+class _StyleResourceInspection:
+    media_type: str
+    extension: str
+
+
+@dataclass(frozen=True)
+class _AcquiredStyleResource:
+    artifact: AcquiredArtifact
+    local_path: str
+
+
+class ReferenceAcquisitionPipeline:
+    """Acquire one source without changing run or delivery lifecycle state."""
+
+    def __init__(
+        self,
+        store: ReferenceBlobStore,
+        *,
+        limits: AcquisitionLimits | None = None,
+        downloader_factory: DownloaderFactory = SafeHTTPSDownloader,
+        transient_root: str | Path | None = None,
+    ) -> None:
+        self.store = store
+        self.limits = limits or AcquisitionLimits()
+        self._downloader_factory = downloader_factory
+        self._transient_root = (
+            Path(transient_root).expanduser().resolve(strict=False)
+            if transient_root is not None
+            else None
+        )
+        if self._transient_root is not None and (
+            self._transient_root == self.store.root
+            or self.store.root in self._transient_root.parents
+            or self._transient_root in self.store.root.parents
+        ):
+            raise ValueError(
+                "transient acquisition storage must not overlap "
+                "the persistent reference store"
+            )
+
+    def acquire(
+        self,
+        source: SourceCandidate | ReferenceLayerSource,
+        *,
+        run: ReferenceSyncRun | None = None,
+        conditional: ConditionalRequest | DownloadConditionalRequest | None = None,
+    ) -> AcquisitionResult:
+        candidate = candidate_from_source_model(source) if isinstance(
+            source, ReferenceLayerSource
+        ) else source
+        _validate_candidate(candidate)
+        if isinstance(source, ReferenceLayerSource):
+            _validate_run_snapshot(source, run)
+        resource_specs = configured_download_resources(candidate)
+        if isinstance(conditional, DownloadConditionalRequest):
+            if candidate.protocol != "download" or resource_specs is None:
+                raise AcquisitionConfigurationError(
+                    "composite conditional state requires a composite "
+                    "direct-download source",
+                    code="conditional_source_mismatch",
+                )
+        elif resource_specs is not None and conditional is not None:
+            raise AcquisitionConfigurationError(
+                "composite direct-download source requires per-resource "
+                "conditional state",
+                code="conditional_source_mismatch",
+            )
+
+        handlers = {
+            "wfs": self._acquire_wfs,
+            "ogc_api_features": self._acquire_ogc_api,
+            "arcgis_rest": self._acquire_arcgis,
+            "wcs": self._acquire_wcs,
+            "download": self._acquire_download,
+            "atom": self._acquire_atom,
+            "wmts": self._acquire_tile_source,
+            "xyz": self._acquire_tile_source,
+            "wms_tiles": self._acquire_tile_source,
+        }
+        handler = handlers.get(candidate.protocol)
+        if handler is None:
+            raise AcquisitionConfigurationError(
+                f"protocol {candidate.protocol!r} requires manual acquisition",
+                code="manual_source",
+            )
+        return handler(candidate, conditional=conditional)
+
+    def _download(
+        self,
+        candidate: SourceCandidate,
+        url: str,
+        *,
+        max_bytes: int,
+        accept: str,
+        allowed_media_types: frozenset[str] | None,
+        validator: Validator | None = None,
+        file_validator: FileValidator | None = None,
+        result_validator: ResultValidator | None = None,
+        conditional: ConditionalRequest | None = None,
+        reviewed_origin_url: str | None = None,
+        reviewed_sha256: str | None = None,
+    ) -> _Downloaded:
+        if validator is not None and file_validator is not None:
+            raise ValueError("only one artifact validator may be configured")
+        if reviewed_sha256 is not None and (
+            not isinstance(reviewed_sha256, str)
+            or _SHA256_RE.fullmatch(reviewed_sha256) is None
+        ):
+            raise ValueError("reviewed_sha256 must be a SHA-256 digest")
+        reviewed_origin = (
+            candidate.endpoint_url
+            if reviewed_origin_url is None
+            else normalize_https_url(reviewed_origin_url)
+        )
+        requested_url = _require_same_origin(reviewed_origin, url)
+        applied_conditional = (
+            conditional
+            if conditional is not None
+            and normalize_https_url(conditional.source_url) == requested_url
+            else None
+        )
+        origin = _origin(reviewed_origin)
+        effective_max_bytes = min(
+            max_bytes,
+            self.store.max_blob_bytes,
+            self.limits.max_total_bytes,
+        )
+        policy = HTTPSDownloadPolicy(
+            allowed_origins=(origin,),
+            max_response_bytes=effective_max_bytes,
+            timeout_seconds=self.limits.timeout_seconds,
+            idle_timeout_seconds=self.limits.idle_timeout_seconds,
+            max_redirects=self.limits.max_redirects,
+            allowed_content_types=allowed_media_types,
+        )
+        downloader = self._downloader_factory(policy)
+        with _strict_staging(
+            self.store,
+            max_bytes=effective_max_bytes,
+        ) as staging:
+            result = downloader.download(
+                requested_url,
+                staging,
+                etag=applied_conditional.etag if applied_conditional else None,
+                last_modified=(
+                    applied_conditional.last_modified if applied_conditional else None
+                ),
+                accept=accept,
+            )
+            _validate_download_result(
+                reviewed_origin,
+                requested_url,
+                result,
+            )
+            if result_validator is not None:
+                result_validator(result)
+            if result.not_modified:
+                if applied_conditional is None:
+                    raise AcquisitionValidationError(
+                        "upstream returned not-modified for a different resource URL",
+                        code="unexpected_not_modified",
+                    )
+                return _Downloaded(result=result, blob=None)
+            if result.sha256 is None:
+                raise AcquisitionValidationError(
+                    "download result omitted its content digest",
+                    code="missing_download_digest",
+                )
+            if (
+                reviewed_sha256 is not None
+                and result.sha256 != reviewed_sha256
+            ):
+                raise AcquisitionValidationError(
+                    "reviewed style bundle changed",
+                    code="reviewed_style_changed",
+                )
+            parsed = None
+            if file_validator is not None:
+                parsed = file_validator(staging.staging_path, result.size_bytes)
+            elif validator is not None:
+                try:
+                    payload = Path(staging.staging_path).read_bytes()
+                except OSError as exc:
+                    raise AcquisitionValidationError(
+                        "staged artifact could not be read for validation",
+                        code="staging_read_failed",
+                    ) from exc
+                parsed = validator(payload)
+            blob = staging.commit(
+                expected_sha256=result.sha256,
+                expected_size=result.size_bytes,
+            )
+        return _Downloaded(result=result, blob=blob, parsed=parsed)
+
+    def _observe_download(
+        self,
+        candidate: SourceCandidate,
+        url: str,
+        *,
+        max_bytes: int,
+        accept: str,
+        allowed_media_types: frozenset[str] | None,
+        validator: Validator,
+    ) -> _Downloaded:
+        """Validate one response without retaining its upstream representation."""
+
+        requested_url = _require_same_origin(candidate.endpoint_url, url)
+        effective_max_bytes = min(
+            max_bytes,
+            self.store.max_blob_bytes,
+            self.limits.max_total_bytes,
+        )
+        downloader = self._downloader_factory(
+            HTTPSDownloadPolicy(
+                allowed_origins=(_origin(candidate.endpoint_url),),
+                max_response_bytes=effective_max_bytes,
+                timeout_seconds=self.limits.timeout_seconds,
+                idle_timeout_seconds=self.limits.idle_timeout_seconds,
+                max_redirects=self.limits.max_redirects,
+                allowed_content_types=allowed_media_types,
+            )
+        )
+        with _strict_staging(
+            self.store,
+            max_bytes=effective_max_bytes,
+        ) as staging:
+            try:
+                result = downloader.download(
+                    requested_url,
+                    staging,
+                    accept=accept,
+                )
+            except ReferenceBlobTooLargeError as error:
+                raise AcquisitionLimitError(
+                    "snapshot observation exceeds its remaining byte budget",
+                    code="snapshot_too_large",
+                ) from error
+            _validate_download_result(
+                candidate.endpoint_url,
+                requested_url,
+                result,
+            )
+            if result.not_modified:
+                raise AcquisitionValidationError(
+                    "snapshot observation unexpectedly returned not-modified",
+                    code="partial_not_modified",
+                )
+            if (
+                result.sha256 is None
+                or staging.sha256 != result.sha256
+                or staging.size_bytes != result.size_bytes
+            ):
+                raise AcquisitionValidationError(
+                    "snapshot observation does not match staged bytes",
+                    code="download_integrity_mismatch",
+                )
+            try:
+                payload = staging.staging_path.read_bytes()
+            except OSError as error:
+                raise AcquisitionValidationError(
+                    "staged artifact could not be read for validation",
+                    code="staging_read_failed",
+                ) from error
+            parsed = validator(payload)
+        return _Downloaded(result=result, blob=None, parsed=parsed)
+
+    @contextmanager
+    def _download_transient(
+        self,
+        candidate: SourceCandidate,
+        url: str,
+        *,
+        max_bytes: int,
+        accept: str,
+        allowed_media_types: frozenset[str] | None,
+        validator: Validator | None = None,
+        file_validator: FileValidator | None = None,
+        conditional: ConditionalRequest | None = None,
+        reviewed_origin_url: str | None = None,
+    ) -> Iterator[_TransientDownloaded]:
+        """Yield a validated staging file and remove it without CAS commit."""
+
+        if validator is not None and file_validator is not None:
+            raise ValueError("only one artifact validator may be configured")
+        if self._transient_root is None:
+            raise AcquisitionConfigurationError(
+                "transient acquisition storage is not configured",
+                code="transient_storage_unavailable",
+            )
+        reviewed_origin = (
+            candidate.endpoint_url
+            if reviewed_origin_url is None
+            else normalize_https_url(reviewed_origin_url)
+        )
+        requested_url = _require_same_origin(reviewed_origin, url)
+        applied_conditional = (
+            conditional
+            if conditional is not None
+            and normalize_https_url(conditional.source_url) == requested_url
+            else None
+        )
+        transient_max_bytes = min(
+            self.store.max_blob_bytes,
+            self.limits.max_total_bytes,
+        )
+        transient_quota_bytes = self.store.quota_bytes
+        if (
+            transient_quota_bytes is not None
+            and transient_max_bytes > transient_quota_bytes
+        ):
+            transient_max_bytes = transient_quota_bytes
+        with ReferenceBlobStore(
+            self._transient_root,
+            max_blob_bytes=transient_max_bytes,
+            quota_bytes=transient_quota_bytes,
+            min_free_bytes=self.store.min_free_bytes,
+        ) as transient_store:
+            # Locked in-flight partials are skipped. Anything left by a
+            # previous crash is removed before a new transient acquisition.
+            transient_store.cleanup_staging(older_than_seconds=0)
+            effective_max_bytes = min(
+                max_bytes,
+                transient_store.max_blob_bytes,
+                self.limits.max_total_bytes,
+            )
+            downloader = self._downloader_factory(
+                HTTPSDownloadPolicy(
+                    allowed_origins=(_origin(reviewed_origin),),
+                    max_response_bytes=effective_max_bytes,
+                    timeout_seconds=self.limits.timeout_seconds,
+                    idle_timeout_seconds=self.limits.idle_timeout_seconds,
+                    max_redirects=self.limits.max_redirects,
+                    allowed_content_types=allowed_media_types,
+                )
+            )
+            with _strict_staging(
+                transient_store,
+                max_bytes=effective_max_bytes
+            ) as staging:
+                result = downloader.download(
+                    requested_url,
+                    staging,
+                    etag=applied_conditional.etag
+                    if applied_conditional
+                    else None,
+                    last_modified=(
+                        applied_conditional.last_modified
+                        if applied_conditional
+                        else None
+                    ),
+                    accept=accept,
+                )
+                _validate_download_result(
+                    reviewed_origin,
+                    requested_url,
+                    result,
+                )
+                if result.not_modified:
+                    if applied_conditional is None:
+                        raise AcquisitionValidationError(
+                            "upstream returned not-modified for a different "
+                            "resource URL",
+                            code="unexpected_not_modified",
+                        )
+                    yield _TransientDownloaded(
+                        result=result,
+                        local_path=None,
+                        sha256=None,
+                        size_bytes=0,
+                        workspace_store=transient_store,
+                    )
+                    return
+                if (
+                    result.sha256 is None
+                    or staging.sha256 != result.sha256
+                    or staging.size_bytes != result.size_bytes
+                ):
+                    raise AcquisitionValidationError(
+                        "transient download identity does not match staged bytes",
+                        code="download_integrity_mismatch",
+                    )
+                parsed = None
+                if file_validator is not None:
+                    parsed = file_validator(
+                        staging.staging_path,
+                        result.size_bytes,
+                    )
+                elif validator is not None:
+                    try:
+                        payload = staging.staging_path.read_bytes()
+                    except OSError as error:
+                        raise AcquisitionValidationError(
+                            "staged artifact could not be read for validation",
+                            code="staging_read_failed",
+                        ) from error
+                    parsed = validator(payload)
+                yield _TransientDownloaded(
+                    result=result,
+                    local_path=staging.staging_path,
+                    sha256=result.sha256,
+                    size_bytes=result.size_bytes,
+                    parsed=parsed,
+                    workspace_store=transient_store,
+                )
+
+    def _local_json_artifact(
+        self,
+        payload: dict[str, Any],
+        *,
+        kind: ArtifactKind,
+        role: ArtifactRole,
+        metadata: dict[str, Any],
+        observed: HTTPSDownloadResult | None = None,
+    ) -> AcquiredArtifact:
+        encoded = _canonical_json(payload) + b"\n"
+        maximum = min(
+            _MAX_MANIFEST_BYTES,
+            self.store.max_blob_bytes,
+            self.limits.max_total_bytes,
+        )
+        if len(encoded) > maximum:
+            raise AcquisitionLimitError(
+                "generated acquisition manifest is too large",
+                code="manifest_too_large",
+            )
+        blob = self.store.put_stream(io.BytesIO(encoded), max_bytes=maximum)
+        return AcquiredArtifact(
+            artifact_kind=kind,
+            role=role,
+            media_type="application/json",
+            blob=blob,
+            source_url=(
+                observed.source_url if observed is not None else None
+            ),
+            final_url=(
+                observed.final_url if observed is not None else None
+            ),
+            upstream_etag=(
+                observed.etag if observed is not None else None
+            ),
+            upstream_last_modified=(
+                _http_datetime(observed.last_modified)
+                if observed is not None
+                else None
+            ),
+            metadata=metadata,
+        )
+
+    def _stage_wfs_page(
+        self,
+        payload: dict[str, Any],
+        *,
+        batch: ReferenceStagingBatch,
+        observed: HTTPSDownloadResult,
+        source_version: str,
+        metadata: dict[str, Any],
+    ) -> _StagedWFSPage:
+        encoded = _canonical_json(payload) + b"\n"
+        maximum = min(
+            self.limits.max_page_bytes,
+            self.store.max_blob_bytes,
+            self.limits.max_total_bytes,
+        )
+        if len(encoded) > maximum:
+            raise AcquisitionLimitError(
+                "canonical WFS page exceeds the page byte limit",
+                code="page_too_large",
+            )
+        with batch.stage(max_bytes=maximum) as staging:
+            staging.write(encoded)
+            path = staging.seal()
+        return _StagedWFSPage(
+            path=path,
+            sha256=staging.sha256,
+            size_bytes=staging.size_bytes,
+            observed=observed,
+            source_version=source_version,
+            metadata=metadata,
+        )
+
+    def _commit_staged_wfs_page(
+        self,
+        staged: _StagedWFSPage,
+    ) -> AcquiredArtifact:
+        blob = self.store.commit_staged_file(
+            staged.path,
+            max_bytes=min(
+                self.limits.max_page_bytes,
+                self.store.max_blob_bytes,
+                self.limits.max_total_bytes,
+            ),
+            expected_sha256=staged.sha256,
+            expected_size=staged.size_bytes,
+        )
+        return AcquiredArtifact(
+            artifact_kind="dataset",
+            role=(
+                "input"
+                if staged.metadata.get("feature_count") != 0
+                else "observation"
+            ),
+            media_type="application/geo+json",
+            blob=blob,
+            source_url=staged.observed.source_url,
+            final_url=staged.observed.final_url,
+            source_version=staged.source_version,
+            upstream_etag=staged.observed.etag,
+            upstream_last_modified=_http_datetime(
+                staged.observed.last_modified
+            ),
+            metadata=staged.metadata,
+        )
+
+    def _remote_artifact(
+        self,
+        downloaded: _Downloaded,
+        *,
+        kind: ArtifactKind,
+        role: ArtifactRole,
+        metadata: dict[str, Any],
+        source_version: str | None = None,
+    ) -> AcquiredArtifact:
+        if downloaded.blob is None:
+            raise AcquisitionValidationError(
+                "a not-modified response has no publishable artifact",
+                code="missing_artifact",
+            )
+        result = downloaded.result
+        return AcquiredArtifact(
+            artifact_kind=kind,
+            role=role,
+            media_type=result.content_type or "application/octet-stream",
+            blob=downloaded.blob,
+            source_url=result.source_url,
+            final_url=result.final_url,
+            source_version=source_version,
+            upstream_etag=result.etag,
+            upstream_last_modified=_http_datetime(result.last_modified),
+            metadata=metadata,
+        )
+
+    def _probe(
+        self,
+        candidate: SourceCandidate,
+        *,
+        reviewed_ortho_phase: str = "pre_download",
+    ) -> tuple[SourceProbe, AcquiredArtifact, bytes]:
+        url, accept, media_types = _probe_request(candidate)
+
+        def validate(document: bytes) -> tuple[SourceProbe, bytes]:
+            try:
+                probe = probe_candidate_document(candidate, document)
+            except SourceProbeError as exc:
+                raise AcquisitionValidationError(
+                    "source metadata did not pass its protocol probe",
+                    code="invalid_capabilities",
+                ) from exc
+            if not probe.available or probe.canonical_name is None:
+                raise AcquisitionValidationError(
+                    probe.reason or "requested collection is unavailable",
+                    code="collection_unavailable",
+                )
+            try:
+                live_gate = reviewed_ign_ortho_live_capabilities_gate(
+                    candidate_definition(candidate),
+                    document,
+                    phase=reviewed_ortho_phase,
+                )
+            except ReviewedOrthoEvidenceError as exc:
+                raise AcquisitionValidationError(
+                    "live reviewed WMS capabilities changed",
+                    code="reviewed_ortho_capabilities_changed",
+                ) from exc
+            if live_gate is not None:
+                probe.metadata["reviewed_ortho_capabilities_gate"] = (
+                    live_gate
+                )
+            return probe, document
+
+        downloaded = self._download(
+            candidate,
+            url,
+            max_bytes=self.limits.max_probe_bytes,
+            accept=accept,
+            allowed_media_types=media_types,
+            validator=validate,
+        )
+        probe, document = cast(tuple[SourceProbe, bytes], downloaded.parsed)
+        artifact = self._remote_artifact(
+            downloaded,
+            kind="capabilities",
+            role="observation",
+            source_version=probe.service_version,
+            metadata={
+                "protocol": candidate.protocol,
+                "requested_name": candidate.remote_name,
+                "canonical_name": probe.canonical_name,
+                "fingerprint_sha256": probe.fingerprint_sha256,
+                "fingerprint_quality": probe.fingerprint_quality,
+                "probe": probe.metadata,
+            },
+        )
+        return probe, artifact, document
+
+    def revalidate_reviewed_ortho_capabilities(
+        self,
+        source: SourceCandidate | ReferenceLayerSource,
+    ) -> dict[str, Any] | None:
+        """Repeat the semantic capabilities check immediately pre-promotion."""
+
+        candidate = candidate_from_source_model(source) if isinstance(
+            source, ReferenceLayerSource
+        ) else source
+        projection = reviewed_ign_ortho_source_projection(
+            candidate_definition(candidate)
+        )
+        if projection is None:
+            return None
+        probe, _artifact, _document = self._probe(
+            candidate,
+            reviewed_ortho_phase="pre_promotion",
+        )
+        gate = probe.metadata.get("reviewed_ortho_capabilities_gate")
+        if not isinstance(gate, dict):
+            raise AcquisitionValidationError(
+                "pre-promotion capabilities gate is missing",
+                code="reviewed_ortho_capabilities_changed",
+            )
+        catalog_candidate = replace(
+            candidate,
+            endpoint_url=CATALOG_CAPABILITIES_URL.split("?", 1)[0],
+            remote_name=projection["catalog_layer"],
+        )
+
+        def validate_catalog(document: bytes) -> dict[str, Any]:
+            try:
+                catalog_gate = (
+                    reviewed_ign_ortho_catalog_capabilities_gate(
+                        candidate_definition(candidate),
+                        document,
+                    )
+                )
+            except ReviewedOrthoEvidenceError as exc:
+                raise AcquisitionValidationError(
+                    "live catalog WMS capabilities changed",
+                    code="reviewed_ortho_capabilities_changed",
+                ) from exc
+            if catalog_gate is None:
+                raise AcquisitionValidationError(
+                    "pre-promotion catalog capabilities gate is missing",
+                    code="reviewed_ortho_capabilities_changed",
+                )
+            return catalog_gate
+
+        catalog_download = self._download(
+            catalog_candidate,
+            CATALOG_CAPABILITIES_URL,
+            max_bytes=self.limits.max_probe_bytes,
+            accept="application/xml, text/xml;q=0.9",
+            allowed_media_types=_XML_MEDIA_TYPES,
+            validator=validate_catalog,
+        )
+        return {
+            "schema_version": (
+                "siur-reviewed-ortho-prepromotion-capabilities/v1"
+            ),
+            "passed": True,
+            "profile": projection["profile"],
+            "selected_capabilities": gate,
+            "catalog_capabilities": cast(
+                dict[str, Any],
+                catalog_download.parsed,
+            ),
+        }
+
+    def _acquire_styles(
+        self,
+        candidate: SourceCandidate,
+        *,
+        remote_byte_budget: int | None = None,
+    ) -> list[AcquiredArtifact]:
+        request = _style_request_config(candidate)
+        if request is None or not request.styles:
+            return []
+        if len(request.styles) > _MAX_STYLES_PER_SOURCE:
+            raise AcquisitionLimitError(
+                "source declares too many catalog styles",
+                code="style_count_limit",
+            )
+
+        remote_observed_bytes = 0
+
+        def budgeted_max_bytes(maximum: int) -> int:
+            if remote_byte_budget is None:
+                return maximum
+            remaining = remote_byte_budget - remote_observed_bytes
+            if remaining <= 0:
+                raise AcquisitionLimitError(
+                    "style downloads exhaust the aggregate remote byte limit",
+                    code="snapshot_too_large",
+                )
+            return min(maximum, remaining)
+
+        def account(downloaded: _Downloaded) -> None:
+            nonlocal remote_observed_bytes
+            remote_observed_bytes += downloaded.result.size_bytes
+            if (
+                remote_byte_budget is not None
+                and remote_observed_bytes > remote_byte_budget
+            ):
+                raise AcquisitionLimitError(
+                    "style downloads exceed the aggregate remote byte limit",
+                    code="snapshot_too_large",
+                )
+
+        url = _merge_query(
+            request.endpoint_url,
+            {
+                "service": "WMS",
+                "request": "GetStyles",
+                "version": "1.1.1",
+                "layers": request.layer_name,
+            },
+        )
+        try:
+            downloaded = self._download(
+                candidate,
+                url,
+                max_bytes=budgeted_max_bytes(
+                    self.limits.max_probe_bytes
+                ),
+                accept=(
+                    "application/vnd.ogc.sld+xml, application/xml;q=0.9, "
+                    "text/xml;q=0.8"
+                ),
+                allowed_media_types=_XML_MEDIA_TYPES,
+                validator=lambda payload: _parse_style_bundle(
+                    payload,
+                    layer_name=request.layer_name,
+                    style_names=tuple(
+                        item.remote_name for item in request.styles
+                    ),
+                ),
+                reviewed_origin_url=request.endpoint_url,
+                reviewed_sha256=request.expected_bundle_sha256,
+            )
+        except ReferenceBlobTooLargeError as error:
+            if remote_byte_budget is None:
+                raise
+            raise AcquisitionLimitError(
+                "style bundle exceeds the aggregate remote byte limit",
+                code="snapshot_too_large",
+            ) from error
+        account(downloaded)
+        parsed = cast(_ParsedStyleBundle, downloaded.parsed)
+        bundle = self._remote_artifact(
+            downloaded,
+            kind="style",
+            role="observation",
+            source_version=parsed.sld_version,
+            metadata={
+                "schema": "reference-style-bundle/v1",
+                "catalog_style_source_keys": [
+                    item.catalog_style_source_key for item in request.styles
+                ],
+                "remote_names": [item.remote_name for item in request.styles],
+                "style_layer_name": request.layer_name,
+            },
+        )
+        artifacts: list[AcquiredArtifact] = [bundle]
+        standalone_by_name = dict(parsed.standalone_slds)
+        resource_hrefs_by_name = dict(parsed.resource_hrefs)
+        resources_by_url: dict[str, _AcquiredStyleResource] = {}
+        maximum = min(
+            self.limits.max_probe_bytes,
+            self.store.max_blob_bytes,
+            self.limits.max_total_bytes,
+        )
+        for spec in request.styles:
+            original_document = standalone_by_name[spec.remote_name]
+            bindings: list[dict[str, str]] = []
+            unresolved: list[dict[str, str]] = []
+            resources_for_style: dict[str, _AcquiredStyleResource] = {}
+            for original_href in resource_hrefs_by_name[spec.remote_name]:
+                try:
+                    resolved_url = _resolve_style_resource_url(
+                        request.endpoint_url,
+                        original_href,
+                    )
+                except AcquisitionValidationError as error:
+                    unresolved.append(
+                        {
+                            "original_href": original_href,
+                            "reason_code": error.code,
+                        }
+                    )
+                    continue
+                resource = resources_by_url.get(resolved_url)
+                if resource is None:
+                    try:
+                        downloaded_resource = self._download(
+                            candidate,
+                            resolved_url,
+                            max_bytes=budgeted_max_bytes(
+                                min(
+                                    _MAX_STYLE_RESOURCE_BYTES,
+                                    self.limits.max_page_bytes,
+                                )
+                            ),
+                            accept=(
+                                "image/png, image/jpeg, image/gif, "
+                                "image/svg+xml, image/webp;q=0.9"
+                            ),
+                            allowed_media_types=(
+                                _STYLE_RESOURCE_MEDIA_TYPES
+                            ),
+                            validator=_inspect_style_resource,
+                            reviewed_origin_url=request.endpoint_url,
+                        )
+                    except ReferenceBlobTooLargeError as error:
+                        if remote_byte_budget is None:
+                            raise
+                        raise AcquisitionLimitError(
+                            "style resource exceeds the aggregate remote "
+                            "byte limit",
+                            code="snapshot_too_large",
+                        ) from error
+                    account(downloaded_resource)
+                    inspection = cast(
+                        _StyleResourceInspection,
+                        downloaded_resource.parsed,
+                    )
+                    remote_artifact = self._remote_artifact(
+                        downloaded_resource,
+                        kind="style_resource",
+                        role="style_resource",
+                        metadata={
+                            "schema": "reference-style-resource/v1",
+                            "resolved_url": resolved_url,
+                            "detected_media_type": inspection.media_type,
+                            "extension": inspection.extension,
+                        },
+                    )
+                    local_path = (
+                        f"resources/{remote_artifact.blob.sha256}."
+                        f"{inspection.extension}"
+                    )
+                    resource = _AcquiredStyleResource(
+                        artifact=remote_artifact,
+                        local_path=local_path,
+                    )
+                    resources_by_url[resolved_url] = resource
+                    artifacts.append(remote_artifact)
+                    _enforce_total_bytes(
+                        artifacts,
+                        self.limits.max_total_bytes,
+                    )
+                resources_for_style[original_href] = resource
+                bindings.append(
+                    {
+                        "original_href": original_href,
+                        "resolved_url": resolved_url,
+                        "local_path": resource.local_path,
+                        "sha256": resource.artifact.blob.sha256,
+                        "media_type": resource.artifact.media_type,
+                    }
+                )
+
+            parity_kind = (
+                "missing"
+                if unresolved
+                else ("adapted" if bindings else "exact")
+            )
+            standalone_document = (
+                original_document
+                if parity_kind != "adapted"
+                else _rewrite_style_resource_hrefs(
+                    original_document,
+                    {
+                        href: resource.local_path
+                        for href, resource in resources_for_style.items()
+                    },
+                )
+            )
+            standalone_blob = self.store.put_stream(
+                io.BytesIO(standalone_document),
+                max_bytes=maximum,
+            )
+            standalone = AcquiredArtifact(
+                artifact_kind="style",
+                role="style",
+                media_type="application/vnd.ogc.sld+xml",
+                blob=standalone_blob,
+                source_version=parsed.sld_version,
+                metadata={
+                    "schema": "reference-style-sld/v1",
+                    "catalog_style_source_key": spec.catalog_style_source_key,
+                    "remote_name": spec.remote_name,
+                    "style_layer_name": request.layer_name,
+                    "parent_sha256": bundle.blob.sha256,
+                    "parity_kind": parity_kind,
+                    "resource_bindings": bindings,
+                    "unresolved_resources": unresolved,
+                },
+            )
+            artifacts.append(standalone)
+            if parity_kind == "adapted":
+                package_blob = _store_style_package(
+                    self.store,
+                    sld=standalone_document,
+                    resources=tuple(
+                        {
+                            resource.local_path: resource
+                            for resource in resources_for_style.values()
+                        }.values()
+                    ),
+                    max_bytes=min(
+                        self.limits.max_page_bytes,
+                        self.store.max_blob_bytes,
+                        self.limits.max_total_bytes,
+                    ),
+                )
+                artifacts.append(
+                    AcquiredArtifact(
+                        artifact_kind="style_package",
+                        role="style_package",
+                        media_type="application/zip",
+                        blob=package_blob,
+                        source_version=parsed.sld_version,
+                        metadata={
+                            "schema": "reference-style-package/v1",
+                            "catalog_style_source_key": (
+                                spec.catalog_style_source_key
+                            ),
+                            "remote_name": spec.remote_name,
+                            "style_layer_name": request.layer_name,
+                            "sld_sha256": standalone_blob.sha256,
+                            "resource_bindings": bindings,
+                        },
+                    )
+                )
+            _enforce_total_bytes(artifacts, self.limits.max_total_bytes)
+        return artifacts
+
+    def _author_reviewed_local_style(
+        self,
+        candidate: SourceCandidate,
+        *,
+        dataset_artifacts: list[AcquiredArtifact],
+    ) -> list[AcquiredArtifact]:
+        """Author every closed SLD for an exact reviewed direct dataset."""
+
+        vat_artifacts = [
+            item
+            for item in dataset_artifacts
+            if isinstance(
+                item.metadata.get("raster_value_attribute_table"),
+                Mapping,
+            )
+        ]
+        geopackage_artifacts = [
+            item
+            for item in dataset_artifacts
+            if isinstance(
+                item.metadata.get("geopackage_inspection"),
+                Mapping,
+            )
+        ]
+        if len(vat_artifacts) > 1:
+            raise AcquisitionValidationError(
+                "reviewed raster style has ambiguous VAT evidence",
+                code="local_style_vat_invalid",
+            )
+        if (
+            len(geopackage_artifacts) > 1
+            or (vat_artifacts and geopackage_artifacts)
+        ):
+            raise AcquisitionValidationError(
+                "reviewed local style has ambiguous dataset evidence",
+                code="local_style_dataset_evidence_ambiguous",
+            )
+        dataset_metadata = (
+            vat_artifacts[0].metadata
+            if vat_artifacts
+            else (
+                geopackage_artifacts[0].metadata
+                if geopackage_artifacts
+                else None
+            )
+        )
+        try:
+            authored_styles = generate_reviewed_local_styles(
+                candidate,
+                dataset_metadata=dataset_metadata,
+            )
+        except LocalStyleAdaptationError as error:
+            raise AcquisitionValidationError(
+                "reviewed local style could not be authored safely",
+                code=error.code,
+            ) from error
+        if not authored_styles:
+            return []
+
+        maximum = min(
+            self.limits.max_probe_bytes,
+            self.store.max_blob_bytes,
+            self.limits.max_total_bytes,
+        )
+        result: list[AcquiredArtifact] = []
+        for authored in authored_styles:
+            style_name = cast(str, authored.metadata["remote_name"])
+            layer_name = cast(
+                str,
+                authored.metadata["style_layer_name"],
+            )
+            parsed = _parse_style_bundle(
+                authored.document,
+                layer_name=layer_name,
+                style_names=(style_name,),
+            )
+            if (
+                parsed.sld_version != "1.0.0"
+                or parsed.resource_hrefs != ((style_name, ()),)
+                or len(parsed.standalone_slds) != 1
+            ):
+                raise AcquisitionValidationError(
+                    "authored local style did not pass closed SLD validation",
+                    code="local_style_sld_invalid",
+                )
+            style_blob = self.store.put_stream(
+                io.BytesIO(authored.document),
+                max_bytes=maximum,
+            )
+            if style_blob.sha256 != authored.sld_sha256:
+                raise AcquisitionValidationError(
+                    "authored local style digest changed during storage",
+                    code="local_style_integrity",
+                )
+            result.append(
+                AcquiredArtifact(
+                    artifact_kind="style",
+                    role="style",
+                    media_type="application/vnd.ogc.sld+xml",
+                    blob=style_blob,
+                    source_version=parsed.sld_version,
+                    metadata=authored.metadata,
+                )
+            )
+            package_blob = _store_style_package(
+                self.store,
+                sld=authored.document,
+                resources=(),
+                max_bytes=min(
+                    self.limits.max_page_bytes,
+                    self.store.max_blob_bytes,
+                    self.limits.max_total_bytes,
+                ),
+            )
+            result.append(
+                AcquiredArtifact(
+                    artifact_kind="style_package",
+                    role="style_package",
+                    media_type="application/zip",
+                    blob=package_blob,
+                    source_version=parsed.sld_version,
+                    metadata=local_style_package_metadata(authored),
+                )
+            )
+            _enforce_total_bytes(
+                result,
+                self.limits.max_total_bytes,
+            )
+        return result
+
+    def _finish(
+        self,
+        candidate: SourceCandidate,
+        *,
+        probe: SourceProbe | None,
+        artifacts: list[AcquiredArtifact],
+        materialization: dict[str, Any],
+        feature_count: int | None,
+        stats: dict[str, Any],
+        observed: HTTPSDownloadResult | None = None,
+    ) -> AcquisitionResult:
+        total_before_manifest = sum(item.blob.size_bytes for item in artifacts)
+        if total_before_manifest > self.limits.max_total_bytes:
+            raise AcquisitionLimitError(
+                "source snapshot exceeds the aggregate byte limit",
+                code="snapshot_too_large",
+            )
+        manifest_payload = {
+            "schema": "reference-acquisition-manifest/v1",
+            "source": {
+                "source_key": candidate.source_key,
+                "definition_sha256": candidate.definition_sha256,
+                "protocol": candidate.protocol,
+                "target_kind": candidate.target_kind,
+                "endpoint_url": candidate.endpoint_url,
+                "remote_name": candidate.remote_name,
+            },
+            "probe": _probe_manifest(probe),
+            "materialization": materialization,
+            "artifacts": [_artifact_manifest(index, item) for index, item in enumerate(artifacts)],
+            "stats": stats,
+        }
+        manifest = self._local_json_artifact(
+            manifest_payload,
+            kind="manifest",
+            role="metadata",
+            metadata={
+                "schema": manifest_payload["schema"],
+                "protocol": candidate.protocol,
+                "target_kind": candidate.target_kind,
+            },
+        )
+        artifacts.append(manifest)
+        total_bytes = sum(item.blob.size_bytes for item in artifacts)
+        if total_bytes > self.limits.max_total_bytes:
+            raise AcquisitionLimitError(
+                "source snapshot exceeds the aggregate byte limit",
+                code="snapshot_too_large",
+            )
+        return AcquisitionResult(
+            source_key=candidate.source_key,
+            source_definition_sha256=candidate.definition_sha256,
+            protocol=candidate.protocol,
+            target_kind=candidate.target_kind,
+            not_modified=False,
+            artifacts=tuple(artifacts),
+            manifest_sha256=manifest.blob.sha256,
+            probe=probe,
+            observed_etag=observed.etag if observed else None,
+            observed_last_modified=_http_datetime(observed.last_modified) if observed else None,
+            observed_version=probe.service_version if probe else None,
+            feature_count=feature_count,
+            total_bytes=total_bytes,
+            stats=stats,
+        )
+
+    def _unchanged(
+        self,
+        candidate: SourceCandidate,
+        result: HTTPSDownloadResult,
+        *,
+        probe: SourceProbe | None = None,
+        artifacts: tuple[AcquiredArtifact, ...] = (),
+        stats: Mapping[str, Any] | None = None,
+    ) -> AcquisitionResult:
+        return AcquisitionResult(
+            source_key=candidate.source_key,
+            source_definition_sha256=candidate.definition_sha256,
+            protocol=candidate.protocol,
+            target_kind=candidate.target_kind,
+            not_modified=True,
+            artifacts=artifacts,
+            manifest_sha256=None,
+            probe=probe,
+            observed_etag=result.etag,
+            observed_last_modified=_http_datetime(result.last_modified),
+            observed_version=probe.service_version if probe else None,
+            feature_count=None,
+            total_bytes=sum(item.blob.size_bytes for item in artifacts),
+            stats={"not_modified": True, **dict(stats or {})},
+        )
+
+    def _acquire_wfs(
+        self,
+        candidate: SourceCandidate,
+        *,
+        conditional: ConditionalRequest | None,
+    ) -> AcquisitionResult:
+        del conditional  # A page-level 304 cannot prove a complete snapshot.
+        probe, capabilities, capabilities_document = self._probe(candidate)
+        canonical_name = probe.canonical_name or ""
+        snapshot_spec = _wfs_snapshot_spec(candidate.config)
+        page_size = _configured_page_size(
+            candidate.config,
+            self.limits.page_size,
+            maximum=(
+                min(self.limits.max_features, 100_000)
+                if snapshot_spec is not None
+                and snapshot_spec.mode == "paged"
+                else None
+            ),
+        )
+        output_format = _config_text(
+            candidate.config,
+            "output_format",
+            default="application/json",
+            max_chars=200,
+        )
+        version = probe.service_version or "2.0.0"
+        if version.startswith("1."):
+            type_parameter = "typeName"
+            count_parameter = "maxFeatures"
+        elif version.startswith("2."):
+            type_parameter = "typeNames"
+            count_parameter = "count"
+        else:
+            raise AcquisitionValidationError(
+                "WFS advertised an unsupported version",
+                code="unsupported_wfs_version",
+            )
+        if snapshot_spec is not None:
+            return self._acquire_convergent_wfs(
+                candidate,
+                probe=probe,
+                capabilities=capabilities,
+                canonical_name=canonical_name,
+                page_size=page_size,
+                output_format=output_format,
+                version=version,
+                type_parameter=type_parameter,
+                count_parameter=count_parameter,
+                snapshot_spec=snapshot_spec,
+            )
+        paging_is_transaction_safe = _wfs_paging_is_transaction_safe(
+            capabilities_document
+        )
+        if paging_is_transaction_safe is not True:
+            raise AcquisitionValidationError(
+                "WFS pagination requires a transaction-safe capability or "
+                "an explicit reviewed snapshot contract",
+                code="wfs_paging_not_transaction_safe",
+            )
+
+        artifacts = [capabilities]
+        page_artifacts: list[AcquiredArtifact] = []
+        seen_page_digests: set[str] = set()
+        seen_feature_ids: set[str] = set()
+        total_features = 0
+        expected_matched: int | None = None
+        offset = 0
+        terminal = False
+        for page_index in range(self.limits.max_pages):
+            params = {
+                "service": "WFS",
+                "request": "GetFeature",
+                "version": version,
+                type_parameter: canonical_name,
+                "outputFormat": output_format,
+                count_parameter: str(page_size),
+            }
+            if version.startswith("2.") or offset:
+                params["startIndex"] = str(offset)
+            sort_by = _config_optional_text(candidate.config, "sort_by", max_chars=500)
+            if sort_by is not None:
+                params["sortBy"] = sort_by
+            url = _merge_query(candidate.endpoint_url, params)
+            downloaded = self._download(
+                candidate,
+                url,
+                max_bytes=self.limits.max_page_bytes,
+                accept="application/geo+json, application/json;q=0.9",
+                allowed_media_types=_JSON_MEDIA_TYPES,
+                validator=lambda payload: _parse_feature_collection(
+                    payload,
+                    page_size=page_size,
+                    allow_next=False,
+                ),
+            )
+            page = cast(_FeaturePage, downloaded.parsed)
+            if downloaded.blob is None:
+                raise AcquisitionValidationError(
+                    "WFS returned an unexpected not-modified page",
+                    code="partial_not_modified",
+                )
+            if downloaded.blob.sha256 in seen_page_digests and page.count:
+                raise AcquisitionValidationError(
+                    "WFS repeated a non-empty page",
+                    code="pagination_loop",
+                )
+            seen_page_digests.add(downloaded.blob.sha256)
+            if page.number_matched is not None:
+                if expected_matched is None:
+                    expected_matched = page.number_matched
+                    if expected_matched > self.limits.max_features:
+                        raise AcquisitionLimitError(
+                            "WFS reports too many features",
+                            code="feature_limit",
+                        )
+                elif page.number_matched != expected_matched:
+                    raise AcquisitionValidationError(
+                        "WFS feature count changed during pagination",
+                        code="unstable_snapshot",
+                        retryable=True,
+                    )
+            duplicates = seen_feature_ids.intersection(page.feature_ids)
+            if duplicates:
+                raise AcquisitionValidationError(
+                    "WFS repeated feature identifiers across pages",
+                    code="unstable_pagination",
+                    retryable=True,
+                )
+            seen_feature_ids.update(page.feature_ids)
+            total_features += page.count
+            if total_features > self.limits.max_features:
+                raise AcquisitionLimitError(
+                    "WFS snapshot exceeds the feature limit",
+                    code="feature_limit",
+                )
+            page_artifacts.append(
+                self._remote_artifact(
+                    downloaded,
+                    kind="dataset",
+                    role="input" if page.count else "observation",
+                    source_version=version,
+                    metadata={
+                        "protocol": "wfs",
+                        "data_format": "geojson",
+                        "collection": canonical_name,
+                        "page_index": page_index,
+                        "offset": offset,
+                        "feature_count": page.count,
+                        "terminal_empty_page": page.count == 0,
+                    },
+                )
+            )
+            _enforce_total_bytes(
+                [capabilities, *page_artifacts],
+                self.limits.max_total_bytes,
+            )
+            offset += page.count
+            terminal = (
+                page.count == 0
+                or page.count < page_size
+                or (expected_matched is not None and offset >= expected_matched)
+            )
+            if terminal:
+                break
+        if not terminal:
+            raise AcquisitionLimitError(
+                "WFS pagination exceeds the page limit",
+                code="page_limit",
+            )
+        if expected_matched is not None and total_features != expected_matched:
+            raise AcquisitionValidationError(
+                "WFS snapshot does not match its advertised feature count",
+                code="unstable_snapshot",
+                retryable=True,
+            )
+        if len(page_artifacts) > 1 and len(seen_feature_ids) != total_features:
+            raise AcquisitionValidationError(
+                "paginated WFS snapshot lacks stable feature identifiers",
+                code="missing_pagination_identity",
+            )
+        artifacts.extend(page_artifacts)
+        style_artifacts = self._acquire_styles(candidate)
+        artifacts.extend(style_artifacts)
+        _enforce_total_bytes(artifacts, self.limits.max_total_bytes)
+        stats = {
+            "page_count": len(page_artifacts),
+            "feature_count": total_features,
+            "page_size": page_size,
+            "number_matched": expected_matched,
+            "feature_ids_observed": len(seen_feature_ids),
+        }
+        materialization = {
+            "kind": "feature-pages",
+            "format": "geojson",
+            "collection": canonical_name,
+            "page_artifact_sha256": [
+                item.blob.sha256
+                for item in page_artifacts
+                if item.role == "input"
+            ],
+        }
+        style_digests = _style_digests(style_artifacts)
+        if style_digests:
+            stats["style_count"] = len(style_digests)
+            materialization["style_artifact_sha256"] = style_digests
+        return self._finish(
+            candidate,
+            probe=probe,
+            artifacts=artifacts,
+            materialization=materialization,
+            feature_count=total_features,
+            stats=stats,
+            observed=downloaded.result,
+        )
+
+    def _acquire_convergent_wfs(
+        self,
+        candidate: SourceCandidate,
+        *,
+        probe: SourceProbe,
+        capabilities: AcquiredArtifact,
+        canonical_name: str,
+        page_size: int,
+        output_format: str,
+        version: str,
+        type_parameter: str,
+        count_parameter: str,
+        snapshot_spec: _WFSSnapshotSpec,
+    ) -> AcquisitionResult:
+        staged_pages: list[_StagedWFSPage] = []
+
+        def read_pass(
+            *,
+            stage_pages: bool,
+            byte_budget: int,
+        ) -> _WFSSnapshotPass:
+            if snapshot_spec.mode == "single_response":
+                return self._read_single_response_wfs_pass(
+                    candidate,
+                    canonical_name=canonical_name,
+                    output_format=output_format,
+                    version=version,
+                    type_parameter=type_parameter,
+                    count_parameter=count_parameter,
+                    staging_batch=(
+                        staging_batch if stage_pages else None
+                    ),
+                    staged_pages=staged_pages if stage_pages else None,
+                    byte_budget=byte_budget,
+                )
+            return self._read_paged_wfs_pass(
+                candidate,
+                canonical_name=canonical_name,
+                page_size=page_size,
+                output_format=output_format,
+                version=version,
+                type_parameter=type_parameter,
+                count_parameter=count_parameter,
+                snapshot_spec=snapshot_spec,
+                staging_batch=staging_batch if stage_pages else None,
+                staged_pages=staged_pages if stage_pages else None,
+                byte_budget=byte_budget,
+            )
+
+        capabilities_observed_bytes = capabilities.blob.size_bytes
+        remaining_byte_budget = (
+            self.limits.max_total_bytes - capabilities_observed_bytes
+        )
+        if remaining_byte_budget <= 0:
+            raise AcquisitionLimitError(
+                "WFS capabilities exhaust the aggregate remote byte limit",
+                code="snapshot_too_large",
+            )
+        staging_batch = self.store.staging_batch()
+        try:
+            first = read_pass(
+                stage_pages=True,
+                byte_budget=remaining_byte_budget,
+            )
+            remaining_byte_budget -= first.observed_bytes
+            if remaining_byte_budget <= 0:
+                raise AcquisitionLimitError(
+                    "WFS convergence reads exhaust the aggregate remote "
+                    "byte limit",
+                    code="snapshot_too_large",
+                )
+            verification = read_pass(
+                stage_pages=False,
+                byte_budget=remaining_byte_budget,
+            )
+            remaining_byte_budget -= verification.observed_bytes
+            if _wfs_snapshot_pass_identity(
+                first
+            ) != _wfs_snapshot_pass_identity(verification):
+                raise AcquisitionValidationError(
+                    "WFS snapshot did not converge across complete reads",
+                    code="unstable_snapshot",
+                    retryable=True,
+                )
+
+            style_artifacts = self._acquire_styles(
+                candidate,
+                remote_byte_budget=max(0, remaining_byte_budget),
+            )
+            style_observed_bytes = sum(
+                item.blob.size_bytes
+                for item in style_artifacts
+                if item.source_url is not None
+            )
+            if style_observed_bytes > remaining_byte_budget:
+                raise AcquisitionLimitError(
+                    "WFS styles exceed the aggregate remote byte limit",
+                    code="snapshot_too_large",
+                )
+            retained_bytes_before_manifest = (
+                capabilities.blob.size_bytes
+                + sum(item.size_bytes for item in staged_pages)
+                + sum(item.blob.size_bytes for item in style_artifacts)
+            )
+            if retained_bytes_before_manifest > self.limits.max_total_bytes:
+                raise AcquisitionLimitError(
+                    "WFS retained snapshot exceeds the aggregate byte limit",
+                    code="snapshot_too_large",
+                )
+            page_artifacts = [
+                self._commit_staged_wfs_page(item)
+                for item in first.staged_pages
+            ]
+        finally:
+            staging_batch.close()
+
+        artifacts = [capabilities, *page_artifacts, *style_artifacts]
+        _enforce_total_bytes(artifacts, self.limits.max_total_bytes)
+        upstream_observed_bytes = (
+            capabilities_observed_bytes
+            + first.observed_bytes
+            + verification.observed_bytes
+            + style_observed_bytes
+        )
+        stats: dict[str, Any] = {
+            "page_count": first.page_count,
+            "feature_count": first.feature_count,
+            "number_matched": first.number_matched,
+            "feature_ids_observed": (
+                first.source_feature_ids_observed
+            ),
+            "stable_identity_count": first.feature_count,
+            "snapshot_mode": snapshot_spec.mode,
+            "snapshot_convergence_passes": 2,
+            "snapshot_identity_sha256": first.identity_sha256,
+            "snapshot_content_sha256": first.content_sha256,
+            "upstream_observed_bytes": upstream_observed_bytes,
+            "upstream_capabilities_bytes": capabilities_observed_bytes,
+            "upstream_snapshot_pass_bytes": (
+                first.observed_bytes + verification.observed_bytes
+            ),
+            "upstream_style_bytes": style_observed_bytes,
+            "retained_bytes_before_manifest": sum(
+                item.blob.size_bytes for item in artifacts
+            ),
+        }
+        materialization: dict[str, Any] = {
+            "kind": "feature-pages",
+            "format": "geojson",
+            "collection": canonical_name,
+            "canonical_snapshot": True,
+            "snapshot_mode": snapshot_spec.mode,
+            "snapshot_convergence_passes": 2,
+            "snapshot_identity_sha256": first.identity_sha256,
+            "snapshot_content_sha256": first.content_sha256,
+            "page_artifact_sha256": [
+                item.blob.sha256
+                for item in page_artifacts
+                if item.role == "input"
+            ],
+        }
+        if snapshot_spec.mode == "paged":
+            stats.update(
+                {
+                    "page_size": page_size,
+                    "stable_identity_properties": list(
+                        snapshot_spec.identity_properties
+                    ),
+                    "sort_by": snapshot_spec.sort_by,
+                }
+            )
+            materialization.update(
+                {
+                    "stable_identity_properties": list(
+                        snapshot_spec.identity_properties
+                    ),
+                    "sort_by": snapshot_spec.sort_by,
+                }
+            )
+        else:
+            stats["stable_identity_derivation"] = (
+                "canonical-feature-content-and-occurrence"
+            )
+            materialization["stable_identity_derivation"] = (
+                "canonical-feature-content-and-occurrence"
+            )
+        style_digests = _style_digests(style_artifacts)
+        if style_digests:
+            stats["style_count"] = len(style_digests)
+            materialization["style_artifact_sha256"] = style_digests
+        return self._finish(
+            candidate,
+            probe=probe,
+            artifacts=artifacts,
+            materialization=materialization,
+            feature_count=first.feature_count,
+            stats=stats,
+            observed=verification.observed,
+        )
+
+    def _read_single_response_wfs_pass(
+        self,
+        candidate: SourceCandidate,
+        *,
+        canonical_name: str,
+        output_format: str,
+        version: str,
+        type_parameter: str,
+        count_parameter: str,
+        staging_batch: ReferenceStagingBatch | None,
+        staged_pages: list[_StagedWFSPage] | None,
+        byte_budget: int,
+    ) -> _WFSSnapshotPass:
+        expected_count, hits = self._observe_wfs_hits(
+            candidate,
+            canonical_name=canonical_name,
+            version=version,
+            type_parameter=type_parameter,
+            count_parameter=count_parameter,
+            byte_budget=byte_budget,
+        )
+        remaining_byte_budget = (
+            byte_budget - hits.result.size_bytes
+        )
+        if remaining_byte_budget <= 0:
+            raise AcquisitionLimitError(
+                "WFS snapshot exceeds the aggregate byte limit",
+                code="snapshot_too_large",
+            )
+        params = {
+            "service": "WFS",
+            "request": "GetFeature",
+            "version": version,
+            type_parameter: canonical_name,
+            "outputFormat": output_format,
+        }
+        observed = self._observe_download(
+            candidate,
+            _merge_query(candidate.endpoint_url, params),
+            max_bytes=min(
+                self.limits.max_page_bytes,
+                remaining_byte_budget,
+            ),
+            accept="application/geo+json, application/json;q=0.9",
+            allowed_media_types=_JSON_MEDIA_TYPES,
+            validator=lambda payload: _parse_feature_collection(
+                payload,
+                page_size=self.limits.max_features,
+                allow_next=False,
+            ),
+        )
+        page = cast(_FeaturePage, observed.parsed)
+        if (
+            page.number_matched is None
+            or page.number_matched != expected_count
+            or page.count != expected_count
+        ):
+            raise AcquisitionValidationError(
+                "single-response WFS did not prove its complete feature count",
+                code="snapshot_completeness_unproven",
+                retryable=True,
+            )
+        if page.count > self.limits.max_features:
+            raise AcquisitionLimitError(
+                "WFS snapshot exceeds the feature limit",
+                code="feature_limit",
+            )
+        canonical = _canonical_single_response_wfs_page(
+            page,
+            collection=canonical_name,
+        )
+        pass_staged_pages: tuple[_StagedWFSPage, ...] = ()
+        if staged_pages is not None:
+            if staging_batch is None:
+                raise AcquisitionPersistenceError(
+                    "WFS staging batch is unavailable",
+                    code="staging_unavailable",
+                )
+            staged = self._stage_wfs_page(
+                canonical.document,
+                batch=staging_batch,
+                observed=observed.result,
+                source_version=version,
+                metadata={
+                    "protocol": "wfs",
+                    "data_format": "geojson",
+                    "collection": canonical_name,
+                    "page_index": 0,
+                    "offset": 0,
+                    "feature_count": page.count,
+                    "terminal_empty_page": page.count == 0,
+                    "canonical_snapshot": True,
+                    "snapshot_mode": "single_response",
+                    "stable_identity_derivation": (
+                        "canonical-feature-content-and-occurrence"
+                    ),
+                    "page_identity_sha256": (
+                        canonical.identity_sha256
+                    ),
+                    "page_content_sha256": (
+                        canonical.content_sha256
+                    ),
+                },
+            )
+            staged_pages.append(staged)
+            pass_staged_pages = (staged,)
+        identity_hasher = hashlib.sha256()
+        content_hasher = hashlib.sha256()
+        for record in canonical.identity_records:
+            _update_record_hash(identity_hasher, record)
+        for record in canonical.content_records:
+            _update_record_hash(content_hasher, record)
+        return _WFSSnapshotPass(
+            staged_pages=pass_staged_pages,
+            page_count=1,
+            feature_count=page.count,
+            number_matched=page.number_matched,
+            source_feature_ids_observed=len(page.feature_ids),
+            identity_sha256=identity_hasher.hexdigest(),
+            content_sha256=content_hasher.hexdigest(),
+            page_identity_sha256=(canonical.identity_sha256,),
+            page_content_sha256=(canonical.content_sha256,),
+            observed_bytes=(
+                hits.result.size_bytes + observed.result.size_bytes
+            ),
+            observed=observed.result,
+        )
+
+    def _observe_wfs_hits(
+        self,
+        candidate: SourceCandidate,
+        *,
+        canonical_name: str,
+        version: str,
+        type_parameter: str,
+        count_parameter: str,
+        byte_budget: int,
+    ) -> tuple[int, _Downloaded]:
+        if byte_budget <= 0:
+            raise AcquisitionLimitError(
+                "WFS snapshot has no remaining byte budget",
+                code="snapshot_too_large",
+            )
+        params = {
+            "service": "WFS",
+            "request": "GetFeature",
+            "version": version,
+            type_parameter: canonical_name,
+            "resultType": "hits",
+        }
+        if version.startswith("2."):
+            params[count_parameter] = "1"
+        observed = self._observe_download(
+            candidate,
+            _merge_query(candidate.endpoint_url, params),
+            max_bytes=min(
+                self.limits.max_probe_bytes,
+                byte_budget,
+            ),
+            accept="application/xml, text/xml;q=0.9",
+            allowed_media_types=_XML_MEDIA_TYPES,
+            validator=lambda payload: _parse_wfs_hits(
+                payload,
+                version=version,
+            ),
+        )
+        matched = cast(int, observed.parsed)
+        if matched > self.limits.max_features:
+            raise AcquisitionLimitError(
+                "WFS reports too many features",
+                code="feature_limit",
+            )
+        return matched, observed
+
+    def _read_paged_wfs_pass(
+        self,
+        candidate: SourceCandidate,
+        *,
+        canonical_name: str,
+        page_size: int,
+        output_format: str,
+        version: str,
+        type_parameter: str,
+        count_parameter: str,
+        snapshot_spec: _WFSSnapshotSpec,
+        staging_batch: ReferenceStagingBatch | None,
+        staged_pages: list[_StagedWFSPage] | None,
+        byte_budget: int,
+    ) -> _WFSSnapshotPass:
+        if snapshot_spec.sort_by is None:
+            raise AcquisitionConfigurationError(
+                "paged WFS snapshot has no deterministic sort"
+            )
+        pass_staged_pages: list[_StagedWFSPage] = []
+        expected_count, hits = self._observe_wfs_hits(
+            candidate,
+            canonical_name=canonical_name,
+            version=version,
+            type_parameter=type_parameter,
+            count_parameter=count_parameter,
+            byte_budget=byte_budget,
+        )
+        seen_identities: set[bytes] = set()
+        seen_source_feature_ids: set[str] = set()
+        identity_hasher = hashlib.sha256()
+        content_hasher = hashlib.sha256()
+        page_identity_sha256: list[str] = []
+        page_content_sha256: list[str] = []
+        page_reported_matched: int | None = None
+        total_features = 0
+        offset = 0
+        observed_bytes = hits.result.size_bytes
+        previous_identity_sort_key: tuple[
+            tuple[int, Any],
+            ...,
+        ] | None = None
+        terminal = False
+        last_result: HTTPSDownloadResult | None = None
+        for page_index in range(self.limits.max_pages):
+            params = {
+                "service": "WFS",
+                "request": "GetFeature",
+                "version": version,
+                type_parameter: canonical_name,
+                "outputFormat": output_format,
+                count_parameter: str(page_size),
+                "sortBy": snapshot_spec.sort_by,
+            }
+            if version.startswith("2.") or offset:
+                params["startIndex"] = str(offset)
+            remaining_byte_budget = byte_budget - observed_bytes
+            if remaining_byte_budget <= 0:
+                raise AcquisitionLimitError(
+                    "WFS pagination exceeds the aggregate byte limit",
+                    code="snapshot_too_large",
+                )
+            observed = self._observe_download(
+                candidate,
+                _merge_query(candidate.endpoint_url, params),
+                max_bytes=min(
+                    self.limits.max_page_bytes,
+                    remaining_byte_budget,
+                ),
+                accept=(
+                    "application/geo+json, application/json;q=0.9"
+                ),
+                allowed_media_types=_JSON_MEDIA_TYPES,
+                validator=lambda payload: _parse_feature_collection(
+                    payload,
+                    page_size=page_size,
+                    allow_next=False,
+                ),
+            )
+            last_result = observed.result
+            observed_bytes += observed.result.size_bytes
+            if observed_bytes > byte_budget:
+                raise AcquisitionLimitError(
+                    "WFS pagination exceeds the aggregate byte limit",
+                    code="snapshot_too_large",
+                )
+            page = cast(_FeaturePage, observed.parsed)
+            if page.number_matched is None:
+                raise AcquisitionValidationError(
+                    "ordered WFS snapshot omitted its complete feature count",
+                    code="snapshot_completeness_unproven",
+                    retryable=True,
+                )
+            if page_reported_matched is None:
+                page_reported_matched = page.number_matched
+            elif page.number_matched != page_reported_matched:
+                raise AcquisitionValidationError(
+                    "WFS feature count changed during ordered pagination",
+                    code="unstable_snapshot",
+                    retryable=True,
+                )
+            canonical = _canonical_wfs_page(
+                page,
+                collection=canonical_name,
+                snapshot_spec=snapshot_spec,
+            )
+            for identity_sort_key in canonical.identity_sort_keys:
+                if (
+                    previous_identity_sort_key is not None
+                    and identity_sort_key
+                    <= previous_identity_sort_key
+                ):
+                    raise AcquisitionValidationError(
+                        "WFS stable identities are not strictly ordered",
+                        code="unstable_pagination",
+                        retryable=True,
+                    )
+                previous_identity_sort_key = identity_sort_key
+            duplicates = seen_identities.intersection(
+                canonical.identity_records
+            )
+            if duplicates:
+                raise AcquisitionValidationError(
+                    "WFS repeated stable feature identities across pages",
+                    code="unstable_pagination",
+                    retryable=True,
+                )
+            seen_identities.update(canonical.identity_records)
+            duplicates = seen_source_feature_ids.intersection(
+                page.feature_ids
+            )
+            if duplicates:
+                raise AcquisitionValidationError(
+                    "WFS repeated source feature identifiers across pages",
+                    code="unstable_pagination",
+                    retryable=True,
+                )
+            seen_source_feature_ids.update(page.feature_ids)
+            for identity_record in canonical.identity_records:
+                _update_record_hash(identity_hasher, identity_record)
+            for content_record in canonical.content_records:
+                _update_record_hash(content_hasher, content_record)
+            page_identity_sha256.append(canonical.identity_sha256)
+            page_content_sha256.append(canonical.content_sha256)
+
+            total_features += page.count
+            if total_features > self.limits.max_features:
+                raise AcquisitionLimitError(
+                    "WFS snapshot exceeds the feature limit",
+                    code="feature_limit",
+                )
+            if total_features > expected_count:
+                raise AcquisitionValidationError(
+                    "WFS snapshot exceeded its independent hits count",
+                    code="unstable_snapshot",
+                    retryable=True,
+                )
+            if staged_pages is not None:
+                if staging_batch is None:
+                    raise AcquisitionPersistenceError(
+                        "WFS staging batch is unavailable",
+                        code="staging_unavailable",
+                    )
+                staged = self._stage_wfs_page(
+                    canonical.document,
+                    batch=staging_batch,
+                    observed=observed.result,
+                    source_version=version,
+                    metadata={
+                        "protocol": "wfs",
+                        "data_format": "geojson",
+                        "collection": canonical_name,
+                        "page_index": page_index,
+                        "offset": offset,
+                        "feature_count": page.count,
+                        "terminal_empty_page": page.count == 0,
+                        "canonical_snapshot": True,
+                        "stable_identity_properties": list(
+                            snapshot_spec.identity_properties
+                        ),
+                        "sort_by": snapshot_spec.sort_by,
+                        "page_identity_sha256": (
+                            canonical.identity_sha256
+                        ),
+                        "page_content_sha256": (
+                            canonical.content_sha256
+                        ),
+                    },
+                )
+                staged_pages.append(staged)
+                pass_staged_pages.append(staged)
+                if (
+                    sum(item.size_bytes for item in pass_staged_pages)
+                    > self.limits.max_total_bytes
+                ):
+                    raise AcquisitionLimitError(
+                        "canonical WFS pages exceed the retained byte limit",
+                        code="snapshot_too_large",
+                    )
+            offset += page.count
+            terminal = (
+                total_features == expected_count
+                or page.count == 0
+                or page.count < page_size
+            )
+            if terminal:
+                break
+        if not terminal:
+            raise AcquisitionLimitError(
+                "WFS pagination exceeds the page limit",
+                code="page_limit",
+            )
+        if total_features != expected_count:
+            raise AcquisitionValidationError(
+                "WFS snapshot does not match its independent hits count",
+                code="unstable_snapshot",
+                retryable=True,
+            )
+        if len(seen_identities) != total_features:
+            raise AcquisitionValidationError(
+                "WFS snapshot lacks unique stable feature identities",
+                code="missing_pagination_identity",
+            )
+        if last_result is None:
+            raise AcquisitionValidationError(
+                "WFS snapshot did not return an observation",
+                code="unstable_snapshot",
+                retryable=True,
+            )
+        return _WFSSnapshotPass(
+            staged_pages=tuple(pass_staged_pages),
+            page_count=len(page_identity_sha256),
+            feature_count=total_features,
+            number_matched=expected_count,
+            source_feature_ids_observed=len(seen_source_feature_ids),
+            identity_sha256=identity_hasher.hexdigest(),
+            content_sha256=content_hasher.hexdigest(),
+            page_identity_sha256=tuple(page_identity_sha256),
+            page_content_sha256=tuple(page_content_sha256),
+            observed_bytes=observed_bytes,
+            observed=last_result,
+        )
+
+    def _acquire_ogc_api(
+        self,
+        candidate: SourceCandidate,
+        *,
+        conditional: ConditionalRequest | None,
+    ) -> AcquisitionResult:
+        del conditional
+        probe, capabilities, _document = self._probe(candidate)
+        collection = probe.canonical_name or ""
+        page_size = _configured_page_size(candidate.config, self.limits.page_size)
+        query_scope = _ogc_query_scope(candidate.config)
+        scope_metadata = _ogc_scope_metadata(query_scope)
+        current_url = _ogc_items_url(
+            candidate,
+            collection,
+            page_size,
+            query_scope,
+        )
+        expected_items_path = urlsplit(current_url).path
+        seen_urls: set[str] = set()
+        seen_digests: set[str] = set()
+        seen_feature_ids: set[str] = set()
+        page_artifacts: list[AcquiredArtifact] = []
+        total_features = 0
+        expected_matched: int | None = None
+        offset = 0
+        terminal = False
+        last_result: HTTPSDownloadResult | None = None
+        for page_index in range(self.limits.max_pages):
+            current_url = _require_same_origin(candidate.endpoint_url, current_url)
+            _require_ogc_page_scope(
+                current_url,
+                expected_items_path=expected_items_path,
+                scope=query_scope,
+            )
+            if current_url in seen_urls:
+                raise AcquisitionValidationError(
+                    "OGC API pagination contains a URL loop",
+                    code="pagination_loop",
+                )
+            seen_urls.add(current_url)
+            downloaded = self._download(
+                candidate,
+                current_url,
+                max_bytes=self.limits.max_page_bytes,
+                accept="application/geo+json, application/json;q=0.9",
+                allowed_media_types=_JSON_MEDIA_TYPES,
+                validator=lambda payload: _parse_feature_collection(
+                    payload,
+                    page_size=page_size,
+                    allow_next=True,
+                ),
+            )
+            last_result = downloaded.result
+            page = cast(_FeaturePage, downloaded.parsed)
+            if downloaded.blob is None:
+                raise AcquisitionValidationError(
+                    "OGC API returned an unexpected not-modified page",
+                    code="partial_not_modified",
+                )
+            if downloaded.blob.sha256 in seen_digests and page.count:
+                raise AcquisitionValidationError(
+                    "OGC API repeated a non-empty page",
+                    code="pagination_loop",
+                )
+            seen_digests.add(downloaded.blob.sha256)
+            if page.number_matched is not None:
+                if expected_matched is None:
+                    expected_matched = page.number_matched
+                    if expected_matched > self.limits.max_features:
+                        raise AcquisitionLimitError(
+                            "OGC API reports too many features",
+                            code="feature_limit",
+                        )
+                elif page.number_matched != expected_matched:
+                    raise AcquisitionValidationError(
+                        "OGC API feature count changed during pagination",
+                        code="unstable_snapshot",
+                        retryable=True,
+                    )
+            duplicates = seen_feature_ids.intersection(page.feature_ids)
+            if duplicates:
+                raise AcquisitionValidationError(
+                    "OGC API repeated feature identifiers across pages",
+                    code="unstable_pagination",
+                    retryable=True,
+                )
+            seen_feature_ids.update(page.feature_ids)
+            total_features += page.count
+            if total_features > self.limits.max_features:
+                raise AcquisitionLimitError(
+                    "OGC API snapshot exceeds the feature limit",
+                    code="feature_limit",
+                )
+            page_artifacts.append(
+                self._remote_artifact(
+                    downloaded,
+                    kind="dataset",
+                    role="input" if page.count else "observation",
+                    metadata={
+                        "protocol": "ogc_api_features",
+                        "data_format": "geojson",
+                        "collection": collection,
+                        **scope_metadata,
+                        "page_index": page_index,
+                        "offset": offset,
+                        "feature_count": page.count,
+                        "terminal_empty_page": page.count == 0,
+                    },
+                )
+            )
+            _enforce_total_bytes(
+                [capabilities, *page_artifacts],
+                self.limits.max_total_bytes,
+            )
+            offset += page.count
+            if page.next_url is not None:
+                current_url = urljoin(current_url, page.next_url)
+                terminal = False
+            elif page.count == 0 or page.count < page_size:
+                terminal = True
+            elif expected_matched is not None and offset >= expected_matched:
+                terminal = True
+            else:
+                current_url = _replace_query_value(current_url, "offset", str(offset))
+                terminal = False
+            if terminal:
+                break
+        if not terminal:
+            raise AcquisitionLimitError(
+                "OGC API pagination exceeds the page limit",
+                code="page_limit",
+            )
+        if (
+            query_scope.require_number_matched
+            and expected_matched is None
+        ):
+            raise AcquisitionValidationError(
+                "OGC API did not prove the filtered snapshot feature count",
+                code="snapshot_completeness_unproven",
+                retryable=True,
+            )
+        if expected_matched is not None and total_features != expected_matched:
+            raise AcquisitionValidationError(
+                "OGC API snapshot does not match its advertised feature count",
+                code="unstable_snapshot",
+                retryable=True,
+            )
+        if len(page_artifacts) > 1 and len(seen_feature_ids) != total_features:
+            raise AcquisitionValidationError(
+                "paginated OGC API snapshot lacks stable feature identifiers",
+                code="missing_pagination_identity",
+            )
+        style_artifacts = self._author_reviewed_local_style(
+            candidate,
+            dataset_artifacts=page_artifacts,
+        )
+        artifacts = [capabilities, *page_artifacts, *style_artifacts]
+        _enforce_total_bytes(artifacts, self.limits.max_total_bytes)
+        stats = {
+            "page_count": len(page_artifacts),
+            "feature_count": total_features,
+            "page_size": page_size,
+            "number_matched": expected_matched,
+            "feature_ids_observed": len(seen_feature_ids),
+            **scope_metadata,
+        }
+        materialization = {
+            "kind": "feature-pages",
+            "format": "geojson",
+            "collection": collection,
+            **scope_metadata,
+            "page_artifact_sha256": [
+                item.blob.sha256
+                for item in page_artifacts
+                if item.role == "input"
+            ],
+        }
+        style_digests = _style_digests(style_artifacts)
+        if style_digests:
+            stats["style_count"] = len(style_digests)
+            materialization["style_artifact_sha256"] = style_digests
+        return self._finish(
+            candidate,
+            probe=probe,
+            artifacts=artifacts,
+            materialization=materialization,
+            feature_count=total_features,
+            stats=stats,
+            observed=last_result,
+        )
+
+    def _acquire_arcgis(
+        self,
+        candidate: SourceCandidate,
+        *,
+        conditional: ConditionalRequest | None,
+    ) -> AcquisitionResult:
+        del conditional
+        probe, capabilities, _document = self._probe(candidate)
+        layer_id = probe.canonical_name or ""
+        if not layer_id.isdecimal():
+            raise AcquisitionValidationError(
+                "ArcGIS probe did not resolve a numeric layer id",
+                code="invalid_arcgis_layer",
+            )
+        layer_url = _append_path(candidate.endpoint_url, layer_id)
+        details_url = _merge_query(layer_url, {"f": "pjson"})
+        details = self._download(
+            candidate,
+            details_url,
+            max_bytes=self.limits.max_probe_bytes,
+            accept="application/json",
+            allowed_media_types=_JSON_MEDIA_TYPES,
+            validator=lambda payload: _parse_arcgis_details(payload, int(layer_id)),
+        )
+        details_json = cast(dict[str, Any], details.parsed)
+        details_artifact = self._remote_artifact(
+            details,
+            kind="metadata",
+            role="observation",
+            source_version=probe.service_version,
+            metadata={
+                "protocol": "arcgis_rest",
+                "layer_id": int(layer_id),
+                "object_id_field": details_json.get("objectIdField"),
+                "geometry_type": details_json.get("geometryType"),
+                "spatial_reference": details_json.get("extent", {}).get("spatialReference")
+                if isinstance(details_json.get("extent"), dict)
+                else None,
+            },
+        )
+        ids_url = _merge_query(
+            _append_path(layer_url, "query"),
+            {"where": "1=1", "returnIdsOnly": "true", "f": "json"},
+        )
+        ids_download = self._download(
+            candidate,
+            ids_url,
+            max_bytes=self.limits.max_page_bytes,
+            accept="application/json",
+            allowed_media_types=_JSON_MEDIA_TYPES,
+            validator=lambda payload: _parse_arcgis_ids(payload, self.limits.max_features),
+        )
+        ids = cast(_ArcGISIds, ids_download.parsed)
+        ids_artifact = self._remote_artifact(
+            ids_download,
+            kind="metadata",
+            role="observation",
+            source_version=probe.service_version,
+            metadata={
+                "protocol": "arcgis_rest",
+                "kind": "object-id-snapshot",
+                "layer_id": int(layer_id),
+                "object_id_field": ids.object_id_field,
+                "feature_count": len(ids.object_ids),
+            },
+        )
+        configured_size = _configured_page_size(candidate.config, self.limits.page_size)
+        server_size = details_json.get("maxRecordCount")
+        if isinstance(server_size, int) and not isinstance(server_size, bool) and server_size > 0:
+            page_size = min(configured_size, server_size)
+        else:
+            page_size = configured_size
+        data_format = _config_text(
+            candidate.config,
+            "arcgis_format",
+            default="geojson",
+            max_chars=20,
+        ).casefold()
+        if data_format not in {"geojson", "json"}:
+            raise AcquisitionConfigurationError(
+                "arcgis_format must be geojson or json",
+                code="invalid_arcgis_format",
+            )
+
+        chunks = _arcgis_id_chunks(
+            ids.object_ids,
+            page_size=page_size,
+            base_url=_append_path(layer_url, "query"),
+        )
+        if len(chunks) > self.limits.max_pages:
+            raise AcquisitionLimitError(
+                "ArcGIS pagination exceeds the page limit",
+                code="page_limit",
+            )
+        page_artifacts: list[AcquiredArtifact] = []
+        total_features = 0
+        last_result = ids_download.result
+        for page_index, object_ids in enumerate(chunks):
+            query_url = _merge_query(
+                _append_path(layer_url, "query"),
+                {
+                    "objectIds": ",".join(str(value) for value in object_ids),
+                    "outFields": "*",
+                    "returnGeometry": "true",
+                    "f": data_format,
+                },
+            )
+            if data_format == "geojson":
+                validator = lambda payload, expected=object_ids: (
+                    _parse_arcgis_geojson_page(
+                        payload,
+                        expected,
+                        ids.object_id_field,
+                    )
+                )
+            else:
+                validator = lambda payload, expected=object_ids: (
+                    _parse_arcgis_json_page(
+                        payload,
+                        expected,
+                        ids.object_id_field,
+                    )
+                )
+            downloaded = self._download(
+                candidate,
+                query_url,
+                max_bytes=self.limits.max_page_bytes,
+                accept="application/geo+json, application/json;q=0.9",
+                allowed_media_types=_JSON_MEDIA_TYPES,
+                validator=validator,
+            )
+            last_result = downloaded.result
+            count = cast(int, downloaded.parsed)
+            total_features += count
+            page_artifacts.append(
+                self._remote_artifact(
+                    downloaded,
+                    kind="dataset",
+                    role="input",
+                    source_version=probe.service_version,
+                    metadata={
+                        "protocol": "arcgis_rest",
+                        "data_format": "geojson" if data_format == "geojson" else "esri-json",
+                        "layer_id": int(layer_id),
+                        "page_index": page_index,
+                        "feature_count": count,
+                        "first_object_id": object_ids[0],
+                        "last_object_id": object_ids[-1],
+                        "object_id_count": len(object_ids),
+                    },
+                )
+            )
+            _enforce_total_bytes(
+                [capabilities, details_artifact, ids_artifact, *page_artifacts],
+                self.limits.max_total_bytes,
+            )
+
+        verify_ids = self._download(
+            candidate,
+            ids_url,
+            max_bytes=self.limits.max_page_bytes,
+            accept="application/json",
+            allowed_media_types=_JSON_MEDIA_TYPES,
+            validator=lambda payload: _parse_arcgis_ids(payload, self.limits.max_features),
+        )
+        final_ids = cast(_ArcGISIds, verify_ids.parsed)
+        if final_ids != ids:
+            raise AcquisitionValidationError(
+                "ArcGIS object ids changed during pagination",
+                code="unstable_snapshot",
+                retryable=True,
+            )
+        if total_features != len(ids.object_ids):
+            raise AcquisitionValidationError(
+                "ArcGIS page totals do not match the object-id snapshot",
+                code="unstable_snapshot",
+                retryable=True,
+            )
+        artifacts = [capabilities, details_artifact, ids_artifact, *page_artifacts]
+        stats = {
+            "page_count": len(page_artifacts),
+            "feature_count": total_features,
+            "page_size": page_size,
+            "object_id_field": ids.object_id_field,
+            "id_set_verified": True,
+        }
+        return self._finish(
+            candidate,
+            probe=probe,
+            artifacts=artifacts,
+            materialization={
+                "kind": "feature-pages",
+                "format": "geojson" if data_format == "geojson" else "esri-json",
+                "layer_id": int(layer_id),
+                "object_id_field": ids.object_id_field,
+                "page_artifact_sha256": [item.blob.sha256 for item in page_artifacts],
+            },
+            feature_count=total_features,
+            stats=stats,
+            observed=last_result,
+        )
+
+    def _acquire_wcs(
+        self,
+        candidate: SourceCandidate,
+        *,
+        conditional: ConditionalRequest | None,
+    ) -> AcquisitionResult:
+        probe, capabilities, _document = self._probe(candidate)
+        coverage = probe.canonical_name or ""
+        version = probe.service_version or "2.0.1"
+        image_format = _config_text(
+            candidate.config,
+            "format",
+            default="image/tiff",
+            max_chars=200,
+        )
+        if version.startswith("2."):
+            params = {
+                "service": "WCS",
+                "request": "GetCoverage",
+                "version": version,
+                "coverageId": coverage,
+                "format": image_format,
+            }
+        elif version.startswith("1.1"):
+            params = {
+                "service": "WCS",
+                "request": "GetCoverage",
+                "version": version,
+                "identifier": coverage,
+                "format": image_format,
+            }
+        elif version.startswith("1.0"):
+            params = {
+                "service": "WCS",
+                "request": "GetCoverage",
+                "version": version,
+                "coverage": coverage,
+                "format": image_format,
+            }
+        else:
+            raise AcquisitionValidationError(
+                "WCS advertised an unsupported version",
+                code="unsupported_wcs_version",
+            )
+        extra = candidate.config.get("request_params", {})
+        if not isinstance(extra, dict):
+            raise AcquisitionConfigurationError("request_params must be an object")
+        protected = {name.casefold() for name in params}
+        for key, value in extra.items():
+            values = value if isinstance(value, list) else [value]
+            if (
+                not isinstance(key, str)
+                or not key
+                or len(key) > 100
+                or key.casefold() in protected
+                or not values
+                or len(values) > 32
+                or any(
+                    not isinstance(item, str)
+                    or not item
+                    or len(item) > 2000
+                    or any(ord(character) < 32 for character in key + item)
+                    for item in values
+                )
+            ):
+                raise AcquisitionConfigurationError(
+                    "WCS request_params contains an invalid or protected value"
+                )
+            params[key] = values if len(values) > 1 else values[0]
+        url = _merge_query(candidate.endpoint_url, params)
+        downloaded = self._download(
+            candidate,
+            url,
+            max_bytes=self.limits.max_dataset_bytes,
+            accept="image/tiff, application/geotiff, application/octet-stream;q=0.5",
+            allowed_media_types=_RASTER_MEDIA_TYPES,
+            file_validator=_validate_raster_file,
+            conditional=conditional,
+        )
+        if downloaded.result.not_modified:
+            return self._unchanged(
+                candidate,
+                downloaded.result,
+                probe=probe,
+                artifacts=(capabilities,),
+            )
+        dataset = self._remote_artifact(
+            downloaded,
+            kind="dataset",
+            role="input",
+            source_version=version,
+            metadata={
+                "protocol": "wcs",
+                "data_format": "geotiff",
+                "coverage": coverage,
+            },
+        )
+        style_artifacts = self._acquire_styles(candidate)
+        artifacts = [capabilities, dataset, *style_artifacts]
+        _enforce_total_bytes(artifacts, self.limits.max_total_bytes)
+        materialization = {
+            "kind": "raster",
+            "format": "geotiff",
+            "coverage": coverage,
+            "dataset_sha256": dataset.blob.sha256,
+        }
+        stats = {"dataset_bytes": dataset.blob.size_bytes}
+        style_digests = _style_digests(style_artifacts)
+        if style_digests:
+            stats["style_count"] = len(style_digests)
+            materialization["style_artifact_sha256"] = style_digests
+        return self._finish(
+            candidate,
+            probe=probe,
+            artifacts=artifacts,
+            materialization=materialization,
+            feature_count=None,
+            stats=stats,
+            observed=downloaded.result,
+        )
+
+    def _acquire_download(
+        self,
+        candidate: SourceCandidate,
+        *,
+        conditional: ConditionalRequest | DownloadConditionalRequest | None,
+    ) -> AcquisitionResult:
+        resources = configured_download_resources(candidate)
+        if resources is not None:
+            return self._acquire_composite_download(
+                candidate,
+                resources=resources,
+                conditional=cast(
+                    DownloadConditionalRequest | None,
+                    conditional,
+                ),
+            )
+        if isinstance(conditional, DownloadConditionalRequest):
+            raise AcquisitionConfigurationError(
+                "single direct download received composite conditional state",
+                code="conditional_source_mismatch",
+            )
+        try:
+            transform = parse_masked_geopackage_spec(candidate.config)
+        except MaskedGeoPackageError as error:
+            raise AcquisitionConfigurationError(
+                "direct dataset transform is invalid",
+                code=error.code,
+            ) from error
+        download_url = _config_optional_text(
+            candidate.config,
+            "download_url",
+            max_chars=8192,
+        ) or candidate.endpoint_url
+        media_type = _config_optional_text(
+            candidate.config,
+            "media_type",
+            max_chars=200,
+        )
+        if media_type is None:
+            raise AcquisitionConfigurationError(
+                "direct download requires an explicit media_type"
+            )
+        data_format = _config_optional_text(
+            candidate.config,
+            "data_format",
+            max_chars=100,
+        )
+        if data_format is None:
+            raise AcquisitionConfigurationError(
+                "direct download requires an explicit data_format"
+            )
+        if transform is not None and (
+            candidate.target_kind != "vector"
+            or data_format.strip().casefold()
+            not in {"geopackage", "gpkg"}
+            or candidate.config.get("source_retention")
+            != "discard_after_derivation"
+        ):
+            raise AcquisitionConfigurationError(
+                "masked GeoPackage transform requires transient vector input",
+                code="masked_geopackage_config_invalid",
+            )
+        allowed = frozenset({media_type.casefold()})
+        if transform is not None:
+            with self._download_transient(
+                candidate,
+                download_url,
+                max_bytes=self.limits.max_dataset_bytes,
+                accept=media_type,
+                allowed_media_types=allowed,
+                file_validator=_dataset_file_validator(
+                    data_format,
+                    self.limits,
+                    config=candidate.config,
+                ),
+                conditional=conditional,
+            ) as downloaded:
+                if downloaded.result.not_modified:
+                    return self._unchanged_masked_geopackage(
+                        candidate,
+                        downloaded=downloaded,
+                        transform=transform,
+                    )
+                return self._finish_masked_geopackage(
+                    candidate,
+                    downloaded=downloaded,
+                    transform=transform,
+                )
+        download_maximum = _reviewed_archive_download_maximum(
+            candidate.config,
+            default=self.limits.max_dataset_bytes,
+        )
+        downloaded = self._download(
+            candidate,
+            download_url,
+            max_bytes=download_maximum,
+            accept=media_type,
+            allowed_media_types=allowed,
+            file_validator=_dataset_file_validator(
+                data_format,
+                self.limits,
+                config=candidate.config,
+            ),
+            result_validator=lambda result: (
+                _validate_reviewed_archive_http_result(
+                    candidate.config,
+                    result,
+                )
+            ),
+            conditional=conditional,
+        )
+        response_integrity = _validate_reviewed_archive_http_result(
+            candidate.config,
+            downloaded.result,
+        )
+        if downloaded.result.not_modified:
+            return self._unchanged(candidate, downloaded.result)
+        if response_integrity is not None:
+            archive_integrity = (
+                downloaded.parsed.get("reviewed_archive_integrity")
+                if isinstance(downloaded.parsed, dict)
+                else None
+            )
+            if (
+                not isinstance(archive_integrity, dict)
+                or archive_integrity.get("passed") is not True
+                or archive_integrity.get("spec_sha256")
+                != response_integrity["spec_sha256"]
+            ):
+                raise AcquisitionValidationError(
+                    "reviewed archive lacks its central-directory evidence",
+                    code="reviewed_archive_integrity_missing",
+                )
+            downloaded = replace(
+                downloaded,
+                parsed={
+                    **downloaded.parsed,
+                    "reviewed_archive_integrity": {
+                        **archive_integrity,
+                        "response": response_integrity["response"],
+                    },
+                },
+            )
+        dataset = self._remote_artifact(
+            downloaded,
+            kind="dataset",
+            role="input",
+            metadata={
+                "protocol": "download",
+                "data_format": data_format,
+                "remote_name": candidate.remote_name,
+                **(
+                    downloaded.parsed
+                    if isinstance(downloaded.parsed, dict)
+                    else {}
+                ),
+            },
+        )
+        archive_style_artifacts = self._acquire_reviewed_archive_styles(
+            candidate,
+            downloaded,
+        )
+        authored_style_artifacts = self._author_reviewed_local_style(
+            candidate,
+            dataset_artifacts=[dataset],
+        )
+        if archive_style_artifacts or authored_style_artifacts:
+            style_artifacts = [
+                *archive_style_artifacts,
+                *authored_style_artifacts,
+            ]
+            style_keys = [
+                item.metadata.get("catalog_style_source_key")
+                for item in style_artifacts
+                if item.artifact_kind == "style"
+                and item.role == "style"
+            ]
+            if (
+                not style_keys
+                or not all(isinstance(item, str) for item in style_keys)
+                or len(style_keys) != len(set(style_keys))
+            ):
+                raise AcquisitionConfigurationError(
+                    "reviewed archive and authored styles overlap"
+                )
+        else:
+            style_artifacts = self._acquire_styles(candidate)
+        artifacts = [dataset, *style_artifacts]
+        materialization = {
+            "kind": "direct-dataset",
+            "format": data_format,
+            "dataset_sha256": dataset.blob.sha256,
+        }
+        stats = {"dataset_bytes": dataset.blob.size_bytes}
+        style_digests = _style_digests(style_artifacts)
+        if style_digests:
+            stats["style_count"] = len(style_digests)
+            materialization["style_artifact_sha256"] = style_digests
+        return self._finish(
+            candidate,
+            probe=None,
+            artifacts=artifacts,
+            materialization=materialization,
+            feature_count=None,
+            stats=stats,
+            observed=downloaded.result,
+        )
+
+    def _acquire_composite_download(
+        self,
+        candidate: SourceCandidate,
+        *,
+        resources: tuple[DownloadResourceSpec, ...],
+        conditional: DownloadConditionalRequest | None,
+    ) -> AcquisitionResult:
+        """Acquire an exact ordered resource set as one complete snapshot.
+
+        Changed responses remain under a shared staging lease until every
+        resource has passed its HTTP and file validators.  Only then are the
+        sealed files adopted into the CAS.  A crash during those independent
+        content-addressed renames can leave an unlinked, recoverable blob, but
+        never a partial source version: database linkage and delivery promotion
+        remain separately fenced transactions.
+        """
+
+        aggregate_download_limit, aggregate_uncompressed_limit = (
+            _configured_composite_download_limits(
+                candidate,
+                limits=self.limits,
+            )
+        )
+        previous: dict[str, ReusableDownloadResource] = {}
+        if conditional is not None:
+            if len(conditional.resources) != len(resources):
+                raise AcquisitionConfigurationError(
+                    "composite conditional state has the wrong resource count",
+                    code="conditional_source_mismatch",
+                )
+            for spec, reusable in zip(
+                resources,
+                conditional.resources,
+                strict=True,
+            ):
+                if (
+                    reusable.resource_key != spec.resource_key
+                    or reusable.page_index != spec.page_index
+                    or normalize_https_url(reusable.source_url)
+                    != spec.source_url
+                ):
+                    raise AcquisitionConfigurationError(
+                        "composite conditional state does not match the exact "
+                        "resource order",
+                        code="conditional_source_mismatch",
+                    )
+                self._validate_reusable_download_resource(
+                    candidate,
+                    spec=spec,
+                    reusable=reusable,
+                )
+                previous[spec.resource_key] = reusable
+
+        staged: list[_StagedDownloadResource] = []
+        responses: list[
+            tuple[
+                DownloadResourceSpec,
+                HTTPSDownloadResult,
+                dict[str, Any],
+            ]
+        ] = []
+        downloaded_bytes = 0
+        with self.store.staging_batch() as batch:
+            for spec in resources:
+                reusable = previous.get(spec.resource_key)
+                request = reusable.conditional if reusable is not None else None
+                staged_item, result, parsed = (
+                    self._stage_composite_download_resource(
+                        candidate,
+                        spec=spec,
+                        conditional=request,
+                        staging_batch=batch,
+                    )
+                )
+                if result.not_modified and reusable is None:
+                    raise AcquisitionValidationError(
+                        "resource returned not-modified without an exact "
+                        "reusable artifact",
+                        code="unexpected_not_modified",
+                    )
+                if staged_item is not None:
+                    staged.append(staged_item)
+                    downloaded_bytes += staged_item.size_bytes
+                    if downloaded_bytes > aggregate_download_limit:
+                        raise AcquisitionLimitError(
+                            "composite download exceeds its aggregate byte "
+                            "limit",
+                            code="aggregate_download_limit",
+                        )
+                responses.append((spec, result, parsed))
+
+            staged_by_key = {
+                item.spec.resource_key: item for item in staged
+            }
+            response_digests = [
+                (
+                    staged_by_key[spec.resource_key].sha256
+                    if spec.resource_key in staged_by_key
+                    else previous[spec.resource_key].blob.sha256
+                )
+                for spec in resources
+            ]
+            if len(response_digests) != len(set(response_digests)):
+                raise AcquisitionValidationError(
+                    "composite download resources resolved to duplicate "
+                    "dataset content",
+                    code="duplicate_resource_content",
+                )
+
+            committed = {
+                item.spec.resource_key: self.store.commit_staged_file(
+                    item.path,
+                    max_bytes=item.spec.max_download_bytes,
+                    expected_sha256=item.sha256,
+                    expected_size=item.size_bytes,
+                )
+                for item in staged
+            }
+
+        observed: list[_ObservedDownloadResource] = []
+        total_uncompressed = 0
+        for spec, result, parsed in responses:
+            reusable = previous.get(spec.resource_key)
+            staged_item = staged_by_key.get(spec.resource_key)
+            if staged_item is None:
+                if reusable is None:
+                    raise AcquisitionValidationError(
+                        "composite resource has neither new nor reusable data",
+                        code="missing_artifact",
+                    )
+                dataset = self._reused_composite_dataset(
+                    candidate,
+                    spec=spec,
+                    reusable=reusable,
+                )
+                changed = False
+            else:
+                blob = committed[spec.resource_key]
+                uncompressed_bytes = _resource_uncompressed_bytes(
+                    parsed,
+                    compressed_bytes=blob.size_bytes,
+                )
+                dataset = AcquiredArtifact(
+                    artifact_kind="dataset",
+                    role="input",
+                    media_type=result.content_type or spec.media_type,
+                    blob=blob,
+                    source_url=result.source_url,
+                    final_url=result.final_url,
+                    upstream_etag=result.etag,
+                    upstream_last_modified=_http_datetime(
+                        result.last_modified
+                    ),
+                    metadata={
+                        "schema": "reference-composite-download-dataset/v1",
+                        "protocol": "download",
+                        "data_format": spec.data_format,
+                        "remote_name": candidate.remote_name,
+                        "resource_key": spec.resource_key,
+                        "page_index": spec.page_index,
+                        "resource_count": len(resources),
+                        "uncompressed_bytes": uncompressed_bytes,
+                        **parsed,
+                    },
+                )
+                changed = (
+                    reusable is None
+                    or reusable.blob.sha256 != blob.sha256
+                )
+            uncompressed_bytes = dataset.metadata.get(
+                "uncompressed_bytes"
+            )
+            if (
+                isinstance(uncompressed_bytes, bool)
+                or not isinstance(uncompressed_bytes, int)
+                or not 0 < uncompressed_bytes
+                <= spec.max_uncompressed_bytes
+            ):
+                raise AcquisitionValidationError(
+                    "composite dataset lacks a bounded uncompressed size",
+                    code="resource_uncompressed_size_invalid",
+                )
+            total_uncompressed += uncompressed_bytes
+            if total_uncompressed > aggregate_uncompressed_limit:
+                raise AcquisitionLimitError(
+                    "composite download exceeds its aggregate expansion limit",
+                    code="aggregate_expansion_limit",
+                )
+            observed.append(
+                _ObservedDownloadResource(
+                    spec=spec,
+                    result=result,
+                    dataset=dataset,
+                    parsed=parsed,
+                    changed=changed,
+                )
+            )
+
+        retained_dataset_bytes = sum(
+            item.dataset.blob.size_bytes for item in observed
+        )
+        if retained_dataset_bytes > aggregate_download_limit:
+            raise AcquisitionLimitError(
+                "composite snapshot exceeds its aggregate retained-byte limit",
+                code="aggregate_download_limit",
+            )
+        aggregate_sha256 = _composite_dataset_sha256(observed)
+        observations = [
+            self._composite_download_observation(
+                candidate,
+                item=item,
+                aggregate_sha256=aggregate_sha256,
+            )
+            for item in observed
+        ]
+        changed_count = sum(1 for item in observed if item.changed)
+        not_modified_count = sum(
+            1 for item in observed if item.result.not_modified
+        )
+        stats = {
+            "resource_count": len(observed),
+            "changed_resource_count": changed_count,
+            "http_not_modified_resource_count": not_modified_count,
+            "downloaded_resource_count": len(staged),
+            "downloaded_bytes": downloaded_bytes,
+            "retained_dataset_bytes": retained_dataset_bytes,
+            "aggregate_uncompressed_bytes": total_uncompressed,
+            "aggregate_dataset_sha256": aggregate_sha256,
+            "reusable_blob_verification": (
+                "cas-key-path-and-size"
+                if conditional is not None
+                else "not-applicable"
+            ),
+            "resource_observation_sha256": [
+                item.blob.sha256 for item in observations
+            ],
+        }
+        if changed_count == 0:
+            _enforce_total_bytes(
+                observations,
+                self.limits.max_total_bytes,
+            )
+            return AcquisitionResult(
+                source_key=candidate.source_key,
+                source_definition_sha256=candidate.definition_sha256,
+                protocol=candidate.protocol,
+                target_kind=candidate.target_kind,
+                not_modified=True,
+                artifacts=tuple(observations),
+                manifest_sha256=None,
+                probe=None,
+                observed_etag=None,
+                observed_last_modified=None,
+                observed_version=f"sha256:{aggregate_sha256}",
+                feature_count=None,
+                total_bytes=sum(
+                    item.blob.size_bytes for item in observations
+                ),
+                stats={"not_modified": True, **stats},
+            )
+
+        datasets = [item.dataset for item in observed]
+        style_artifacts = self._author_reviewed_local_style(
+            candidate,
+            dataset_artifacts=datasets,
+        )
+        artifacts = [*datasets, *observations, *style_artifacts]
+        style_digests = _style_digests(style_artifacts)
+        materialization: dict[str, Any] = {
+            "kind": "direct-dataset-pages",
+            "format": resources[0].data_format,
+            "resource_keys": [
+                item.spec.resource_key for item in observed
+            ],
+            "dataset_sha256": [
+                item.dataset.blob.sha256 for item in observed
+            ],
+        }
+        if style_digests:
+            stats["style_count"] = len(style_digests)
+            materialization["style_artifact_sha256"] = style_digests
+        finished = self._finish(
+            candidate,
+            probe=None,
+            artifacts=artifacts,
+            materialization=materialization,
+            feature_count=None,
+            stats=stats,
+        )
+        return replace(
+            finished,
+            observed_version=f"sha256:{aggregate_sha256}",
+        )
+
+    def _stage_composite_download_resource(
+        self,
+        candidate: SourceCandidate,
+        *,
+        spec: DownloadResourceSpec,
+        conditional: ConditionalRequest | None,
+        staging_batch: ReferenceStagingBatch,
+    ) -> tuple[
+        _StagedDownloadResource | None,
+        HTTPSDownloadResult,
+        dict[str, Any],
+    ]:
+        requested_url = _require_same_origin(
+            candidate.endpoint_url,
+            spec.source_url,
+        )
+        policy = HTTPSDownloadPolicy(
+            allowed_origins=(_origin(candidate.endpoint_url),),
+            max_response_bytes=min(
+                spec.max_download_bytes,
+                self.store.max_blob_bytes,
+                self.limits.max_dataset_bytes,
+            ),
+            timeout_seconds=self.limits.timeout_seconds,
+            idle_timeout_seconds=self.limits.idle_timeout_seconds,
+            max_redirects=self.limits.max_redirects,
+            allowed_content_types=frozenset(
+                {spec.media_type.casefold()}
+            ),
+        )
+        downloader = self._downloader_factory(policy)
+        with staging_batch.stage(
+            max_bytes=policy.max_response_bytes,
+        ) as staging:
+            try:
+                result = downloader.download(
+                    requested_url,
+                    staging,
+                    etag=conditional.etag if conditional else None,
+                    last_modified=(
+                        conditional.last_modified if conditional else None
+                    ),
+                    accept=spec.media_type,
+                )
+            except ReferenceBlobTooLargeError as error:
+                raise AcquisitionLimitError(
+                    f"download resource {spec.resource_key!r} exceeds its "
+                    "per-file byte limit",
+                    code="resource_download_limit",
+                ) from error
+            _validate_download_result(
+                candidate.endpoint_url,
+                requested_url,
+                result,
+            )
+            response_integrity = _validate_reviewed_archive_http_result(
+                spec.validation,
+                result,
+            )
+            if result.not_modified:
+                if conditional is None:
+                    raise AcquisitionValidationError(
+                        "resource returned not-modified without matching "
+                        "conditional validators",
+                        code="unexpected_not_modified",
+                    )
+                return None, result, {}
+            if (
+                result.sha256 is None
+                or staging.sha256 != result.sha256
+                or staging.size_bytes != result.size_bytes
+            ):
+                raise AcquisitionValidationError(
+                    "composite resource does not match its staged bytes",
+                    code="download_integrity_mismatch",
+                )
+            validator = _dataset_file_validator(
+                spec.data_format,
+                self.limits,
+                config=spec.validation,
+                maximum_uncompressed_bytes=(
+                    spec.max_uncompressed_bytes
+                ),
+            )
+            parsed_value = validator(
+                staging.staging_path,
+                result.size_bytes,
+            )
+            parsed = (
+                dict(parsed_value)
+                if isinstance(parsed_value, Mapping)
+                else {}
+            )
+            if response_integrity is not None:
+                parsed = _merge_reviewed_archive_response(
+                    spec.validation,
+                    parsed,
+                    result,
+                )
+            path = staging.seal()
+            return (
+                _StagedDownloadResource(
+                    spec=spec,
+                    result=result,
+                    path=path,
+                    sha256=result.sha256,
+                    size_bytes=result.size_bytes,
+                    parsed=parsed,
+                ),
+                result,
+                parsed,
+            )
+
+    def _validate_reusable_download_resource(
+        self,
+        candidate: SourceCandidate,
+        *,
+        spec: DownloadResourceSpec,
+        reusable: ReusableDownloadResource,
+    ) -> None:
+        _require_same_origin(candidate.endpoint_url, reusable.source_url)
+        if reusable.final_url is not None:
+            _require_same_origin(
+                candidate.endpoint_url,
+                reusable.final_url,
+            )
+        expected_key = (
+            f"blobs/sha256/{reusable.blob.sha256[:2]}/"
+            f"{reusable.blob.sha256}"
+        )
+        if (
+            reusable.blob.storage_key != expected_key
+            or reusable.blob.size_bytes > spec.max_download_bytes
+            or reusable.media_type.casefold()
+            != spec.media_type.casefold()
+            or reusable.metadata.get("schema")
+            != "reference-composite-download-dataset/v1"
+            or reusable.metadata.get("resource_key")
+            != spec.resource_key
+            or reusable.metadata.get("page_index") != spec.page_index
+            or reusable.metadata.get("data_format") != spec.data_format
+        ):
+            raise AcquisitionValidationError(
+                "active composite resource identity is incompatible",
+                code="reusable_resource_invalid",
+            )
+        # Daily conditional checks deliberately avoid hashing every multi-GB
+        # active archive.  The CAS key was verified at commit time and is
+        # immutable to the application; here we revalidate path safety and
+        # size.  Any changed aggregate is fully copied and hash-verified again
+        # by the multipage materializer before it can become a delivery.
+        path = self.store.resolve_blob(reusable.blob.storage_key)
+        try:
+            size_bytes = path.stat().st_size
+        except OSError as error:
+            raise AcquisitionPersistenceError(
+                "active composite resource cannot be inspected",
+                code="reusable_resource_unavailable",
+            ) from error
+        if size_bytes != reusable.blob.size_bytes:
+            raise AcquisitionPersistenceError(
+                "active composite resource size changed",
+                code="reusable_resource_unavailable",
+            )
+
+    def _reused_composite_dataset(
+        self,
+        candidate: SourceCandidate,
+        *,
+        spec: DownloadResourceSpec,
+        reusable: ReusableDownloadResource,
+    ) -> AcquiredArtifact:
+        del candidate
+        return AcquiredArtifact(
+            artifact_kind="dataset",
+            role="input",
+            media_type=reusable.media_type,
+            blob=reusable.blob,
+            source_url=reusable.source_url,
+            final_url=reusable.final_url,
+            source_version=reusable.source_version,
+            upstream_etag=reusable.upstream_etag,
+            upstream_last_modified=reusable.upstream_last_modified,
+            metadata={
+                **reusable.metadata,
+                "resource_key": spec.resource_key,
+                "page_index": spec.page_index,
+            },
+            retrieved_at=reusable.retrieved_at,
+        )
+
+    def _composite_download_observation(
+        self,
+        candidate: SourceCandidate,
+        *,
+        item: _ObservedDownloadResource,
+        aggregate_sha256: str,
+    ) -> AcquiredArtifact:
+        modified = _http_datetime(item.result.last_modified)
+        document = {
+            "schema": "reference-composite-download-observation/v1",
+            "source_definition_sha256": candidate.definition_sha256,
+            "resource_key": item.spec.resource_key,
+            "page_index": item.spec.page_index,
+            "source_url": item.spec.source_url,
+            "final_url": item.result.final_url,
+            "http_not_modified": item.result.not_modified,
+            "content_changed": item.changed,
+            "dataset_sha256": item.dataset.blob.sha256,
+            "dataset_size_bytes": item.dataset.blob.size_bytes,
+            "etag": item.result.etag,
+            "last_modified": (
+                modified.isoformat() if modified is not None else None
+            ),
+            "aggregate_dataset_sha256": aggregate_sha256,
+        }
+        local = self._local_json_artifact(
+            document,
+            kind="metadata",
+            role="metadata",
+            metadata={
+                "schema": document["schema"],
+                "resource_key": item.spec.resource_key,
+                "page_index": item.spec.page_index,
+                "dataset_sha256": item.dataset.blob.sha256,
+                "aggregate_dataset_sha256": aggregate_sha256,
+            },
+        )
+        return replace(
+            local,
+            source_url=item.spec.source_url,
+            final_url=item.result.final_url,
+            source_version=f"sha256:{aggregate_sha256}",
+            upstream_etag=item.result.etag,
+            upstream_last_modified=modified,
+        )
+
+    def _finish_masked_geopackage(
+        self,
+        candidate: SourceCandidate,
+        *,
+        downloaded: _TransientDownloaded,
+        transform: MaskedGeoPackageSpec,
+    ) -> AcquisitionResult:
+        if (
+            downloaded.local_path is None
+            or downloaded.sha256 is None
+            or downloaded.workspace_store is None
+        ):
+            raise AcquisitionValidationError(
+                "masked GeoPackage source artifact is unavailable",
+                code="missing_artifact",
+            )
+        try:
+            mask_downloaded, mask_identity = (
+                self._acquire_masked_geopackage_mask(
+                    candidate,
+                    transform=transform,
+                )
+            )
+            mask_blob = mask_downloaded.blob
+            if mask_blob is None:
+                raise MaskedGeoPackageError(
+                    "reviewed mask artifact is unavailable",
+                    code="spatial_mask_invalid",
+                )
+            derived = derive_masked_geopackage_files(
+                self.store,
+                workspace_store=downloaded.workspace_store,
+                source_path=downloaded.local_path,
+                source_sha256=downloaded.sha256,
+                source_size_bytes=downloaded.size_bytes,
+                mask_path=self.store.resolve_blob(
+                    mask_blob.storage_key
+                ),
+                mask_sha256=mask_blob.sha256,
+                mask_size_bytes=mask_blob.size_bytes,
+                mask_identity=mask_identity,
+                spec=transform,
+                max_output_bytes=min(
+                    self.limits.max_dataset_bytes,
+                    self.store.max_blob_bytes,
+                    self.limits.max_total_bytes,
+                ),
+                timeout_seconds=max(
+                    1,
+                    min(
+                        86_400,
+                        math.ceil(self.limits.timeout_seconds),
+                    ),
+                ),
+            )
+        except MaskedGeoPackageError as error:
+            raise AcquisitionValidationError(
+                "masked GeoPackage derivation failed validation",
+                code=error.code,
+            ) from error
+
+        source = self._local_json_artifact(
+            {
+                "schema": "reference-transient-source-observation/v1",
+                "source_url": downloaded.result.source_url,
+                "final_url": downloaded.result.final_url,
+                "sha256": downloaded.sha256,
+                "size_bytes": downloaded.size_bytes,
+                "etag": downloaded.result.etag,
+                "last_modified": downloaded.result.last_modified,
+                "retained": False,
+                "discarded_after_derivation": True,
+                "selected_fields": list(transform.selected_fields),
+            },
+            kind="metadata",
+            role="input",
+            metadata={
+                "schema": "reference-transient-source-observation/v1",
+                "protocol": "download",
+                "data_format": "geopackage",
+                "remote_name": candidate.remote_name,
+                "input_layer": transform.source_layer,
+                "derivation_role": "source_dataset",
+                "raw_source_retained": False,
+            },
+            observed=downloaded.result,
+        )
+        mask = self._remote_artifact(
+            mask_downloaded,
+            kind="metadata",
+            role="input",
+            metadata={
+                "schema": "reference-spatial-mask-input/v1",
+                "derivation_role": "spatial_mask",
+                "mask_identity": mask_identity.metadata(),
+            },
+        )
+        dataset = AcquiredArtifact(
+            artifact_kind="dataset",
+            role="input",
+            media_type="application/geopackage+sqlite3",
+            blob=derived.blob,
+            metadata={
+                "protocol": "derived",
+                "data_format": "geopackage",
+                "remote_name": candidate.remote_name,
+                "input_layer": transform.output_layer,
+                "materialization_input": True,
+                "derivation": {
+                    **derived.validation,
+                    "raw_source_retained": False,
+                },
+            },
+        )
+        style_artifacts = self._acquire_styles(candidate)
+        if not style_artifacts:
+            style_artifacts = self._author_reviewed_local_style(
+                candidate,
+                dataset_artifacts=[dataset],
+            )
+        artifacts = [source, mask, dataset, *style_artifacts]
+        materialization = {
+            "kind": "derived-direct-dataset",
+            "format": "geopackage",
+            "dataset_sha256": dataset.blob.sha256,
+            "input_layer": transform.output_layer,
+            "derivation": {
+                **derived.validation,
+                "raw_source_retained": False,
+            },
+            "raw_source_retained": False,
+        }
+        style_digests = _style_digests(style_artifacts)
+        if style_digests:
+            materialization["style_artifact_sha256"] = style_digests
+        return self._finish(
+            candidate,
+            probe=None,
+            artifacts=artifacts,
+            materialization=materialization,
+            feature_count=derived.feature_count,
+            stats={
+                "source_dataset_bytes": downloaded.size_bytes,
+                "mask_bytes": mask.blob.size_bytes,
+                "dataset_bytes": dataset.blob.size_bytes,
+                "feature_count": derived.feature_count,
+                "identifier_sha256": derived.identifier_sha256,
+                "composite_snapshot_full_refresh": True,
+                "raw_source_retained": False,
+                **(
+                    {"style_count": len(style_digests)}
+                    if style_digests
+                    else {}
+                ),
+            },
+            observed=downloaded.result,
+        )
+
+    def _unchanged_masked_geopackage(
+        self,
+        candidate: SourceCandidate,
+        *,
+        downloaded: _TransientDownloaded,
+        transform: MaskedGeoPackageSpec,
+    ) -> AcquisitionResult:
+        """Check every independent input before accepting a dataset 304."""
+
+        try:
+            mask_downloaded, mask_identity = (
+                self._acquire_masked_geopackage_mask(
+                    candidate,
+                    transform=transform,
+                )
+            )
+        except MaskedGeoPackageError as error:
+            raise AcquisitionValidationError(
+                "masked GeoPackage inputs failed validation",
+                code=error.code,
+            ) from error
+        mask = self._remote_artifact(
+            mask_downloaded,
+            kind="metadata",
+            role="observation",
+            metadata={
+                "schema": "reference-spatial-mask-observation/v1",
+                "derivation_role": "spatial_mask",
+                "mask_identity": mask_identity.metadata(),
+            },
+        )
+        style_artifacts = self._acquire_styles(candidate)
+        artifacts = (mask, *style_artifacts)
+        _enforce_total_bytes(artifacts, self.limits.max_total_bytes)
+        return self._unchanged(
+            candidate,
+            downloaded.result,
+            artifacts=artifacts,
+            stats={
+                "composite_inputs_checked": True,
+                "mask_identity_sha256": mask_identity.sha256,
+                "style_count": len(_style_digests(style_artifacts)),
+            },
+        )
+
+    def _acquire_masked_geopackage_mask(
+        self,
+        candidate: SourceCandidate,
+        *,
+        transform: MaskedGeoPackageSpec,
+    ) -> tuple[_Downloaded, MaskIdentity]:
+        downloaded = self._download(
+            candidate,
+            transform.mask_url,
+            max_bytes=transform.mask_max_bytes,
+            accept=transform.mask_media_type,
+            allowed_media_types=frozenset(
+                {transform.mask_media_type.casefold()}
+            ),
+            file_validator=lambda path, size: validate_reviewed_mask(
+                path,
+                size,
+                transform,
+            ),
+            reviewed_origin_url=transform.mask_url,
+        )
+        if downloaded.result.not_modified or downloaded.blob is None:
+            raise MaskedGeoPackageError(
+                "reviewed mask artifact is unavailable",
+                code="spatial_mask_invalid",
+            )
+        return downloaded, cast(MaskIdentity, downloaded.parsed)
+
+    def _acquire_reviewed_archive_styles(
+        self,
+        candidate: SourceCandidate,
+        downloaded: _Downloaded,
+    ) -> list[AcquiredArtifact]:
+        """Extract exact, reviewed SLD members from the dataset ZIP."""
+
+        specs = _configured_reviewed_archive_styles(candidate)
+        if not specs:
+            return []
+        if (
+            downloaded.blob is None
+            or len(specs) > _MAX_STYLES_PER_SOURCE
+        ):
+            raise AcquisitionConfigurationError(
+                "reviewed archive style configuration is invalid"
+            )
+        archive_path = self.store.resolve_blob(downloaded.blob.storage_key)
+        maximum = min(
+            self.limits.max_probe_bytes,
+            self.store.max_blob_bytes,
+            self.limits.max_total_bytes,
+        )
+        artifacts: list[AcquiredArtifact] = []
+        try:
+            with zipfile.ZipFile(archive_path) as archive:
+                infos = {item.filename: item for item in archive.infolist()}
+                if len(infos) != len(archive.infolist()):
+                    raise AcquisitionValidationError(
+                        "reviewed archive contains duplicate style paths",
+                        code="archive_style_invalid",
+                    )
+                for spec in specs:
+                    info = infos.get(spec.archive_member)
+                    if (
+                        info is None
+                        or info.is_dir()
+                        or info.flag_bits & 0x1
+                        or ((info.external_attr >> 16) & 0o170000)
+                        == 0o120000
+                        or not 1 <= info.file_size <= maximum
+                        or (
+                            spec.size_bytes is not None
+                            and info.file_size != spec.size_bytes
+                        )
+                        or (
+                            spec.crc32 is not None
+                            and f"{info.CRC:08x}" != spec.crc32
+                        )
+                    ):
+                        raise AcquisitionValidationError(
+                            "reviewed archive style member is invalid",
+                            code="archive_style_invalid",
+                        )
+                    document = archive.read(info)
+                    if (
+                        len(document) != info.file_size
+                        or len(document) > maximum
+                        or hashlib.sha256(document).hexdigest() != spec.sha256
+                    ):
+                        raise AcquisitionValidationError(
+                            "reviewed archive style digest changed",
+                            code="archive_style_invalid",
+                        )
+                    parsed = _parse_style_bundle(
+                        document,
+                        layer_name=spec.sld_layer_name,
+                        style_names=(spec.sld_style_name,),
+                    )
+                    if (
+                        len(parsed.standalone_slds) != 1
+                        or parsed.resource_hrefs
+                        != ((spec.sld_style_name, ()),)
+                    ):
+                        raise AcquisitionValidationError(
+                            "reviewed archive style is not self-contained",
+                            code="archive_style_invalid",
+                        )
+                    standalone = dict(parsed.standalone_slds)[
+                        spec.sld_style_name
+                    ]
+                    blob = self.store.put_stream(
+                        io.BytesIO(standalone),
+                        max_bytes=maximum,
+                    )
+                    metadata: dict[str, Any] = {
+                        "schema": "reference-style-sld/v1",
+                        "catalog_style_source_key": (
+                            spec.catalog_style_source_key
+                        ),
+                        "remote_name": spec.remote_name,
+                        "style_layer_name": candidate.remote_name,
+                        "parent_sha256": downloaded.blob.sha256,
+                        "archive_member": spec.archive_member,
+                        "archive_member_sha256": spec.sha256,
+                        "parity_kind": "exact",
+                        "resource_bindings": [],
+                        "unresolved_resources": [],
+                    }
+                    if spec.has_exact_member_evidence:
+                        metadata.update(
+                            {
+                                "is_default": spec.is_default,
+                                "archive_member_size_bytes": (
+                                    spec.size_bytes
+                                ),
+                                "archive_member_crc32": spec.crc32,
+                                "sld_named_layer": spec.sld_layer_name,
+                                "sld_user_style": spec.sld_style_name,
+                            }
+                        )
+                    artifacts.append(
+                        AcquiredArtifact(
+                            artifact_kind="style",
+                            role="style",
+                            media_type="application/vnd.ogc.sld+xml",
+                            blob=blob,
+                            source_version=parsed.sld_version,
+                            metadata=metadata,
+                        )
+                    )
+        except ReferenceAcquisitionError:
+            raise
+        except (
+            KeyError,
+            OSError,
+            RuntimeError,
+            zipfile.BadZipFile,
+            zipfile.LargeZipFile,
+        ) as error:
+            raise AcquisitionValidationError(
+                "reviewed archive styles could not be inspected",
+                code="archive_style_invalid",
+            ) from error
+        _enforce_total_bytes(artifacts, self.limits.max_total_bytes)
+        return artifacts
+
+    def _acquire_atom(
+        self,
+        candidate: SourceCandidate,
+        *,
+        conditional: ConditionalRequest | None,
+    ) -> AcquisitionResult:
+        nested_feed_urls = _nested_atom_feed_urls(candidate)
+        if nested_feed_urls:
+            return self._acquire_nested_atom(
+                candidate,
+                nested_feed_urls=nested_feed_urls,
+            )
+        feed = self._download(
+            candidate,
+            candidate.endpoint_url,
+            max_bytes=self.limits.max_probe_bytes,
+            accept="application/atom+xml, application/xml;q=0.9",
+            allowed_media_types=_XML_MEDIA_TYPES,
+            validator=lambda payload: _parse_atom_feed(
+                payload,
+                _config_optional_text(candidate.config, "entry_id", max_chars=1000)
+                or candidate.remote_name,
+            ),
+        )
+        enclosure_url = _resolve_atom_link(
+            candidate.endpoint_url,
+            feed.result.final_url,
+            cast(str, feed.parsed),
+        )
+        feed_artifact = self._remote_artifact(
+            feed,
+            kind="metadata",
+            role="observation",
+            metadata={
+                "protocol": "atom",
+                "remote_name": candidate.remote_name,
+                "selected_url": enclosure_url,
+            },
+        )
+        media_types = _configured_media_types(candidate.config, protocol="Atom")
+        data_format = _config_optional_text(
+            candidate.config,
+            "data_format",
+            max_chars=100,
+        )
+        if data_format is None:
+            raise AcquisitionConfigurationError(
+                "Atom dataset requires an explicit data_format"
+            )
+        downloaded = self._download(
+            candidate,
+            enclosure_url,
+            max_bytes=self.limits.max_dataset_bytes,
+            accept=", ".join(sorted(media_types)),
+            allowed_media_types=media_types,
+            file_validator=_dataset_file_validator(
+                data_format,
+                self.limits,
+                config=candidate.config,
+            ),
+            conditional=conditional,
+        )
+        if downloaded.result.not_modified:
+            return self._unchanged(
+                candidate,
+                downloaded.result,
+                artifacts=(feed_artifact,),
+            )
+        dataset = self._remote_artifact(
+            downloaded,
+            kind="dataset",
+            role="input",
+            metadata={
+                "protocol": "atom",
+                "data_format": data_format,
+                "remote_name": candidate.remote_name,
+            },
+        )
+        style_artifacts = self._author_reviewed_local_style(
+            candidate,
+            dataset_artifacts=[dataset],
+        )
+        artifacts = [feed_artifact, dataset, *style_artifacts]
+        materialization = {
+            "kind": "direct-dataset",
+            "format": data_format,
+            "dataset_sha256": dataset.blob.sha256,
+        }
+        stats = {"dataset_bytes": dataset.blob.size_bytes}
+        style_digests = _style_digests(style_artifacts)
+        if style_digests:
+            stats["style_count"] = len(style_digests)
+            materialization["style_artifact_sha256"] = style_digests
+        return self._finish(
+            candidate,
+            probe=None,
+            artifacts=artifacts,
+            materialization=materialization,
+            feature_count=None,
+            stats=stats,
+            observed=downloaded.result,
+        )
+
+    def _acquire_nested_atom(
+        self,
+        candidate: SourceCandidate,
+        *,
+        nested_feed_urls: tuple[str, ...],
+    ) -> AcquisitionResult:
+        """Acquire one deterministic multi-feed Atom snapshot in full.
+
+        A conditional response for one municipal enclosure cannot prove the
+        completeness of the other enclosures, so nested snapshots deliberately
+        ignore resource-level validators and are rebuilt atomically.
+        """
+
+        feed = self._download(
+            candidate,
+            candidate.endpoint_url,
+            max_bytes=self.limits.max_probe_bytes,
+            accept="application/atom+xml, application/xml;q=0.9",
+            allowed_media_types=_XML_MEDIA_TYPES,
+            validator=_parse_atom_entry_links,
+        )
+        advertised_nested = {
+            resolved
+            for href in cast(tuple[str, ...], feed.parsed)
+            if (
+                resolved := _optional_same_origin_atom_link(
+                    candidate.endpoint_url,
+                    feed.result.final_url,
+                    href,
+                )
+            )
+            is not None
+        }
+        missing_nested = [
+            url for url in nested_feed_urls if url not in advertised_nested
+        ]
+        if missing_nested:
+            raise AcquisitionValidationError(
+                "Atom root feed no longer advertises every reviewed nested feed",
+                code="atom_nested_feed_missing",
+            )
+        artifacts: list[AcquiredArtifact] = [
+            self._remote_artifact(
+                feed,
+                kind="metadata",
+                role="observation",
+                metadata={
+                    "protocol": "atom",
+                    "kind": "root-feed",
+                    "remote_name": candidate.remote_name,
+                    "nested_feed_count": len(nested_feed_urls),
+                },
+            )
+        ]
+        enclosure_urls: list[str] = []
+        for feed_index, nested_url in enumerate(nested_feed_urls):
+            nested = self._download(
+                candidate,
+                nested_url,
+                max_bytes=self.limits.max_probe_bytes,
+                accept="application/atom+xml, application/xml;q=0.9",
+                allowed_media_types=_XML_MEDIA_TYPES,
+                validator=_parse_atom_entry_links,
+            )
+            artifacts.append(
+                self._remote_artifact(
+                    nested,
+                    kind="metadata",
+                    role="observation",
+                    metadata={
+                        "protocol": "atom",
+                        "kind": "nested-feed",
+                        "feed_index": feed_index,
+                        "feed_url": nested_url,
+                    },
+                )
+            )
+            resolved_links = sorted(
+                {
+                    _resolve_atom_link(
+                        candidate.endpoint_url,
+                        nested.result.final_url,
+                        href,
+                    )
+                    for href in cast(tuple[str, ...], nested.parsed)
+                }
+            )
+            if not resolved_links:
+                raise AcquisitionValidationError(
+                    "reviewed nested Atom feed contains no dataset enclosures",
+                    code="atom_dataset_missing",
+                )
+            enclosure_urls.extend(resolved_links)
+        if len(enclosure_urls) != len(set(enclosure_urls)):
+            raise AcquisitionValidationError(
+                "nested Atom feeds repeat a dataset enclosure",
+                code="atom_dataset_duplicate",
+            )
+        if len(enclosure_urls) > self.limits.max_pages:
+            raise AcquisitionLimitError(
+                "nested Atom snapshot exceeds the dataset artifact limit",
+                code="page_limit",
+            )
+
+        media_types = _configured_media_types(candidate.config, protocol="Atom")
+        data_format = _config_optional_text(
+            candidate.config,
+            "data_format",
+            max_chars=100,
+        )
+        if data_format is None:
+            raise AcquisitionConfigurationError(
+                "Atom dataset requires an explicit data_format"
+            )
+        input_layer = _config_optional_text(
+            candidate.config,
+            "input_layer",
+            max_chars=255,
+        )
+        dataset_artifacts: list[AcquiredArtifact] = []
+        total_uncompressed = 0
+        for page_index, enclosure_url in enumerate(enclosure_urls):
+            downloaded = self._download(
+                candidate,
+                enclosure_url,
+                max_bytes=self.limits.max_dataset_bytes,
+                accept=", ".join(sorted(media_types)),
+                allowed_media_types=media_types,
+                file_validator=_dataset_file_validator(
+                    data_format,
+                    self.limits,
+                    config=candidate.config,
+                ),
+            )
+            validation = (
+                downloaded.parsed
+                if isinstance(downloaded.parsed, dict)
+                else {}
+            )
+            uncompressed = validation.get("uncompressed_bytes", 0)
+            if isinstance(uncompressed, bool) or not isinstance(
+                uncompressed,
+                int,
+            ):
+                raise AcquisitionValidationError(
+                    "nested Atom dataset validation metadata is invalid"
+                )
+            total_uncompressed += uncompressed
+            if total_uncompressed > self.limits.max_total_bytes:
+                raise AcquisitionLimitError(
+                    "nested Atom snapshot exceeds the expanded byte limit",
+                    code="archive_expansion_limit",
+                )
+            metadata: dict[str, Any] = {
+                "protocol": "atom",
+                "data_format": data_format,
+                "remote_name": candidate.remote_name,
+                "page_index": page_index,
+                "dataset_url": enclosure_url,
+                **validation,
+            }
+            if input_layer is not None:
+                metadata["input_layer"] = input_layer
+            dataset_artifacts.append(
+                self._remote_artifact(
+                    downloaded,
+                    kind="dataset",
+                    role="input",
+                    metadata=metadata,
+                )
+            )
+            _enforce_total_bytes(
+                [*artifacts, *dataset_artifacts],
+                self.limits.max_total_bytes,
+            )
+        artifacts.extend(dataset_artifacts)
+        style_artifacts = self._author_reviewed_local_style(
+            candidate,
+            dataset_artifacts=dataset_artifacts,
+        )
+        artifacts.extend(style_artifacts)
+        _enforce_total_bytes(artifacts, self.limits.max_total_bytes)
+        dataset_sha256 = [item.blob.sha256 for item in dataset_artifacts]
+        materialization = {
+            "kind": "dataset-parts",
+            "format": data_format,
+            "dataset_artifact_sha256": dataset_sha256,
+        }
+        stats = {
+            "nested_feed_count": len(nested_feed_urls),
+            "dataset_count": len(dataset_artifacts),
+            "dataset_bytes": sum(
+                item.blob.size_bytes for item in dataset_artifacts
+            ),
+            "expanded_dataset_bytes": total_uncompressed,
+        }
+        style_digests = _style_digests(style_artifacts)
+        if style_digests:
+            stats["style_count"] = len(style_digests)
+            materialization["style_artifact_sha256"] = style_digests
+        return self._finish(
+            candidate,
+            probe=None,
+            artifacts=artifacts,
+            materialization=materialization,
+            feature_count=None,
+            stats=stats,
+            observed=feed.result,
+        )
+
+    def _acquire_tile_source(
+        self,
+        candidate: SourceCandidate,
+        *,
+        conditional: ConditionalRequest | None,
+    ) -> AcquisitionResult:
+        del conditional
+        artifacts: list[AcquiredArtifact] = []
+        probe: SourceProbe | None = None
+        if candidate.protocol != "xyz":
+            probe, capabilities, _document = self._probe(candidate)
+            artifacts.append(capabilities)
+            reviewed_projection = reviewed_ign_ortho_source_projection(
+                candidate_definition(candidate)
+            )
+            if reviewed_projection is not None:
+                catalog_candidate = replace(
+                    candidate,
+                    endpoint_url=CATALOG_CAPABILITIES_URL.split("?", 1)[0],
+                    remote_name=reviewed_projection["catalog_layer"],
+                )
+
+                def validate_catalog(document: bytes) -> dict[str, Any]:
+                    try:
+                        gate = reviewed_ign_ortho_catalog_capabilities_gate(
+                            candidate_definition(candidate),
+                            document,
+                        )
+                    except ReviewedOrthoEvidenceError as exc:
+                        raise AcquisitionValidationError(
+                            "live catalog WMS capabilities changed",
+                            code="reviewed_ortho_capabilities_changed",
+                        ) from exc
+                    if gate is None:
+                        raise AcquisitionValidationError(
+                            "reviewed catalog capabilities gate is missing",
+                            code="reviewed_ortho_capabilities_changed",
+                        )
+                    return gate
+
+                catalog_download = self._download(
+                    catalog_candidate,
+                    CATALOG_CAPABILITIES_URL,
+                    max_bytes=self.limits.max_probe_bytes,
+                    accept="application/xml, text/xml;q=0.9",
+                    allowed_media_types=_XML_MEDIA_TYPES,
+                    validator=validate_catalog,
+                )
+                catalog_gate = cast(
+                    dict[str, Any],
+                    catalog_download.parsed,
+                )
+                artifacts.append(
+                    self._remote_artifact(
+                        catalog_download,
+                        kind="capabilities",
+                        role="observation",
+                        metadata={
+                            "protocol": "wms_tiles",
+                            "requested_name": (
+                                reviewed_projection["catalog_layer"]
+                            ),
+                            "reviewed_ortho_capabilities_gate": (
+                                catalog_gate
+                            ),
+                        },
+                    )
+                )
+        tile_source_document = build_tile_source_document(
+            candidate,
+            probe=probe,
+        )
+        descriptor = cast(dict[str, Any], tile_source_document["descriptor"])
+        tile_source = self._local_json_artifact(
+            tile_source_document,
+            kind="metadata",
+            role="input",
+            metadata={
+                "schema": "reference-tile-source/v1",
+                "protocol": candidate.protocol,
+                "data_format": "tile-source",
+            },
+        )
+        artifacts.append(tile_source)
+        stats = {
+            "seeded": False,
+            "tile_source_bytes": tile_source.blob.size_bytes,
+            "coverage_required": descriptor["coverage_required"],
+        }
+        return self._finish(
+            candidate,
+            probe=probe,
+            artifacts=artifacts,
+            materialization={
+                "kind": "tile-source",
+                "seeded": False,
+                "descriptor_sha256": tile_source.blob.sha256,
+                "bounds": descriptor["bounds"],
+                "min_zoom": descriptor["min_zoom"],
+                "max_zoom": descriptor["max_zoom"],
+            },
+            feature_count=None,
+            stats=stats,
+        )
+
+
+def tile_source_probe_request(
+    candidate: SourceCandidate,
+) -> TileSourceProbeRequest | None:
+    """Return the exact in-memory capabilities request for a tile source."""
+
+    _validate_candidate(candidate)
+    if candidate.protocol == "xyz":
+        return None
+    if candidate.protocol not in {"wmts", "wms_tiles"}:
+        raise AcquisitionConfigurationError(
+            "source is not a tile-seed candidate",
+            code="tile_source_required",
+        )
+    url, accept, media_types = _probe_request(candidate)
+    return TileSourceProbeRequest(
+        url=url,
+        accept=accept,
+        allowed_content_types=media_types,
+    )
+
+
+def build_tile_source_document(
+    candidate: SourceCandidate,
+    *,
+    probe: SourceProbe | None,
+) -> dict[str, Any]:
+    """Build the same reviewed tile document used by normal acquisition."""
+
+    _validate_candidate(candidate)
+    if candidate.protocol == "xyz":
+        if probe is not None:
+            raise AcquisitionConfigurationError(
+                "XYZ tile sources do not use capabilities",
+                code="unexpected_tile_probe",
+            )
+        descriptor = _xyz_tile_descriptor(candidate)
+    elif candidate.protocol in {"wmts", "wms_tiles"}:
+        if (
+            probe is None
+            or not probe.available
+            or probe.protocol != candidate.protocol
+            or probe.canonical_name is None
+        ):
+            raise AcquisitionValidationError(
+                "tile capabilities do not prove the requested layer",
+                code="invalid_capabilities",
+            )
+        descriptor = (
+            _wmts_tile_descriptor(candidate, probe)
+            if candidate.protocol == "wmts"
+            else _wms_tile_descriptor(candidate, probe)
+        )
+    else:
+        raise AcquisitionConfigurationError(
+            "source is not a tile-seed candidate",
+            code="tile_source_required",
+        )
+    return {
+        "schema": "reference-tile-source/v1",
+        "protocol": candidate.protocol,
+        "definition_sha256": candidate.definition_sha256,
+        "descriptor": descriptor,
+    }
+
+
+def candidate_from_source_model(source: ReferenceLayerSource) -> SourceCandidate:
+    """Freeze a persisted source into the discovery/probe value object."""
+
+    if not isinstance(source, ReferenceLayerSource):
+        raise TypeError("source must be a ReferenceLayerSource")
+    if not source.enabled:
+        raise AcquisitionConfigurationError(
+            "disabled source cannot be acquired",
+            code="source_disabled",
+        )
+    if source.protocol == "local":
+        raise AcquisitionConfigurationError(
+            "local source requires manual acquisition",
+            code="manual_source",
+        )
+    if source.endpoint_url is None:
+        raise AcquisitionConfigurationError(
+            "non-manual source has no endpoint URL",
+            code="missing_endpoint",
+        )
+    if not isinstance(source.config_json, dict):
+        raise AcquisitionConfigurationError("source config must be an object")
+    remote_name = source.remote_name
+    if remote_name is None and source.protocol == "download":
+        remote_name = source.source_key
+    elif remote_name is None and source.protocol == "atom":
+        remote_name = _config_optional_text(
+            source.config_json,
+            "entry_id",
+            max_chars=1000,
+        )
+    if not isinstance(remote_name, str):
+        raise AcquisitionConfigurationError("source has no remote collection name")
+    candidate = SourceCandidate(
+        protocol=cast(Any, source.protocol),
+        target_kind=cast(Any, source.target_kind),
+        endpoint_url=source.endpoint_url,
+        remote_name=remote_name,
+        sync_strategy=cast(Any, source.sync_strategy),
+        priority=source.priority,
+        config=dict(source.config_json),
+        source_key=source.source_key,
+        definition_sha256=source.definition_sha256,
+    )
+    _validate_candidate(candidate)
+    return candidate
+
+
+def persist_acquisition_result(
+    db: Session,
+    *,
+    source: ReferenceLayerSource,
+    run: ReferenceSyncRun,
+    result: AcquisitionResult,
+    lease_token: str,
+    now: datetime | None = None,
+) -> tuple[ReferenceSourceArtifact, ...]:
+    """Idempotently append artifacts and run links; never finalize the run.
+
+    Storage keys are intentionally shareable by multiple source records.  The
+    durable identity of a source artifact is ``(source, kind, sha256)``; the
+    blob store itself provides content-addressed de-duplication.
+    """
+
+    if not isinstance(lease_token, str) or not lease_token or len(lease_token) > 64:
+        raise AcquisitionPersistenceError(
+            "lease token is invalid",
+            code="lease_fenced",
+        )
+    if source.id is None or run.id is None:
+        raise AcquisitionPersistenceError(
+            "source and run must be persistent",
+            code="missing_persistent_identity",
+        )
+    current_time = _aware_utc(now or datetime.now(timezone.utc))
+    locked_source = db.scalar(
+        select(ReferenceLayerSource)
+        .where(ReferenceLayerSource.id == source.id)
+        .with_for_update()
+        .execution_options(populate_existing=True)
+    )
+    locked_run = db.scalar(
+        select(ReferenceSyncRun)
+        .where(
+            ReferenceSyncRun.id == run.id,
+            ReferenceSyncRun.source_id == source.id,
+        )
+        .with_for_update()
+        .execution_options(populate_existing=True)
+    )
+    if locked_source is None or locked_run is None:
+        raise AcquisitionPersistenceError(
+            "source or sync run no longer exists",
+            code="lease_fenced",
+        )
+    expires_at = locked_run.lease_expires_at
+    if (
+        not locked_source.enabled
+        or locked_run.status != "running"
+        or locked_run.lease_token != lease_token
+        or expires_at is None
+        or _aware_utc(expires_at) <= current_time
+        or locked_run.source_definition_sha256 != locked_source.definition_sha256
+    ):
+        raise AcquisitionPersistenceError(
+            "sync run lease or source definition is no longer current",
+            code="lease_fenced",
+        )
+    try:
+        candidate_from_source_model(locked_source)
+    except AcquisitionConfigurationError as exc:
+        raise AcquisitionPersistenceError(
+            "persisted source definition no longer matches its digest",
+            code="source_definition_mismatch",
+        ) from exc
+    if (
+        result.source_key != locked_source.source_key
+        or result.protocol != locked_source.protocol
+        or result.source_definition_sha256 != locked_source.definition_sha256
+        or result.source_definition_sha256 != locked_run.source_definition_sha256
+    ):
+        raise AcquisitionPersistenceError(
+            "acquisition result does not belong to the source",
+            code="result_source_mismatch",
+        )
+    persisted: list[ReferenceSourceArtifact] = []
+    seen_links: set[tuple[int, str]] = set()
+    for item in result.artifacts:
+        existing = db.scalar(
+            select(ReferenceSourceArtifact).where(
+                ReferenceSourceArtifact.source_id == source.id,
+                ReferenceSourceArtifact.artifact_kind == item.artifact_kind,
+                ReferenceSourceArtifact.sha256 == item.blob.sha256,
+            )
+        )
+        if existing is None:
+            existing = ReferenceSourceArtifact(
+                source_id=locked_source.id,
+                artifact_kind=item.artifact_kind,
+                source_url=item.source_url,
+                final_url=item.final_url,
+                source_version=item.source_version,
+                upstream_etag=item.upstream_etag,
+                upstream_last_modified=item.upstream_last_modified,
+                media_type=item.media_type,
+                storage_backend=item.blob.storage_backend,
+                storage_key=item.blob.storage_key,
+                size_bytes=item.blob.size_bytes,
+                sha256=item.blob.sha256,
+                metadata_json=item.metadata,
+                retrieved_at=_aware_utc(item.retrieved_at),
+            )
+            db.add(existing)
+            db.flush()
+        elif (
+            existing.storage_backend != item.blob.storage_backend
+            or existing.storage_key != item.blob.storage_key
+            or existing.size_bytes != item.blob.size_bytes
+            or existing.media_type != item.media_type
+        ):
+            raise AcquisitionPersistenceError(
+                "existing source artifact conflicts with immutable blob metadata",
+                code="artifact_identity_conflict",
+            )
+        link_key = (existing.id, item.role)
+        if link_key in seen_links:
+            continue
+        seen_links.add(link_key)
+        link = db.get(
+            ReferenceSyncRunArtifact,
+            (locked_source.id, locked_run.id, *link_key),
+        )
+        if link is None:
+            db.add(
+                ReferenceSyncRunArtifact(
+                    source_id=locked_source.id,
+                    run_id=locked_run.id,
+                    artifact_id=existing.id,
+                    role=item.role,
+                )
+            )
+        persisted.append(existing)
+    db.flush()
+    return tuple(persisted)
+
+
+def _validate_run_snapshot(
+    source: ReferenceLayerSource,
+    run: ReferenceSyncRun | None,
+) -> None:
+    if run is None:
+        return
+    if source.id is None or run.source_id != source.id:
+        raise AcquisitionConfigurationError(
+            "sync run does not belong to the source",
+            code="run_source_mismatch",
+        )
+    if run.status != "running":
+        raise AcquisitionConfigurationError(
+            "only a running sync run can acquire artifacts",
+            code="run_not_running",
+        )
+    if run.source_definition_sha256 != source.definition_sha256:
+        raise AcquisitionConfigurationError(
+            "source definition changed after the run was queued",
+            code="stale_source_definition",
+        )
+
+
+def _validate_candidate(candidate: SourceCandidate) -> None:
+    if candidate.protocol not in {
+        "wfs",
+        "ogc_api_features",
+        "arcgis_rest",
+        "wcs",
+        "download",
+        "atom",
+        "wmts",
+        "xyz",
+        "wms_tiles",
+        "local",
+    }:
+        raise AcquisitionConfigurationError("source protocol is unsupported")
+    expected_targets = {
+        "wfs": "vector",
+        "ogc_api_features": "vector",
+        "arcgis_rest": "vector",
+        "wcs": "raster",
+        "download": {"vector", "raster"},
+        "atom": {"vector", "raster"},
+        "wmts": "tiles",
+        "xyz": "tiles",
+        "wms_tiles": "tiles",
+    }
+    expected = expected_targets.get(candidate.protocol)
+    if expected is not None and (
+        candidate.target_kind not in expected
+        if isinstance(expected, set)
+        else candidate.target_kind != expected
+    ):
+        raise AcquisitionConfigurationError("protocol and target kind do not match")
+    allowed_strategies = {
+        "wfs": {"paged_snapshot", "full_snapshot"},
+        "ogc_api_features": {"paged_snapshot", "full_snapshot"},
+        "arcgis_rest": {"paged_snapshot", "full_snapshot"},
+        "wcs": {"full_snapshot", "conditional_get"},
+        "download": {"full_snapshot", "conditional_get"},
+        "atom": {"full_snapshot", "conditional_get"},
+        "wmts": {"tile_seed"},
+        "xyz": {"tile_seed"},
+        "wms_tiles": {"tile_seed"},
+        "local": {"manual"},
+    }
+    if candidate.sync_strategy not in allowed_strategies[candidate.protocol]:
+        raise AcquisitionConfigurationError(
+            "sync strategy is incompatible with the source protocol"
+        )
+    if not isinstance(candidate.config, dict):
+        raise AcquisitionConfigurationError("source config must be an object")
+    if (
+        not isinstance(candidate.remote_name, str)
+        or _SAFE_REMOTE_NAME_RE.fullmatch(candidate.remote_name) is None
+    ):
+        raise AcquisitionConfigurationError("remote collection name is invalid")
+    if not isinstance(candidate.source_key, str) or not candidate.source_key.strip():
+        raise AcquisitionConfigurationError("source key is invalid")
+    if _SHA256_RE.fullmatch(candidate.definition_sha256) is None:
+        raise AcquisitionConfigurationError("source definition digest is invalid")
+    if source_candidate_definition_sha256(candidate) != candidate.definition_sha256:
+        raise AcquisitionConfigurationError(
+            "source definition digest does not match its effective configuration",
+            code="source_definition_mismatch",
+        )
+    endpoint_for_validation = candidate.endpoint_url
+    if candidate.protocol == "xyz":
+        endpoint_for_validation = _ANY_TEMPLATE_TOKEN_RE.sub("0", endpoint_for_validation)
+    normalize_https_url(endpoint_for_validation)
+    _configured_reviewed_archive_styles(candidate)
+    configured_download_resources(candidate)
+    _style_request_config(candidate)
+
+
+def _configured_reviewed_archive_styles(
+    candidate: SourceCandidate,
+) -> tuple[ReviewedArchiveStyleSpec, ...]:
+    try:
+        return reviewed_archive_style_specs(
+            candidate.config,
+            protocol=candidate.protocol,
+            target_kind=candidate.target_kind,
+            selected_layer_name=candidate.remote_name,
+        )
+    except ReviewedArchiveStyleError as error:
+        raise AcquisitionConfigurationError(str(error)) from error
+
+
+def source_candidate_definition_sha256(candidate: SourceCandidate) -> str:
+    """Hash exactly the effective definition used by source discovery."""
+
+    try:
+        encoded = json.dumps(
+            candidate_definition(candidate),
+            ensure_ascii=False,
+            allow_nan=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode("utf-8")
+    except (TypeError, ValueError, UnicodeError) as exc:
+        raise AcquisitionConfigurationError(
+            "source definition is not canonical JSON",
+            code="invalid_source_definition",
+        ) from exc
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _validate_download_result(
+    reviewed_origin_url: str,
+    requested_url: str,
+    result: HTTPSDownloadResult,
+) -> None:
+    if not isinstance(result, HTTPSDownloadResult):
+        raise AcquisitionValidationError(
+            "downloader returned an invalid result",
+            code="invalid_download_result",
+        )
+    if normalize_https_url(result.source_url) != normalize_https_url(requested_url):
+        raise AcquisitionValidationError(
+            "downloader result source URL does not match the request",
+            code="download_url_mismatch",
+        )
+    _require_same_origin(reviewed_origin_url, result.final_url)
+    if result.not_modified:
+        if result.status_code != 304 or result.size_bytes != 0 or result.sha256 is not None:
+            raise AcquisitionValidationError(
+                "not-modified result has an invalid shape",
+                code="invalid_not_modified",
+            )
+    elif (
+        result.status_code != 200
+        or result.size_bytes <= 0
+        or result.sha256 is None
+        or _SHA256_RE.fullmatch(result.sha256) is None
+    ):
+        raise AcquisitionValidationError(
+            "download result has an invalid success shape",
+            code="invalid_download_result",
+        )
+
+
+def _validate_reviewed_archive_http_result(
+    config: Mapping[str, Any],
+    result: HTTPSDownloadResult,
+) -> dict[str, Any] | None:
+    try:
+        return validate_reviewed_archive_response(config, result)
+    except ReviewedArchiveIntegrityError as error:
+        raise AcquisitionValidationError(
+            str(error),
+            code="reviewed_archive_response_changed",
+        ) from error
+
+
+def _merge_reviewed_archive_response(
+    config: Mapping[str, Any],
+    parsed: Mapping[str, Any],
+    result: HTTPSDownloadResult,
+) -> dict[str, Any]:
+    merged = copy.deepcopy(dict(parsed))
+    response_integrity = _validate_reviewed_archive_http_result(
+        config,
+        result,
+    )
+    if response_integrity is None:
+        return merged
+    archive_integrity = merged.get("reviewed_archive_integrity")
+    if (
+        not isinstance(archive_integrity, dict)
+        or archive_integrity.get("passed") is not True
+        or archive_integrity.get("spec_sha256")
+        != response_integrity["spec_sha256"]
+    ):
+        raise AcquisitionValidationError(
+            "reviewed archive lacks its central-directory evidence",
+            code="reviewed_archive_integrity_missing",
+        )
+    merged["reviewed_archive_integrity"] = {
+        **archive_integrity,
+        "response": response_integrity["response"],
+    }
+    return merged
+
+
+def _resource_uncompressed_bytes(
+    parsed: Mapping[str, Any],
+    *,
+    compressed_bytes: int,
+) -> int:
+    candidates = [
+        parsed.get("uncompressed_bytes"),
+        parsed.get("archive_uncompressed_bytes"),
+    ]
+    package = parsed.get("geopackage_inspection")
+    if isinstance(package, Mapping):
+        candidates.append(package.get("archive_uncompressed_bytes"))
+    values = [
+        item
+        for item in candidates
+        if isinstance(item, int)
+        and not isinstance(item, bool)
+        and item > 0
+    ]
+    return max(values) if values else compressed_bytes
+
+
+def _composite_dataset_sha256(
+    resources: list[_ObservedDownloadResource],
+) -> str:
+    payload = [
+        {
+            "resource_key": item.spec.resource_key,
+            "page_index": item.spec.page_index,
+            "sha256": item.dataset.blob.sha256,
+            "size_bytes": item.dataset.blob.size_bytes,
+        }
+        for item in resources
+    ]
+    try:
+        encoded = json.dumps(
+            payload,
+            ensure_ascii=False,
+            allow_nan=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode("utf-8")
+    except (TypeError, ValueError, UnicodeError) as error:
+        raise AcquisitionValidationError(
+            "composite dataset identity is not canonical",
+            code="composite_identity_invalid",
+        ) from error
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _reviewed_archive_download_maximum(
+    config: Mapping[str, Any],
+    *,
+    default: int,
+) -> int:
+    try:
+        configured = configured_reviewed_archive_integrity(config)
+    except ReviewedArchiveIntegrityError as error:
+        raise AcquisitionConfigurationError(
+            "reviewed archive integrity configuration is invalid"
+        ) from error
+    if configured is None:
+        return default
+    maximum = configured[0]["response_constraints"][
+        "max_content_length"
+    ]
+    return min(default, maximum)
+
+
+def _probe_request(
+    candidate: SourceCandidate,
+) -> tuple[str, str, frozenset[str]]:
+    if candidate.protocol in {"wfs", "wcs", "wmts", "wms_tiles"}:
+        service = "WMS" if candidate.protocol == "wms_tiles" else candidate.protocol.upper()
+        return (
+            _merge_query(
+                candidate.endpoint_url,
+                {"service": service, "request": "GetCapabilities"},
+            ),
+            "application/xml, text/xml;q=0.9",
+            _XML_MEDIA_TYPES,
+        )
+    if candidate.protocol == "arcgis_rest":
+        return (
+            _merge_query(candidate.endpoint_url, {"f": "pjson"}),
+            "application/json",
+            _JSON_MEDIA_TYPES,
+        )
+    if candidate.protocol == "ogc_api_features":
+        path = urlsplit(candidate.endpoint_url).path.rstrip("/")
+        url = (
+            candidate.endpoint_url
+            if path.casefold().endswith("/collections")
+            else _append_path(candidate.endpoint_url, "collections")
+        )
+        return (url, "application/json", _JSON_MEDIA_TYPES)
+    raise AcquisitionConfigurationError("protocol has no capabilities probe")
+
+
+def _origin(value: str) -> str:
+    normalized = normalize_https_url(_ANY_TEMPLATE_TOKEN_RE.sub("0", value))
+    parts = urlsplit(normalized)
+    hostname = parts.hostname or ""
+    rendered = f"[{hostname}]" if ":" in hostname else hostname
+    return f"https://{rendered}"
+
+
+def _require_same_origin(base: str, value: str) -> str:
+    normalized = normalize_https_url(value)
+    if _origin(base) != _origin(normalized):
+        raise AcquisitionConfigurationError(
+            "derived source URL crosses the reviewed origin",
+            code="cross_origin_url",
+        )
+    return normalized
+
+
+def _merge_query(
+    base: str,
+    params: Mapping[str, str | list[str]],
+) -> str:
+    normalized = normalize_https_url(base)
+    parts = urlsplit(normalized)
+    existing = parse_qsl(parts.query, keep_blank_values=True, strict_parsing=False)
+    names = [name.casefold() for name, _value in existing]
+    if len(names) != len(set(names)):
+        raise AcquisitionConfigurationError("source endpoint has duplicate query keys")
+    protected = {name.casefold() for name in params}
+    if protected.intersection(names):
+        raise AcquisitionConfigurationError(
+            "source endpoint predefines a protected request parameter"
+        )
+    additions: list[tuple[str, str]] = []
+    for key, raw_value in params.items():
+        values = raw_value if isinstance(raw_value, list) else [raw_value]
+        if not values or len(values) > 32:
+            raise AcquisitionConfigurationError("request parameter is invalid")
+        for value in values:
+            if (
+                not isinstance(key, str)
+                or not key
+                or len(key) > 100
+                or not isinstance(value, str)
+                or len(value) > 8192
+                or any(ord(character) < 32 for character in key + value)
+            ):
+                raise AcquisitionConfigurationError("request parameter is invalid")
+            additions.append((key, value))
+    query = urlencode([*existing, *additions], doseq=False, safe=":,/*")
+    result = urlunsplit((parts.scheme, parts.netloc, parts.path, query, ""))
+    if len(result) > 8192:
+        raise AcquisitionLimitError("request URL is too long", code="request_url_too_long")
+    return result
+
+
+def _replace_query_value(url: str, name: str, value: str) -> str:
+    normalized = normalize_https_url(url)
+    parts = urlsplit(normalized)
+    pairs = parse_qsl(parts.query, keep_blank_values=True)
+    replaced = False
+    result_pairs: list[tuple[str, str]] = []
+    for key, current in pairs:
+        if key.casefold() == name.casefold():
+            if replaced:
+                raise AcquisitionConfigurationError("pagination URL repeats its offset")
+            result_pairs.append((key, value))
+            replaced = True
+        else:
+            result_pairs.append((key, current))
+    if not replaced:
+        result_pairs.append((name, value))
+    query = urlencode(result_pairs, safe=":,/*")
+    result = urlunsplit((parts.scheme, parts.netloc, parts.path, query, ""))
+    if len(result) > 8192:
+        raise AcquisitionLimitError("pagination URL is too long", code="request_url_too_long")
+    return result
+
+
+def _append_path(base: str, segment: str) -> str:
+    if not isinstance(segment, str) or not segment or "/" in segment or segment in {".", ".."}:
+        raise AcquisitionConfigurationError("derived source path segment is invalid")
+    normalized = normalize_https_url(base)
+    parts = urlsplit(normalized)
+    path = parts.path.rstrip("/") + "/" + quote(segment, safe="-._~")
+    return urlunsplit((parts.scheme, parts.netloc, path, parts.query, ""))
+
+
+def _http_datetime(value: str | None) -> datetime | None:
+    if value is None:
+        return None
+    try:
+        parsed = parsedate_to_datetime(value)
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise AcquisitionValidationError(
+            "upstream Last-Modified header is invalid",
+            code="invalid_last_modified",
+        ) from exc
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def _aware_utc(value: datetime) -> datetime:
+    if value.tzinfo is None:
+        raise AcquisitionPersistenceError(
+            "persistent timestamp is timezone-naive",
+            code="invalid_timestamp",
+        )
+    return value.astimezone(timezone.utc)
+
+
+def _config_optional_text(
+    config: Mapping[str, Any],
+    name: str,
+    *,
+    max_chars: int,
+    allow_empty: bool = False,
+) -> str | None:
+    value = config.get(name)
+    if value is None:
+        return None
+    normalized = value.strip() if isinstance(value, str) else None
+    if (
+        not isinstance(value, str)
+        or (not normalized and not allow_empty)
+        or len(value) > max_chars
+        or any(ord(character) < 32 for character in value)
+    ):
+        raise AcquisitionConfigurationError(f"source config {name} is invalid")
+    return normalized
+
+
+def _config_text(
+    config: Mapping[str, Any],
+    name: str,
+    *,
+    default: str,
+    max_chars: int,
+) -> str:
+    return _config_optional_text(config, name, max_chars=max_chars) or default
+
+
+def configured_download_resources(
+    candidate: SourceCandidate,
+) -> tuple[DownloadResourceSpec, ...] | None:
+    """Parse the closed ordered-resource contract for a direct download."""
+
+    raw = candidate.config.get("download_resources")
+    if raw is None:
+        return None
+    if (
+        candidate.protocol != "download"
+        or candidate.target_kind != "vector"
+        or candidate.sync_strategy != "conditional_get"
+        or not isinstance(raw, list)
+        or not 2 <= len(raw) <= _MAX_DOWNLOAD_RESOURCES
+    ):
+        raise AcquisitionConfigurationError(
+            "composite download resources are invalid",
+            code="composite_download_config_invalid",
+        )
+    incompatible = {
+        "download_url",
+        "media_type",
+        "data_format",
+        "vector_transform",
+        "archive_styles",
+        "style_endpoint_url",
+        "style_layer_name",
+        "styles",
+        "style_bundle_sha256",
+    }
+    if incompatible.intersection(candidate.config):
+        raise AcquisitionConfigurationError(
+            "composite download mixes incompatible single-resource config",
+            code="composite_download_config_invalid",
+        )
+    specs: list[DownloadResourceSpec] = []
+    expected_keys = {
+        "resource_key",
+        "url",
+        "media_type",
+        "data_format",
+        "max_download_bytes",
+        "max_uncompressed_bytes",
+        "validation",
+    }
+    supported_formats = {
+        "geojson",
+        "flatgeobuf",
+        "geopackage",
+        "gpkg",
+        "geopackage-zip",
+        "shapefile-zip",
+        "inspire-cadastral-parcel-gml-zip",
+    }
+    for page_index, item in enumerate(raw):
+        if not isinstance(item, dict) or set(item) != expected_keys:
+            raise AcquisitionConfigurationError(
+                "composite download resource shape is invalid",
+                code="composite_download_config_invalid",
+            )
+        validation = item.get("validation")
+        if (
+            not isinstance(validation, dict)
+            or not set(validation)
+            <= _DOWNLOAD_RESOURCE_VALIDATION_KEYS
+        ):
+            raise AcquisitionConfigurationError(
+                "composite download resource validation is invalid",
+                code="composite_download_config_invalid",
+            )
+        try:
+            spec = DownloadResourceSpec(
+                resource_key=item["resource_key"],
+                page_index=page_index,
+                source_url=_require_same_origin(
+                    candidate.endpoint_url,
+                    item["url"],
+                ),
+                media_type=item["media_type"],
+                data_format=item["data_format"].strip().casefold(),
+                max_download_bytes=item["max_download_bytes"],
+                max_uncompressed_bytes=item[
+                    "max_uncompressed_bytes"
+                ],
+                validation=copy.deepcopy(validation),
+            )
+        except (
+            KeyError,
+            AttributeError,
+            TypeError,
+            ValueError,
+            AcquisitionConfigurationError,
+        ) as error:
+            raise AcquisitionConfigurationError(
+                "composite download resource is invalid",
+                code="composite_download_config_invalid",
+            ) from error
+        if spec.data_format not in supported_formats:
+            raise AcquisitionConfigurationError(
+                "composite download format has no multi-artifact "
+                "materializer",
+                code="composite_download_config_invalid",
+            )
+        if spec.data_format == "shapefile-zip":
+            member = _config_optional_text(
+                spec.validation,
+                "archive_member",
+                max_chars=4_096,
+            )
+            input_layer = _config_optional_text(
+                spec.validation,
+                "input_layer",
+                max_chars=1_000,
+            )
+            if (
+                member is None
+                or PurePosixPath(member).suffix.casefold() != ".shp"
+                or PurePosixPath(member).is_absolute()
+                or any(
+                    part in {"", ".", ".."}
+                    for part in PurePosixPath(member).parts
+                )
+                or "\\" in member
+                or input_layer != PurePosixPath(member).stem
+            ):
+                raise AcquisitionConfigurationError(
+                    "composite shapefile resource lacks its exact member",
+                    code="composite_download_config_invalid",
+                )
+        try:
+            archive_profile = configured_reviewed_archive_integrity(
+                spec.validation
+            )
+            parity_profile = configured_parity_spec(spec.validation)
+        except (
+            ReviewedArchiveIntegrityError,
+            SourceContentParityError,
+        ) as error:
+            raise AcquisitionConfigurationError(
+                "composite resource integrity evidence is invalid",
+                code="composite_download_config_invalid",
+            ) from error
+        if (
+            spec.data_format == "geopackage-zip"
+            and archive_profile is None
+            and parity_profile is None
+        ):
+            raise AcquisitionConfigurationError(
+                "composite GeoPackage ZIP lacks exact integrity evidence",
+                code="composite_download_config_invalid",
+            )
+        specs.append(spec)
+    if (
+        len({item.resource_key for item in specs}) != len(specs)
+        or len({item.source_url for item in specs}) != len(specs)
+        or len({item.data_format for item in specs}) != 1
+    ):
+        raise AcquisitionConfigurationError(
+            "composite resources are not unique and format-consistent",
+            code="composite_download_config_invalid",
+        )
+    for name in (
+        "max_aggregate_download_bytes",
+        "max_aggregate_uncompressed_bytes",
+    ):
+        value = candidate.config.get(name)
+        if (
+            isinstance(value, bool)
+            or not isinstance(value, int)
+            or value <= 0
+        ):
+            raise AcquisitionConfigurationError(
+                f"composite download {name} is invalid",
+                code="composite_download_config_invalid",
+            )
+    if (
+        candidate.config["max_aggregate_download_bytes"]
+        < max(item.max_download_bytes for item in specs)
+        or candidate.config["max_aggregate_uncompressed_bytes"]
+        < max(item.max_uncompressed_bytes for item in specs)
+    ):
+        raise AcquisitionConfigurationError(
+            "composite aggregate limits cannot fit one configured resource",
+            code="composite_download_config_invalid",
+        )
+    return tuple(specs)
+
+
+def _configured_composite_download_limits(
+    candidate: SourceCandidate,
+    *,
+    limits: AcquisitionLimits,
+) -> tuple[int, int]:
+    download = candidate.config.get("max_aggregate_download_bytes")
+    uncompressed = candidate.config.get(
+        "max_aggregate_uncompressed_bytes"
+    )
+    if (
+        isinstance(download, bool)
+        or not isinstance(download, int)
+        or download > limits.max_total_bytes
+        or isinstance(uncompressed, bool)
+        or not isinstance(uncompressed, int)
+        or uncompressed > limits.max_total_uncompressed_bytes
+    ):
+        raise AcquisitionConfigurationError(
+            "composite aggregate limits exceed acquisition hard limits",
+            code="composite_download_config_invalid",
+        )
+    resources = configured_download_resources(candidate) or ()
+    if any(
+        item.max_download_bytes > limits.max_dataset_bytes
+        or item.max_uncompressed_bytes
+        > limits.max_dataset_uncompressed_bytes
+        for item in resources
+    ):
+        raise AcquisitionConfigurationError(
+            "composite per-resource limits exceed acquisition hard limits",
+            code="composite_download_config_invalid",
+        )
+    return download, uncompressed
+
+
+def _configured_media_types(
+    config: Mapping[str, Any],
+    *,
+    protocol: str,
+) -> frozenset[str]:
+    singular = _config_optional_text(config, "media_type", max_chars=200)
+    raw_multiple = config.get("media_types")
+    if singular is not None and raw_multiple is not None:
+        raise AcquisitionConfigurationError(
+            f"{protocol} dataset cannot declare media_type and media_types"
+        )
+    if raw_multiple is None:
+        if singular is None:
+            raise AcquisitionConfigurationError(
+                f"{protocol} dataset requires an explicit media_type"
+            )
+        values = [singular]
+    else:
+        if (
+            not isinstance(raw_multiple, list)
+            or not 1 <= len(raw_multiple) <= 16
+            or any(
+                not isinstance(item, str)
+                or not item
+                or len(item) > 200
+                or item != item.strip()
+                or any(ord(character) < 32 for character in item)
+                for item in raw_multiple
+            )
+        ):
+            raise AcquisitionConfigurationError(
+                f"{protocol} dataset media_types are invalid"
+            )
+        values = [item.casefold() for item in raw_multiple]
+        if values != sorted(values) or len(values) != len(set(values)):
+            raise AcquisitionConfigurationError(
+                f"{protocol} dataset media_types are not canonical"
+            )
+    return frozenset(item.casefold() for item in values)
+
+
+def _nested_atom_feed_urls(
+    candidate: SourceCandidate,
+) -> tuple[str, ...]:
+    raw = candidate.config.get("nested_feed_urls")
+    if raw is None:
+        return ()
+    if (
+        not isinstance(raw, list)
+        or not 1 <= len(raw) <= _MAX_NESTED_ATOM_FEEDS
+        or any(not isinstance(item, str) for item in raw)
+    ):
+        raise AcquisitionConfigurationError(
+            "Atom nested_feed_urls are invalid"
+        )
+    normalized = tuple(
+        _require_same_origin(candidate.endpoint_url, item)
+        for item in raw
+    )
+    if normalized != tuple(sorted(normalized)) or len(normalized) != len(
+        set(normalized)
+    ):
+        raise AcquisitionConfigurationError(
+            "Atom nested_feed_urls are not canonical"
+        )
+    return normalized
+
+
+def _style_request_config(candidate: SourceCandidate) -> _StyleRequest | None:
+    config = candidate.config
+    has_endpoint = "style_endpoint_url" in config
+    has_layer = "style_layer_name" in config
+    has_styles = "styles" in config
+    has_bundle_sha256 = "style_bundle_sha256" in config
+    if not any(
+        (has_endpoint, has_layer, has_styles, has_bundle_sha256)
+    ):
+        return None
+    reviewed_cross_origin = reviewed_cross_origin_style_source(candidate)
+    if (
+        candidate.protocol not in {"wfs", "wcs"}
+        and not (
+            candidate.protocol == "download"
+            and reviewed_cross_origin
+        )
+    ):
+        raise AcquisitionConfigurationError(
+            "style acquisition is not reviewed for this data source"
+        )
+    if not all((has_endpoint, has_layer, has_styles)):
+        raise AcquisitionConfigurationError(
+            "style acquisition config is incomplete"
+        )
+    endpoint = _config_optional_text(
+        config,
+        "style_endpoint_url",
+        max_chars=8192,
+    )
+    layer_name = _config_optional_text(
+        config,
+        "style_layer_name",
+        max_chars=1000,
+    )
+    if endpoint is None or layer_name is None:
+        raise AcquisitionConfigurationError(
+            "style acquisition config is incomplete"
+        )
+    if _SAFE_REMOTE_NAME_RE.fullmatch(layer_name) is None:
+        raise AcquisitionConfigurationError("style layer name is invalid")
+    if (
+        layer_name != candidate.remote_name
+        and not reviewed_cross_origin
+    ):
+        raise AcquisitionConfigurationError(
+            "style layer name does not match the acquired collection"
+        )
+    endpoint = (
+        normalize_https_url(endpoint)
+        if reviewed_cross_origin
+        else _require_same_origin(candidate.endpoint_url, endpoint)
+    )
+    expected_bundle_sha256 = config.get("style_bundle_sha256")
+    if expected_bundle_sha256 is not None and (
+        not isinstance(expected_bundle_sha256, str)
+        or _SHA256_RE.fullmatch(expected_bundle_sha256) is None
+    ):
+        raise AcquisitionConfigurationError(
+            "reviewed style bundle digest is invalid"
+        )
+    if reviewed_cross_origin and expected_bundle_sha256 is None:
+        raise AcquisitionConfigurationError(
+            "cross-origin style bundle has no reviewed digest"
+        )
+    raw_styles = config.get("styles")
+    if not isinstance(raw_styles, list):
+        raise AcquisitionConfigurationError("source config styles must be a list")
+    if len(raw_styles) > _MAX_STYLES_PER_SOURCE:
+        raise AcquisitionLimitError(
+            "source declares too many catalog styles",
+            code="style_count_limit",
+        )
+    styles: list[_StyleSpec] = []
+    source_keys: set[str] = set()
+    remote_names: set[str] = set()
+    for raw_style in raw_styles:
+        if not isinstance(raw_style, dict) or set(raw_style) != {
+            "catalog_style_source_key",
+            "remote_name",
+        }:
+            raise AcquisitionConfigurationError(
+                "source config contains an invalid style identity"
+            )
+        source_key = raw_style.get("catalog_style_source_key")
+        remote_name = raw_style.get("remote_name")
+        if (
+            not isinstance(source_key, str)
+            or _STYLE_SOURCE_KEY_RE.fullmatch(source_key) is None
+            or not isinstance(remote_name, str)
+            or _STYLE_NAME_RE.fullmatch(remote_name) is None
+        ):
+            raise AcquisitionConfigurationError(
+                "source config contains an invalid style identity"
+            )
+        if source_key in source_keys or remote_name in remote_names:
+            raise AcquisitionConfigurationError(
+                "source config repeats a catalog or remote style identity"
+            )
+        source_keys.add(source_key)
+        remote_names.add(remote_name)
+        styles.append(
+            _StyleSpec(
+                catalog_style_source_key=source_key,
+                remote_name=remote_name,
+            )
+        )
+    if styles != sorted(styles, key=lambda item: item.catalog_style_source_key):
+        raise AcquisitionConfigurationError(
+            "source config styles are not in canonical order"
+        )
+    validation_params: dict[str, str] = {
+        "service": "WMS",
+        "request": "GetStyles",
+        "version": "1.1.1",
+        "layers": layer_name,
+    }
+    _merge_query(endpoint, validation_params)
+    return _StyleRequest(
+        endpoint_url=endpoint,
+        layer_name=layer_name,
+        styles=tuple(styles),
+        expected_bundle_sha256=expected_bundle_sha256,
+    )
+
+
+def _configured_page_size(
+    config: Mapping[str, Any],
+    default: int,
+    *,
+    maximum: int | None = None,
+) -> int:
+    upper_bound = default if maximum is None else maximum
+    value = config.get("page_size", default)
+    if (
+        isinstance(value, bool)
+        or not isinstance(value, int)
+        or not 1 <= value <= upper_bound
+    ):
+        raise AcquisitionConfigurationError(
+            f"source page_size must be between 1 and {upper_bound}"
+        )
+    return value
+
+
+def _wfs_snapshot_spec(
+    config: Mapping[str, Any],
+) -> _WFSSnapshotSpec | None:
+    raw = config.get("wfs_snapshot")
+    if raw is None:
+        return None
+    if "sort_by" in config:
+        raise AcquisitionConfigurationError(
+            "wfs_snapshot cannot be combined with legacy sort_by"
+        )
+    if not isinstance(raw, dict):
+        raise AcquisitionConfigurationError(
+            "source config wfs_snapshot is invalid"
+        )
+    mode = raw.get("mode")
+    if mode == "single_response":
+        if set(raw) != {"mode"}:
+            raise AcquisitionConfigurationError(
+                "single-response WFS snapshot config is invalid"
+            )
+        return _WFSSnapshotSpec(
+            mode="single_response",
+            identity_properties=(),
+            sort_by=None,
+        )
+    if mode != "paged" or set(raw) != {
+        "mode",
+        "identity_properties",
+    }:
+        raise AcquisitionConfigurationError(
+            "source config wfs_snapshot is invalid"
+        )
+    identity_properties = raw.get("identity_properties")
+    if (
+        not isinstance(identity_properties, list)
+        or not 1 <= len(identity_properties) <= 16
+        or any(
+            not isinstance(item, str)
+            or _WFS_IDENTITY_PROPERTY_RE.fullmatch(item) is None
+            for item in identity_properties
+        )
+        or len(identity_properties) != len(set(identity_properties))
+    ):
+        raise AcquisitionConfigurationError(
+            "WFS stable identity properties are invalid"
+        )
+    normalized = tuple(identity_properties)
+    return _WFSSnapshotSpec(
+        mode="paged",
+        identity_properties=normalized,
+        sort_by=",".join(f"{item} A" for item in normalized),
+    )
+
+
+def _canonical_single_response_wfs_page(
+    page: _FeaturePage,
+    *,
+    collection: str,
+) -> _CanonicalWFSPage:
+    sortable: list[tuple[bytes, dict[str, Any]]] = []
+    for feature in page.collection["features"]:
+        stable_content = {
+            key: copy.deepcopy(value)
+            for key, value in feature.items()
+            if key != "id"
+        }
+        sortable.append(
+            (_canonical_json(stable_content), stable_content)
+        )
+    sortable.sort(key=lambda item: item[0])
+
+    identity_records: list[bytes] = []
+    content_records: list[bytes] = []
+    canonical_features: list[dict[str, Any]] = []
+    previous_content: bytes | None = None
+    occurrence = 0
+    for content_record, stable_content in sortable:
+        occurrence = occurrence + 1 if content_record == previous_content else 0
+        previous_content = content_record
+        identity_record = (
+            hashlib.sha256(content_record).digest()
+            + struct.pack(">Q", occurrence)
+        )
+        stable_identifier = hashlib.sha256(
+            collection.encode("utf-8")
+            + b"\0"
+            + identity_record
+        ).hexdigest()
+        stable_feature = copy.deepcopy(stable_content)
+        stable_feature["id"] = f"siur-wfs-{stable_identifier}"
+        canonical_features.append(stable_feature)
+        identity_records.append(identity_record)
+        content_records.append(content_record)
+
+    document = _canonical_wfs_collection(
+        page,
+        features=canonical_features,
+    )
+    identity_hasher = hashlib.sha256()
+    for record in identity_records:
+        _update_record_hash(identity_hasher, record)
+    return _CanonicalWFSPage(
+        document=document,
+        identity_records=tuple(identity_records),
+        identity_sort_keys=(),
+        content_records=tuple(content_records),
+        identity_sha256=identity_hasher.hexdigest(),
+        content_sha256=hashlib.sha256(
+            _canonical_json(document)
+        ).hexdigest(),
+    )
+
+
+def _canonical_wfs_page(
+    page: _FeaturePage,
+    *,
+    collection: str,
+    snapshot_spec: _WFSSnapshotSpec,
+) -> _CanonicalWFSPage:
+    identity_records: list[bytes] = []
+    identity_sort_keys: list[tuple[tuple[int, Any], ...]] = []
+    content_records: list[bytes] = []
+    canonical_features: list[dict[str, Any]] = []
+    for feature in page.collection["features"]:
+        properties = feature.get("properties")
+        if not isinstance(properties, dict):
+            raise AcquisitionValidationError(
+                "WFS stable identity requires feature properties",
+                code="missing_pagination_identity",
+            )
+        identity: list[list[Any]] = []
+        sort_key: list[tuple[int, Any]] = []
+        for property_name in snapshot_spec.identity_properties:
+            if property_name not in properties:
+                raise AcquisitionValidationError(
+                    "WFS feature omits a stable identity property",
+                    code="missing_pagination_identity",
+                )
+            value = properties[property_name]
+            if (
+                value is None
+                or isinstance(value, bool)
+                or not isinstance(value, (str, int, float))
+                or (
+                    isinstance(value, float)
+                    and not math.isfinite(value)
+                )
+                or (
+                    isinstance(value, str)
+                    and (
+                        len(value) > 4096
+                        or any(
+                            ord(character) < 32
+                            for character in value
+                        )
+                    )
+                )
+            ):
+                raise AcquisitionValidationError(
+                    "WFS stable identity property is invalid",
+                    code="missing_pagination_identity",
+                )
+            identity.append([property_name, value])
+            sort_key.append(
+                (
+                    0 if isinstance(value, (int, float)) else 1,
+                    value,
+                )
+            )
+        identity_record = _canonical_json(identity)
+        if len(identity_record) > 8192:
+            raise AcquisitionLimitError(
+                "WFS stable identity exceeds its byte limit",
+                code="feature_identity_limit",
+            )
+        identity_records.append(identity_record)
+        identity_sort_keys.append(tuple(sort_key))
+        stable_feature = copy.deepcopy(feature)
+        stable_identifier = hashlib.sha256(
+            collection.encode("utf-8")
+            + b"\0"
+            + identity_record
+        ).hexdigest()
+        stable_feature["id"] = f"siur-wfs-{stable_identifier}"
+        canonical_features.append(stable_feature)
+        content_records.append(_canonical_json(stable_feature))
+
+    document = _canonical_wfs_collection(
+        page,
+        features=canonical_features,
+    )
+    identity_hasher = hashlib.sha256()
+    for record in identity_records:
+        _update_record_hash(identity_hasher, record)
+    return _CanonicalWFSPage(
+        document=document,
+        identity_records=tuple(identity_records),
+        identity_sort_keys=tuple(identity_sort_keys),
+        content_records=tuple(content_records),
+        identity_sha256=identity_hasher.hexdigest(),
+        content_sha256=hashlib.sha256(
+            _canonical_json(document)
+        ).hexdigest(),
+    )
+
+
+def _canonical_wfs_collection(
+    page: _FeaturePage,
+    *,
+    features: list[dict[str, Any]],
+) -> dict[str, Any]:
+    document = {
+        key: copy.deepcopy(value)
+        for key, value in page.collection.items()
+        if key
+        not in {
+            "features",
+            "links",
+            "numberMatched",
+            "numberReturned",
+            "timeStamp",
+            "totalFeatures",
+        }
+    }
+    document["features"] = features
+    document["numberMatched"] = page.number_matched
+    document["numberReturned"] = page.count
+    return document
+
+
+def _update_record_hash(
+    digest: Any,
+    record: bytes,
+) -> None:
+    digest.update(struct.pack(">Q", len(record)))
+    digest.update(record)
+
+
+def _wfs_snapshot_pass_identity(
+    value: _WFSSnapshotPass,
+) -> tuple[Any, ...]:
+    return (
+        value.page_count,
+        value.feature_count,
+        value.number_matched,
+        value.identity_sha256,
+        value.content_sha256,
+        value.page_identity_sha256,
+        value.page_content_sha256,
+    )
+
+
+def _strict_json(document: bytes) -> Any:
+    if not isinstance(document, bytes) or not document:
+        raise AcquisitionValidationError("JSON response is empty")
+
+    def unique_object(values: list[tuple[str, Any]]) -> dict[str, Any]:
+        result: dict[str, Any] = {}
+        for key, value in values:
+            if key in result:
+                raise ValueError("duplicate JSON key")
+            result[key] = value
+        return result
+
+    try:
+        value = json.loads(
+            document.decode("utf-8"),
+            object_pairs_hook=unique_object,
+            parse_constant=lambda item: (_ for _ in ()).throw(ValueError(item)),
+        )
+    except (UnicodeDecodeError, json.JSONDecodeError, ValueError) as exc:
+        raise AcquisitionValidationError("response is not strict UTF-8 JSON") from exc
+    stack = [(value, 0)]
+    seen = 0
+    while stack:
+        item, depth = stack.pop()
+        seen += 1
+        if seen > _MAX_JSON_NODES or depth > _MAX_JSON_DEPTH:
+            raise AcquisitionLimitError(
+                "JSON response is too complex",
+                code="json_complexity_limit",
+            )
+        if isinstance(item, dict):
+            stack.extend((child, depth + 1) for child in item.values())
+        elif isinstance(item, list):
+            stack.extend((child, depth + 1) for child in item)
+        elif isinstance(item, float) and not math.isfinite(item):
+            raise AcquisitionValidationError("JSON contains a non-finite number")
+    return value
+
+
+def _parse_wfs_hits(
+    document: bytes,
+    *,
+    version: str,
+) -> int:
+    lowered = document.lower()
+    if (
+        not document
+        or len(document) > MAX_PROBE_BYTES
+        or b"<!doctype" in lowered
+        or b"<!entity" in lowered
+        or b"\x00" in document
+    ):
+        raise AcquisitionValidationError(
+            "WFS hits response is unsafe or oversized"
+        )
+    try:
+        root = ElementTree.fromstring(document)
+    except ElementTree.ParseError as error:
+        raise AcquisitionValidationError(
+            "WFS hits response is malformed XML"
+        ) from error
+    elements = list(root.iter())
+    if (
+        _xml_local(root.tag) != "FeatureCollection"
+        or len(elements) > 1_000
+        or any(
+            _xml_local(element.tag)
+            in {"member", "featureMember", "featureMembers"}
+            for element in elements[1:]
+        )
+    ):
+        raise AcquisitionValidationError(
+            "response is not an empty WFS hits collection"
+        )
+    if version.startswith("2."):
+        matched = _optional_count(
+            root.get("numberMatched"),
+            name="numberMatched",
+        )
+        returned = _optional_count(
+            root.get("numberReturned"),
+            name="numberReturned",
+        )
+        complete = matched is not None and returned == 0
+    elif version.startswith("1."):
+        declared_counts = [
+            _optional_count(root.get(name), name=name)
+            for name in (
+                "numberOfFeatures",
+                "numberMatched",
+                "totalFeatures",
+            )
+            if root.get(name) is not None
+        ]
+        matched = declared_counts[0] if declared_counts else None
+        returned = _optional_count(
+            root.get("numberReturned"),
+            name="numberReturned",
+        )
+        complete = (
+            matched is not None
+            and all(item == matched for item in declared_counts)
+            and returned in {None, 0}
+        )
+    else:
+        raise AcquisitionValidationError(
+            "WFS hits response uses an unsupported version"
+        )
+    if not complete:
+        raise AcquisitionValidationError(
+            "WFS hits response does not prove a feature count"
+        )
+    assert matched is not None
+    return matched
+
+
+def _wfs_paging_is_transaction_safe(
+    document: bytes,
+) -> bool | None:
+    lowered = document.lower()
+    if (
+        not document
+        or len(document) > MAX_PROBE_BYTES
+        or b"<!doctype" in lowered
+        or b"<!entity" in lowered
+        or b"\x00" in document
+    ):
+        raise AcquisitionValidationError(
+            "WFS capabilities are unsafe or oversized"
+        )
+    try:
+        root = ElementTree.fromstring(document)
+    except ElementTree.ParseError as error:
+        raise AcquisitionValidationError(
+            "WFS capabilities are malformed XML"
+        ) from error
+    values: list[bool] = []
+    for element in root.iter():
+        if (
+            _xml_local(element.tag) != "Constraint"
+            or element.get("name") != "PagingIsTransactionSafe"
+        ):
+            continue
+        rendered = [
+            (child.text or "").strip().casefold()
+            for child in element.iter()
+            if _xml_local(child.tag) in {"DefaultValue", "Value"}
+            and (child.text or "").strip()
+        ]
+        if len(rendered) != 1 or rendered[0] not in {
+            "true",
+            "false",
+        }:
+            return None
+        values.append(rendered[0] == "true")
+    if not values:
+        return None
+    if len(values) != 1:
+        raise AcquisitionValidationError(
+            "WFS capabilities repeat PagingIsTransactionSafe"
+        )
+    return values[0]
+
+
+def _parse_feature_collection(
+    document: bytes,
+    *,
+    page_size: int,
+    allow_next: bool,
+) -> _FeaturePage:
+    root = _strict_json(document)
+    if not isinstance(root, dict) or root.get("type") != "FeatureCollection":
+        raise AcquisitionValidationError("response is not a GeoJSON FeatureCollection")
+    features = root.get("features")
+    if not isinstance(features, list):
+        raise AcquisitionValidationError("FeatureCollection has no feature array")
+    if len(features) > page_size:
+        raise AcquisitionLimitError(
+            "feature page exceeds the requested page size",
+            code="page_feature_limit",
+        )
+    feature_ids: list[str] = []
+    for feature in features:
+        if not isinstance(feature, dict) or feature.get("type") != "Feature":
+            raise AcquisitionValidationError("feature page contains a malformed feature")
+        if "properties" in feature and not isinstance(feature["properties"], (dict, type(None))):
+            raise AcquisitionValidationError("GeoJSON feature properties are malformed")
+        if "geometry" in feature and not isinstance(feature["geometry"], (dict, type(None))):
+            raise AcquisitionValidationError("GeoJSON feature geometry is malformed")
+        identifier = feature.get("id")
+        if identifier is not None:
+            if isinstance(identifier, bool) or not isinstance(identifier, (str, int)):
+                raise AcquisitionValidationError("GeoJSON feature id is malformed")
+            normalized = str(identifier)
+            if not normalized or len(normalized) > 1000:
+                raise AcquisitionValidationError("GeoJSON feature id is malformed")
+            feature_ids.append(normalized)
+    if len(feature_ids) != len(set(feature_ids)):
+        raise AcquisitionValidationError("feature page repeats a feature id")
+    returned = root.get("numberReturned")
+    if returned is not None and (
+        isinstance(returned, bool) or not isinstance(returned, int) or returned != len(features)
+    ):
+        raise AcquisitionValidationError("numberReturned does not match the feature page")
+    matched = _optional_count(root.get("numberMatched"), name="numberMatched")
+    if matched is None:
+        matched = _optional_count(root.get("totalFeatures"), name="totalFeatures")
+    if matched is not None and matched < len(features):
+        raise AcquisitionValidationError("matched feature count is smaller than the page")
+    next_url = None
+    links = root.get("links")
+    if links is not None:
+        if not isinstance(links, list):
+            raise AcquisitionValidationError("FeatureCollection links are malformed")
+        if allow_next:
+            if len(links) > 100:
+                raise AcquisitionLimitError(
+                    "FeatureCollection has too many links",
+                    code="link_limit",
+                )
+            matches: list[str] = []
+            for link in links:
+                if not isinstance(link, dict):
+                    raise AcquisitionValidationError("FeatureCollection link is malformed")
+                rel = link.get("rel")
+                href = link.get("href")
+                if isinstance(rel, str) and rel.casefold() == "next":
+                    if not isinstance(href, str) or not href or len(href) > 8192:
+                        raise AcquisitionValidationError("next-page link is malformed")
+                    matches.append(href)
+            if len(matches) > 1:
+                raise AcquisitionValidationError("FeatureCollection has multiple next links")
+            next_url = matches[0] if matches else None
+    return _FeaturePage(
+        count=len(features),
+        number_matched=matched,
+        next_url=next_url,
+        feature_ids=tuple(feature_ids),
+        collection=root,
+    )
+
+
+def _optional_count(value: Any, *, name: str) -> int | None:
+    if value is None or (isinstance(value, str) and value == "unknown"):
+        return None
+    if isinstance(value, str) and value.isdecimal():
+        value = int(value)
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        raise AcquisitionValidationError(f"{name} is invalid")
+    return value
+
+
+def _parse_arcgis_details(document: bytes, expected_id: int) -> dict[str, Any]:
+    root = _strict_json(document)
+    if not isinstance(root, dict) or "error" in root:
+        raise AcquisitionValidationError("ArcGIS layer metadata is malformed")
+    identifier = root.get("id")
+    if identifier is not None and identifier != expected_id:
+        raise AcquisitionValidationError("ArcGIS layer metadata has the wrong id")
+    object_id_field = root.get("objectIdField") or root.get("objectIdFieldName")
+    if object_id_field is not None and (
+        not isinstance(object_id_field, str)
+        or not object_id_field
+        or len(object_id_field) > 500
+    ):
+        raise AcquisitionValidationError("ArcGIS object-id field is malformed")
+    maximum = root.get("maxRecordCount")
+    if maximum is not None and (
+        isinstance(maximum, bool) or not isinstance(maximum, int) or maximum <= 0
+    ):
+        raise AcquisitionValidationError("ArcGIS maxRecordCount is malformed")
+    return root
+
+
+def _parse_arcgis_ids(document: bytes, max_features: int) -> _ArcGISIds:
+    root = _strict_json(document)
+    if not isinstance(root, dict) or "error" in root:
+        raise AcquisitionValidationError("ArcGIS object-id response is malformed")
+    field = root.get("objectIdFieldName") or root.get("objectIdField")
+    values = root.get("objectIds")
+    if not isinstance(field, str) or not field or len(field) > 500 or not isinstance(values, list):
+        raise AcquisitionValidationError("ArcGIS object-id response is malformed")
+    if len(values) > max_features:
+        raise AcquisitionLimitError(
+            "ArcGIS source exceeds the feature limit",
+            code="feature_limit",
+        )
+    identifiers: list[int] = []
+    for value in values:
+        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+            raise AcquisitionValidationError("ArcGIS object id is malformed")
+        identifiers.append(value)
+    if len(identifiers) != len(set(identifiers)):
+        raise AcquisitionValidationError("ArcGIS returned duplicate object ids")
+    return _ArcGISIds(object_id_field=field, object_ids=tuple(sorted(identifiers)))
+
+
+def _parse_arcgis_geojson_page(
+    document: bytes,
+    expected_ids: tuple[int, ...],
+    object_id_field: str,
+) -> int:
+    page = _parse_feature_collection(
+        document,
+        page_size=len(expected_ids),
+        allow_next=False,
+    )
+    root = cast(dict[str, Any], _strict_json(document))
+    observed = [
+        _arcgis_feature_id(
+            feature,
+            object_id_field=object_id_field,
+            properties_key="properties",
+        )
+        for feature in root["features"]
+    ]
+    if page.count != len(expected_ids) or tuple(sorted(observed)) != expected_ids:
+        raise AcquisitionValidationError(
+            "ArcGIS GeoJSON page does not match its requested object ids",
+            code="unstable_snapshot",
+            retryable=True,
+        )
+    return page.count
+
+
+def _parse_arcgis_json_page(
+    document: bytes,
+    expected_ids: tuple[int, ...],
+    object_id_field: str,
+) -> int:
+    root = _strict_json(document)
+    if not isinstance(root, dict) or "error" in root or not isinstance(root.get("features"), list):
+        raise AcquisitionValidationError("ArcGIS feature page is malformed")
+    features = root["features"]
+    if any(not isinstance(item, dict) for item in features):
+        raise AcquisitionValidationError("ArcGIS feature page contains a malformed feature")
+    observed = [
+        _arcgis_feature_id(
+            feature,
+            object_id_field=object_id_field,
+            properties_key="attributes",
+        )
+        for feature in features
+    ]
+    if len(features) != len(expected_ids) or tuple(sorted(observed)) != expected_ids:
+        raise AcquisitionValidationError(
+            "ArcGIS feature page does not match its requested object ids",
+            code="unstable_snapshot",
+            retryable=True,
+        )
+    return len(features)
+
+
+def _arcgis_feature_id(
+    feature: dict[str, Any],
+    *,
+    object_id_field: str,
+    properties_key: str,
+) -> int:
+    candidates: list[Any] = []
+    if "id" in feature:
+        candidates.append(feature["id"])
+    properties = feature.get(properties_key)
+    if isinstance(properties, dict):
+        field_matches = [
+            value
+            for key, value in properties.items()
+            if key.casefold() == object_id_field.casefold()
+        ]
+        if len(field_matches) > 1:
+            raise AcquisitionValidationError("ArcGIS feature repeats its object-id field")
+        candidates.extend(field_matches)
+    normalized: list[int] = []
+    for value in candidates:
+        if isinstance(value, str) and value.isdecimal():
+            value = int(value)
+        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+            raise AcquisitionValidationError("ArcGIS feature object id is malformed")
+        normalized.append(value)
+    if not normalized or len(set(normalized)) != 1:
+        raise AcquisitionValidationError("ArcGIS feature has no unambiguous object id")
+    return normalized[0]
+
+
+def _arcgis_id_chunks(
+    values: tuple[int, ...],
+    *,
+    page_size: int,
+    base_url: str,
+) -> tuple[tuple[int, ...], ...]:
+    chunks: list[tuple[int, ...]] = []
+    current: list[int] = []
+    for value in values:
+        candidate = [*current, value]
+        too_long = False
+        try:
+            rendered = _merge_query(
+                base_url,
+                {
+                    "objectIds": ",".join(str(item) for item in candidate),
+                    "outFields": "*",
+                    "returnGeometry": "true",
+                    "f": "geojson",
+                },
+            )
+            too_long = len(rendered) > 8000
+        except AcquisitionLimitError as exc:
+            if exc.code != "request_url_too_long":
+                raise
+            too_long = True
+        if len(candidate) > page_size or too_long:
+            if not current:
+                raise AcquisitionLimitError(
+                    "one ArcGIS object id cannot fit in a safe request URL",
+                    code="request_url_too_long",
+                )
+            chunks.append(tuple(current))
+            current = [value]
+        else:
+            current = candidate
+    if current:
+        chunks.append(tuple(current))
+    return tuple(chunks)
+
+
+def _validate_raster_file(path: Path, size_bytes: int) -> None:
+    def invalid(message: str) -> AcquisitionValidationError:
+        return AcquisitionValidationError(message, code="invalid_raster")
+
+    try:
+        with path.open("rb") as source:
+            header = source.read(8)
+            if len(header) != 8 or header[:2] not in {b"II", b"MM"}:
+                raise invalid("raster has an invalid TIFF header")
+            byte_order = "<" if header[:2] == b"II" else ">"
+            magic, first_ifd = struct.unpack(f"{byte_order}HI", header[2:])
+            if magic != 42 or not 8 <= first_ifd <= size_bytes - 6:
+                raise invalid("raster has an invalid TIFF directory")
+            source.seek(first_ifd)
+            count_raw = source.read(2)
+            if len(count_raw) != 2:
+                raise invalid("raster TIFF directory is truncated")
+            entry_count = struct.unpack(f"{byte_order}H", count_raw)[0]
+            if entry_count == 0 or entry_count > 4096:
+                raise invalid("raster TIFF directory count is invalid")
+            if first_ifd + 2 + entry_count * 12 + 4 > size_bytes:
+                raise invalid("raster TIFF directory exceeds the file")
+            width = None
+            height = None
+            tags: set[int] = set()
+            type_sizes = {
+                1: 1,
+                2: 1,
+                3: 2,
+                4: 4,
+                5: 8,
+                6: 1,
+                7: 1,
+                8: 2,
+                9: 4,
+                10: 8,
+                11: 4,
+                12: 8,
+                13: 4,
+                16: 8,
+                17: 8,
+                18: 8,
+            }
+            for _index in range(entry_count):
+                entry = source.read(12)
+                if len(entry) != 12:
+                    raise invalid("raster TIFF directory is truncated")
+                tag, value_type, value_count = struct.unpack(
+                    f"{byte_order}HHI",
+                    entry[:8],
+                )
+                tags.add(tag)
+                type_size = type_sizes.get(value_type)
+                if type_size is None or value_count == 0:
+                    raise invalid("raster TIFF entry has an unsupported value type")
+                value_bytes = type_size * value_count
+                if value_bytes > size_bytes:
+                    raise invalid("raster TIFF entry exceeds the file")
+                if value_bytes > 4:
+                    value_offset = struct.unpack(f"{byte_order}I", entry[8:12])[0]
+                    if value_offset > size_bytes - value_bytes:
+                        raise invalid("raster TIFF value points outside the file")
+                if tag in {256, 257} and value_count == 1 and value_type in {3, 4}:
+                    value = (
+                        struct.unpack(f"{byte_order}H", entry[8:10])[0]
+                        if value_type == 3
+                        else struct.unpack(f"{byte_order}I", entry[8:12])[0]
+                    )
+                    if tag == 256:
+                        width = value
+                    else:
+                        height = value
+    except OSError as exc:
+        raise AcquisitionValidationError(
+            "staged raster could not be inspected",
+            code="staging_read_failed",
+        ) from exc
+    if (
+        size_bytes < 14
+        or width is None
+        or height is None
+        or width <= 0
+        or height <= 0
+        or 34735 not in tags
+        or not ({33550, 33922}.issubset(tags) or 34264 in tags)
+    ):
+        raise AcquisitionValidationError(
+            "WCS response is not a structurally georeferenced GeoTIFF",
+            code="invalid_raster",
+        )
+
+
+def _configured_raster_vat(
+    config: Mapping[str, Any],
+) -> tuple[str, str, tuple[int, ...]] | None:
+    value_field = config.get("vat_value_field")
+    class_field = config.get("vat_class_field")
+    class_values = config.get("vat_class_values")
+    if value_field is None and class_field is None and class_values is None:
+        return None
+    if (
+        not isinstance(value_field, str)
+        or _DBF_FIELD_NAME_RE.fullmatch(value_field) is None
+        or not isinstance(class_field, str)
+        or _DBF_FIELD_NAME_RE.fullmatch(class_field) is None
+        or not isinstance(class_values, list)
+        or not 1 <= len(class_values) <= 256
+        or any(
+            isinstance(item, bool)
+            or not isinstance(item, int)
+            or not 0 <= item <= 2**31 - 1
+            for item in class_values
+        )
+        or class_values != sorted(set(class_values))
+    ):
+        raise AcquisitionConfigurationError(
+            "GeoTIFF VAT configuration is invalid"
+        )
+    return value_field, class_field, tuple(class_values)
+
+
+def _dataset_file_validator(
+    data_format: str,
+    limits: AcquisitionLimits,
+    *,
+    config: Mapping[str, Any] | None = None,
+    maximum_uncompressed_bytes: int | None = None,
+) -> FileValidator:
+    normalized = data_format.strip().casefold()
+    maximum_uncompressed = (
+        limits.max_total_bytes
+        if maximum_uncompressed_bytes is None
+        else maximum_uncompressed_bytes
+    )
+    if (
+        isinstance(maximum_uncompressed, bool)
+        or not isinstance(maximum_uncompressed, int)
+        or maximum_uncompressed <= 0
+        or maximum_uncompressed
+        > limits.max_total_uncompressed_bytes
+    ):
+        raise AcquisitionConfigurationError(
+            "dataset uncompressed byte limit is invalid"
+        )
+    if normalized in {"zip", "shapefile-zip"}:
+        return lambda path, size: _validate_reviewed_zip_dataset(
+            path,
+            size,
+            require_shapefile=normalized == "shapefile-zip",
+            maximum_uncompressed=maximum_uncompressed,
+            config=config or {},
+        )
+    if normalized == "inspire-cadastral-parcel-gml-zip":
+        return lambda path, size: _validate_cadastral_parcel_gml_zip(
+            path,
+            size,
+            maximum_uncompressed=maximum_uncompressed,
+        )
+    if normalized == "geotiff-zip":
+        vat_spec = _configured_raster_vat(config or {})
+        return lambda path, size: _validate_geotiff_zip(
+            path,
+            size,
+            maximum_uncompressed=limits.max_total_bytes,
+            vat_spec=vat_spec,
+        )
+    if normalized in {"geopackage", "gpkg"}:
+        return _validate_geopackage
+    if normalized == "geopackage-zip":
+        if config is None:
+            raise AcquisitionConfigurationError(
+                "GeoPackage ZIP requires reviewed member configuration"
+            )
+        archive_member = _config_optional_text(
+            config,
+            "archive_member",
+            max_chars=4_096,
+        )
+        input_layer = _config_optional_text(
+            config,
+            "input_layer",
+            max_chars=1_000,
+        )
+        maximum = config.get(
+            "archive_max_uncompressed_bytes",
+            maximum_uncompressed,
+        )
+        if (
+            archive_member is None
+            or input_layer is None
+            or isinstance(maximum, bool)
+            or not isinstance(maximum, int)
+            or not 100
+            <= maximum
+            <= maximum_uncompressed
+        ):
+            raise AcquisitionConfigurationError(
+                "GeoPackage ZIP reviewed member configuration is invalid"
+            )
+        return lambda path, size: _validate_geopackage_zip(
+            path,
+            size,
+            archive_member=archive_member,
+            input_layer=input_layer,
+            maximum_uncompressed=maximum,
+            config=config,
+        )
+    if normalized in {"geotiff", "tiff"}:
+        return _validate_raster_file
+    if normalized == "flatgeobuf":
+        return _validate_flatgeobuf
+    if normalized == "geojson":
+        return lambda path, size: _validate_geojson_dataset(path, size, limits)
+    raise AcquisitionConfigurationError(
+        "data_format has no fail-closed acquisition validator",
+        code="unsupported_data_format",
+    )
+
+
+def _validate_geopackage_zip(
+    path: Path,
+    size_bytes: int,
+    *,
+    archive_member: str,
+    input_layer: str,
+    maximum_uncompressed: int,
+    config: Mapping[str, Any],
+) -> dict[str, Any]:
+    if size_bytes < 22:
+        raise AcquisitionValidationError("GeoPackage ZIP is too small")
+    try:
+        inspection = inspect_geopackage_zip(
+            path,
+            expected_member=archive_member,
+            expected_layer=input_layer,
+            maximum_uncompressed_bytes=maximum_uncompressed,
+        )
+    except GeoPackageArchiveError as error:
+        raise AcquisitionValidationError(
+            str(error),
+            code="geopackage_zip_invalid",
+        ) from error
+    expected_archive_sha256 = config.get(
+        "archive_style_archive_sha256"
+    )
+    if expected_archive_sha256 is not None:
+        if (
+            not isinstance(expected_archive_sha256, str)
+            or _SHA256_RE.fullmatch(expected_archive_sha256) is None
+        ):
+            raise AcquisitionConfigurationError(
+                "GeoPackage ZIP reviewed style archive hash is invalid"
+            )
+        if inspection.get("archive_sha256") != expected_archive_sha256:
+            raise AcquisitionValidationError(
+                "GeoPackage ZIP differs from its reviewed style capture",
+                code="reviewed_archive_style_archive_changed",
+            )
+    try:
+        parity = evaluate_acquisition_parity(config, inspection)
+    except SourceContentParityError as error:
+        raise AcquisitionConfigurationError(
+            "GeoPackage ZIP parity configuration is invalid"
+        ) from error
+    try:
+        archive_profile = configured_reviewed_archive_integrity(config)
+    except ReviewedArchiveIntegrityError as error:
+        raise AcquisitionConfigurationError(
+            "GeoPackage ZIP reviewed archive configuration is invalid"
+        ) from error
+    try:
+        archive_integrity = (
+            inspect_reviewed_archive(path, config=config)
+            if archive_profile is not None
+            else None
+        )
+    except ReviewedArchiveIntegrityError as error:
+        raise AcquisitionValidationError(
+            str(error),
+            code="reviewed_archive_integrity_failed",
+        ) from error
+    if parity is None and archive_integrity is None:
+        raise AcquisitionConfigurationError(
+            "GeoPackage ZIP requires exact reviewed integrity evidence"
+        )
+    if parity is not None and parity["passed"] is not True:
+        failed = ", ".join(parity["failed_checks"])
+        raise AcquisitionValidationError(
+            f"GeoPackage ZIP content parity failed: {failed}",
+            code="source_content_parity_failed",
+        )
+    if (
+        archive_integrity is not None
+        and archive_integrity["passed"] is not True
+    ):
+        raise AcquisitionValidationError(
+            "GeoPackage ZIP central directory changed",
+            code="reviewed_archive_integrity_failed",
+        )
+    result = {
+        "archive_member": archive_member,
+        "input_layer": input_layer,
+        "geopackage_inspection": inspection,
+    }
+    if parity is not None:
+        result["source_content_parity"] = parity
+    if archive_integrity is not None:
+        result["reviewed_archive_integrity"] = archive_integrity
+    return result
+
+
+def _validate_reviewed_zip_dataset(
+    path: Path,
+    size_bytes: int,
+    *,
+    require_shapefile: bool,
+    maximum_uncompressed: int,
+    config: Mapping[str, Any],
+) -> dict[str, Any] | None:
+    inspection = _validate_zip_dataset(
+        path,
+        size_bytes,
+        require_shapefile=require_shapefile,
+        maximum_uncompressed=maximum_uncompressed,
+    )
+    archive_members = inspection.pop("archive_members")
+    try:
+        archive_profile = configured_reviewed_archive_integrity(config)
+    except ReviewedArchiveIntegrityError as error:
+        raise AcquisitionConfigurationError(
+            "ZIP reviewed archive configuration is invalid"
+        ) from error
+    try:
+        integrity = (
+            inspect_reviewed_archive(path, config=config)
+            if archive_profile is not None
+            else None
+        )
+    except ReviewedArchiveIntegrityError as error:
+        raise AcquisitionValidationError(
+            str(error),
+            code="reviewed_archive_integrity_failed",
+        ) from error
+    if integrity is not None and integrity["passed"] is not True:
+        raise AcquisitionValidationError(
+            "ZIP central directory changed",
+            code="reviewed_archive_integrity_failed",
+        )
+    result: dict[str, Any] = dict(inspection)
+    if integrity is not None:
+        result["reviewed_archive_integrity"] = integrity
+    if require_shapefile and (
+        integrity is not None
+        or "archive_member" in config
+        or "input_layer" in config
+    ):
+        archive_member = _config_optional_text(
+            config,
+            "archive_member",
+            max_chars=4_096,
+        )
+        input_layer = _config_optional_text(
+            config,
+            "input_layer",
+            max_chars=1_000,
+        )
+        if (
+            archive_member is None
+            or not archive_member.casefold().endswith(".shp")
+            or input_layer is None
+            or input_layer != PurePosixPath(archive_member).stem
+            or not {
+                f"{archive_member[:-4]}{suffix}"
+                for suffix in (".shp", ".shx", ".dbf", ".prj")
+            }.issubset(
+                set(archive_members)
+            )
+        ):
+            raise AcquisitionConfigurationError(
+                "Shapefile ZIP reviewed member configuration is invalid"
+            )
+        result["archive_member"] = archive_member
+        result["input_layer"] = input_layer
+    return result
+
+
+def _validate_zip_dataset(
+    path: Path,
+    size_bytes: int,
+    *,
+    require_shapefile: bool,
+    maximum_uncompressed: int,
+) -> dict[str, Any]:
+    if size_bytes < 22:
+        raise AcquisitionValidationError("ZIP dataset is too small")
+    try:
+        with zipfile.ZipFile(path) as archive:
+            entries = archive.infolist()
+            if not entries or len(entries) > 100_000:
+                raise AcquisitionValidationError("ZIP dataset entry count is invalid")
+            total_uncompressed = 0
+            member_names: list[str] = []
+            shapefile_parts: dict[str, set[str]] = {}
+            for entry in entries:
+                name = entry.filename
+                pure = PurePosixPath(name.replace("\\", "/"))
+                if (
+                    not name
+                    or len(name) > 4096
+                    or pure.is_absolute()
+                    or any(part in {"", ".", ".."} for part in pure.parts)
+                    or entry.flag_bits & 0x1
+                    or ((entry.external_attr >> 16) & 0o170000) == 0o120000
+                ):
+                    raise AcquisitionValidationError("ZIP dataset has an unsafe entry")
+                if entry.is_dir():
+                    continue
+                member_names.append(name)
+                total_uncompressed += entry.file_size
+                if total_uncompressed > maximum_uncompressed:
+                    raise AcquisitionLimitError(
+                        "ZIP dataset exceeds the uncompressed byte limit",
+                        code="archive_expansion_limit",
+                    )
+                suffix = pure.suffix.casefold()
+                if suffix in {".shp", ".shx", ".dbf"}:
+                    key = str(pure.with_suffix("")).casefold()
+                    shapefile_parts.setdefault(key, set()).add(suffix)
+            if require_shapefile and not any(
+                {".shp", ".shx", ".dbf"}.issubset(parts)
+                for parts in shapefile_parts.values()
+            ):
+                raise AcquisitionValidationError(
+                    "shapefile ZIP lacks a matching SHP/SHX/DBF set"
+                )
+            corrupt = archive.testzip()
+            if corrupt is not None:
+                raise AcquisitionValidationError("ZIP dataset contains a corrupt entry")
+            return {
+                "archive_entry_count": len(entries),
+                "archive_uncompressed_bytes": total_uncompressed,
+                "archive_members": member_names,
+            }
+    except (OSError, zipfile.BadZipFile, RuntimeError) as exc:
+        if isinstance(exc, ReferenceAcquisitionError):
+            raise
+        raise AcquisitionValidationError("dataset is not a valid ZIP archive") from exc
+
+
+def _validate_cadastral_parcel_gml_zip(
+    path: Path,
+    size_bytes: int,
+    *,
+    maximum_uncompressed: int,
+) -> dict[str, Any]:
+    _validate_zip_dataset(
+        path,
+        size_bytes,
+        require_shapefile=False,
+        maximum_uncompressed=maximum_uncompressed,
+    )
+    try:
+        with zipfile.ZipFile(path) as archive:
+            files = [item for item in archive.infolist() if not item.is_dir()]
+            parcel_members = [
+                item
+                for item in files
+                if (
+                    len(
+                        PurePosixPath(
+                            item.filename.replace("\\", "/")
+                        ).parts
+                    )
+                    == 1
+                    and PurePosixPath(
+                        item.filename.replace("\\", "/")
+                    )
+                    .name.casefold()
+                    .endswith(".cadastralparcel.gml")
+                )
+            ]
+            if len(parcel_members) != 1:
+                raise AcquisitionValidationError(
+                    "cadastral dataset must contain exactly one parcel GML",
+                    code="cadastral_parcel_member_invalid",
+                )
+            member = parcel_members[0]
+            if not 100 <= member.file_size <= maximum_uncompressed:
+                raise AcquisitionValidationError(
+                    "cadastral parcel GML size is invalid",
+                    code="cadastral_parcel_member_invalid",
+                )
+            with archive.open(member) as source:
+                prefix = source.read(min(member.file_size, 256 * 1024))
+            lowered = prefix.lower()
+            if (
+                b"\x00" in prefix
+                or b"<!doctype" in lowered
+                or b"<!entity" in lowered
+                or b"featurecollection" not in lowered
+                or b"cadastralparcel" not in lowered
+            ):
+                raise AcquisitionValidationError(
+                    "cadastral parcel GML has an invalid feature collection",
+                    code="cadastral_parcel_gml_invalid",
+                )
+            return {
+                "archive_member": member.filename,
+                "uncompressed_bytes": sum(item.file_size for item in files),
+            }
+    except (OSError, zipfile.BadZipFile, RuntimeError) as exc:
+        if isinstance(exc, ReferenceAcquisitionError):
+            raise
+        raise AcquisitionValidationError(
+            "cadastral dataset cannot be inspected"
+        ) from exc
+
+
+def _validate_geotiff_zip(
+    path: Path,
+    size_bytes: int,
+    *,
+    maximum_uncompressed: int,
+    vat_spec: tuple[str, str, tuple[int, ...]] | None = None,
+) -> dict[str, Any]:
+    _validate_zip_dataset(
+        path,
+        size_bytes,
+        require_shapefile=False,
+        maximum_uncompressed=maximum_uncompressed,
+    )
+    try:
+        with zipfile.ZipFile(path) as archive:
+            files = [item for item in archive.infolist() if not item.is_dir()]
+            raster_members = [
+                item
+                for item in files
+                if (
+                    len(
+                        PurePosixPath(
+                            item.filename.replace("\\", "/")
+                        ).parts
+                    )
+                    == 1
+                    and PurePosixPath(
+                        item.filename.replace("\\", "/")
+                    ).suffix.casefold()
+                    in {".tif", ".tiff"}
+                )
+            ]
+            if len(raster_members) != 1:
+                raise AcquisitionValidationError(
+                    "raster dataset must contain exactly one root GeoTIFF",
+                    code="geotiff_member_invalid",
+                )
+            member = raster_members[0]
+            if not 100 <= member.file_size <= maximum_uncompressed:
+                raise AcquisitionValidationError(
+                    "archived GeoTIFF size is invalid",
+                    code="geotiff_member_invalid",
+                )
+            with archive.open(member) as source:
+                prefix = source.read(4)
+            if prefix not in {
+                b"II*\x00",
+                b"MM\x00*",
+                b"II+\x00",
+                b"MM\x00+",
+            }:
+                raise AcquisitionValidationError(
+                    "archived raster does not match GeoTIFF",
+                    code="geotiff_member_invalid",
+                )
+            metadata: dict[str, Any] = {
+                "archive_member": member.filename,
+                "uncompressed_bytes": sum(item.file_size for item in files),
+            }
+            if vat_spec is not None:
+                metadata["raster_value_attribute_table"] = (
+                    _parse_raster_value_attribute_table(
+                        archive,
+                        files=files,
+                        raster_member=member,
+                        value_field=vat_spec[0],
+                        class_field=vat_spec[1],
+                        expected_class_values=vat_spec[2],
+                    )
+                )
+            return metadata
+    except (OSError, zipfile.BadZipFile, RuntimeError) as exc:
+        if isinstance(exc, ReferenceAcquisitionError):
+            raise
+        raise AcquisitionValidationError(
+            "raster dataset cannot be inspected"
+        ) from exc
+
+
+def _parse_raster_value_attribute_table(
+    archive: zipfile.ZipFile,
+    *,
+    files: list[zipfile.ZipInfo],
+    raster_member: zipfile.ZipInfo,
+    value_field: str,
+    class_field: str,
+    expected_class_values: tuple[int, ...],
+) -> dict[str, Any]:
+    expected_name = f"{raster_member.filename}.vat.dbf".casefold()
+    vat_members = [
+        item
+        for item in files
+        if (
+            len(PurePosixPath(item.filename.replace("\\", "/")).parts) == 1
+            and item.filename.casefold() == expected_name
+        )
+    ]
+    if len(vat_members) != 1:
+        raise AcquisitionValidationError(
+            "reviewed raster must contain its unique VAT DBF companion",
+            code="raster_vat_invalid",
+        )
+    vat_member = vat_members[0]
+    if not 65 <= vat_member.file_size <= _MAX_RASTER_VAT_BYTES:
+        raise AcquisitionValidationError(
+            "raster VAT DBF size is invalid",
+            code="raster_vat_invalid",
+        )
+    try:
+        body = archive.read(vat_member)
+    except (KeyError, OSError, RuntimeError, zipfile.BadZipFile) as exc:
+        raise AcquisitionValidationError(
+            "raster VAT DBF cannot be read",
+            code="raster_vat_invalid",
+        ) from exc
+    try:
+        record_count = struct.unpack_from("<I", body, 4)[0]
+        header_length = struct.unpack_from("<H", body, 8)[0]
+        record_length = struct.unpack_from("<H", body, 10)[0]
+    except struct.error as exc:
+        raise AcquisitionValidationError(
+            "raster VAT DBF header is truncated",
+            code="raster_vat_invalid",
+        ) from exc
+    if (
+        body[0] != 0x03
+        or not 1 <= record_count <= _MAX_RASTER_VAT_ROWS
+        or not 65 <= header_length <= len(body)
+        or (header_length - 33) % 32 != 0
+        or body[header_length - 1] != 0x0D
+        or not 2 <= record_length <= 65_535
+        or header_length + record_count * record_length > len(body)
+    ):
+        raise AcquisitionValidationError(
+            "raster VAT DBF header is invalid",
+            code="raster_vat_invalid",
+        )
+    field_count = (header_length - 33) // 32
+    if not 2 <= field_count <= _MAX_RASTER_VAT_FIELDS:
+        raise AcquisitionValidationError(
+            "raster VAT DBF field count is invalid",
+            code="raster_vat_invalid",
+        )
+    fields: list[dict[str, Any]] = []
+    seen_names: set[str] = set()
+    expected_record_length = 1
+    for field_index in range(field_count):
+        offset = 32 + field_index * 32
+        descriptor = body[offset : offset + 32]
+        raw_name = descriptor[:11].split(b"\x00", 1)[0]
+        try:
+            name = raw_name.decode("ascii")
+            field_type = chr(descriptor[11])
+        except (UnicodeDecodeError, ValueError) as exc:
+            raise AcquisitionValidationError(
+                "raster VAT DBF field descriptor is invalid",
+                code="raster_vat_invalid",
+            ) from exc
+        width = descriptor[16]
+        decimal_count = descriptor[17]
+        normalized_name = name.casefold()
+        if (
+            _DBF_FIELD_NAME_RE.fullmatch(name) is None
+            or normalized_name in seen_names
+            or field_type not in {"C", "D", "F", "L", "N"}
+            or width <= 0
+            or decimal_count > width
+            or (field_type not in {"F", "N"} and decimal_count != 0)
+        ):
+            raise AcquisitionValidationError(
+                "raster VAT DBF field descriptor is invalid",
+                code="raster_vat_invalid",
+            )
+        seen_names.add(normalized_name)
+        expected_record_length += width
+        fields.append(
+            {
+                "name": name,
+                "type": field_type,
+                "width": width,
+                "decimal_count": decimal_count,
+            }
+        )
+    if expected_record_length != record_length:
+        raise AcquisitionValidationError(
+            "raster VAT DBF record length is invalid",
+            code="raster_vat_invalid",
+        )
+    field_offsets: dict[str, tuple[int, dict[str, Any]]] = {}
+    current_offset = 1
+    for field in fields:
+        field_offsets[field["name"].casefold()] = (current_offset, field)
+        current_offset += cast(int, field["width"])
+    value_descriptor = field_offsets.get(value_field.casefold())
+    class_descriptor = field_offsets.get(class_field.casefold())
+    if value_descriptor is None or class_descriptor is None:
+        raise AcquisitionValidationError(
+            "raster VAT DBF lacks its reviewed value or class field",
+            code="raster_vat_invalid",
+        )
+    for _offset, descriptor in (value_descriptor, class_descriptor):
+        if descriptor["type"] != "N" or descriptor["decimal_count"] != 0:
+            raise AcquisitionValidationError(
+                "raster VAT mapping fields must be integral numeric fields",
+                code="raster_vat_invalid",
+            )
+    value_to_class: dict[int, int] = {}
+    for row_index in range(record_count):
+        record_offset = header_length + row_index * record_length
+        record = body[record_offset : record_offset + record_length]
+        if len(record) != record_length or record[:1] != b" ":
+            raise AcquisitionValidationError(
+                "raster VAT DBF contains an invalid or deleted record",
+                code="raster_vat_invalid",
+            )
+        value = _parse_dbf_integer(record, value_descriptor)
+        class_value = _parse_dbf_integer(record, class_descriptor)
+        if (
+            not 0 <= value <= 2**31 - 1
+            or class_value not in expected_class_values
+            or value in value_to_class
+        ):
+            raise AcquisitionValidationError(
+                "raster VAT value-to-class mapping is invalid",
+                code="raster_vat_invalid",
+            )
+        value_to_class[value] = class_value
+    if set(value_to_class.values()) != set(expected_class_values):
+        raise AcquisitionValidationError(
+            "raster VAT does not cover every reviewed class",
+            code="raster_vat_invalid",
+        )
+    trailing = body[header_length + record_count * record_length :]
+    if trailing not in {b"", b"\x1a"}:
+        raise AcquisitionValidationError(
+            "raster VAT DBF has unexpected trailing bytes",
+            code="raster_vat_invalid",
+        )
+    return {
+        "member": vat_member.filename,
+        "sha256": hashlib.sha256(body).hexdigest(),
+        "fields": fields,
+        "row_count": record_count,
+        "value_field": value_field,
+        "class_field": class_field,
+        "expected_class_values": list(expected_class_values),
+        "value_class_mapping": [
+            {"value": value, "class_value": value_to_class[value]}
+            for value in sorted(value_to_class)
+        ],
+    }
+
+
+def _parse_dbf_integer(
+    record: bytes,
+    descriptor: tuple[int, dict[str, Any]],
+) -> int:
+    offset, field = descriptor
+    width = cast(int, field["width"])
+    raw = record[offset : offset + width]
+    try:
+        text = raw.decode("ascii").strip()
+    except UnicodeDecodeError as exc:
+        raise AcquisitionValidationError(
+            "raster VAT numeric value is not ASCII",
+            code="raster_vat_invalid",
+        ) from exc
+    if re.fullmatch(r"[+-]?[0-9]+", text) is None:
+        raise AcquisitionValidationError(
+            "raster VAT numeric value is invalid",
+            code="raster_vat_invalid",
+        )
+    return int(text)
+
+
+def _validate_geopackage(path: Path, size_bytes: int) -> None:
+    if size_bytes < 100:
+        raise AcquisitionValidationError("GeoPackage is too small")
+    try:
+        with path.open("rb") as source:
+            if source.read(16) != b"SQLite format 3\x00":
+                raise AcquisitionValidationError("GeoPackage has no SQLite header")
+        uri = path.resolve(strict=True).as_uri() + "?mode=ro&immutable=1"
+        with sqlite3.connect(uri, uri=True, timeout=1) as connection:
+            check = connection.execute("PRAGMA quick_check(1)").fetchone()
+            if check != ("ok",):
+                raise AcquisitionValidationError("GeoPackage integrity check failed")
+            tables = {
+                row[0]
+                for row in connection.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table' AND "
+                    "name IN ('gpkg_spatial_ref_sys', 'gpkg_contents')"
+                )
+            }
+            if tables != {"gpkg_spatial_ref_sys", "gpkg_contents"}:
+                raise AcquisitionValidationError("SQLite dataset is not a GeoPackage")
+    except sqlite3.Error as exc:
+        raise AcquisitionValidationError("GeoPackage cannot be read safely") from exc
+
+
+def _validate_flatgeobuf(path: Path, size_bytes: int) -> None:
+    try:
+        with path.open("rb") as source:
+            prefix = source.read(8)
+    except OSError as exc:
+        raise AcquisitionValidationError("FlatGeobuf could not be inspected") from exc
+    if size_bytes < 16 or prefix != b"fgb\x03fgb\x01":
+        raise AcquisitionValidationError("dataset is not FlatGeobuf")
+
+
+def _validate_geojson_dataset(
+    path: Path,
+    size_bytes: int,
+    limits: AcquisitionLimits,
+) -> None:
+    if size_bytes > limits.max_page_bytes:
+        raise AcquisitionLimitError(
+            "direct GeoJSON exceeds the bounded parser limit",
+            code="geojson_parser_limit",
+        )
+    try:
+        document = path.read_bytes()
+    except OSError as exc:
+        raise AcquisitionValidationError("GeoJSON could not be inspected") from exc
+    _parse_feature_collection(
+        document,
+        page_size=limits.max_features,
+        allow_next=False,
+    )
+
+
+def _parse_style_bundle(
+    document: bytes,
+    *,
+    layer_name: str,
+    style_names: tuple[str, ...],
+) -> _ParsedStyleBundle:
+    if (
+        not isinstance(document, bytes)
+        or not document
+        or len(document) > MAX_PROBE_BYTES
+        or b"\x00" in document
+    ):
+        raise AcquisitionValidationError(
+            "GetStyles returned an empty or oversized SLD",
+            code="invalid_sld",
+        )
+    lowered = document.lower()
+    if b"<!doctype" in lowered or b"<!entity" in lowered:
+        raise AcquisitionValidationError(
+            "SLD declarations cannot define DTDs or entities",
+            code="unsafe_sld_xml",
+        )
+    try:
+        root = ElementTree.fromstring(document)
+    except ElementTree.ParseError as exc:
+        raise AcquisitionValidationError(
+            "GetStyles returned malformed XML",
+            code="invalid_sld",
+        ) from exc
+    if root.tag != f"{{{_SLD_NAMESPACE}}}StyledLayerDescriptor":
+        raise AcquisitionValidationError(
+            "GetStyles did not return an SLD document",
+            code="invalid_sld",
+        )
+    version = root.get("version")
+    if (
+        not isinstance(version, str)
+        or not version
+        or len(version) > 32
+        or any(ord(character) < 32 for character in version)
+    ):
+        raise AcquisitionValidationError(
+            "SLD version is missing or invalid",
+            code="invalid_sld",
+        )
+
+    stack = [(root, 1)]
+    element_count = 0
+    text_bytes = 0
+    blocked_elements = {
+        "remoteows",
+        "include",
+        "fallback",
+    }
+    while stack:
+        element, depth = stack.pop()
+        element_count += 1
+        if element_count > _MAX_SLD_ELEMENTS or depth > _MAX_SLD_DEPTH:
+            raise AcquisitionLimitError(
+                "SLD exceeds its XML complexity limit",
+                code="sld_complexity_limit",
+            )
+        local_element = _xml_local(element.tag).casefold()
+        if local_element in blocked_elements:
+            raise AcquisitionValidationError(
+                "SLD references an external or auxiliary resource",
+                code="unsafe_sld_reference",
+            )
+        for attribute, raw_value in element.attrib.items():
+            if not isinstance(raw_value, str) or len(raw_value) > MAX_PROBE_BYTES:
+                raise AcquisitionLimitError(
+                    "SLD attribute exceeds its XML complexity limit",
+                    code="sld_complexity_limit",
+                )
+            local_attribute = _xml_local(attribute).casefold()
+            if local_attribute in {"href", "src", "url", "uri"}:
+                if (
+                    local_element != "onlineresource"
+                    or local_attribute != "href"
+                    or not raw_value.strip()
+                    or any(
+                        ord(character) < 32 or ord(character) == 127
+                        for character in raw_value
+                    )
+                ):
+                    raise AcquisitionValidationError(
+                        "SLD contains an unsupported resource reference",
+                        code="unsafe_sld_reference",
+                    )
+                text_bytes += len(raw_value.encode("utf-8"))
+                continue
+            # XML schema locations are validation hints rather than runtime
+            # style dependencies.  They are removed from standalone output.
+            if local_attribute not in {
+                "schemalocation",
+                "nonamespaceschemalocation",
+            } and _EXTERNAL_SLD_TEXT_RE.search(raw_value):
+                raise AcquisitionValidationError(
+                    "SLD contains an external resource locator",
+                    code="unsafe_sld_reference",
+                )
+            text_bytes += len(raw_value.encode("utf-8"))
+        for value in (element.text, element.tail):
+            if value:
+                text_bytes += len(value.encode("utf-8"))
+                if _EXTERNAL_SLD_TEXT_RE.search(value):
+                    raise AcquisitionValidationError(
+                        "SLD contains an external resource locator",
+                        code="unsafe_sld_reference",
+                    )
+        if text_bytes > _MAX_SLD_TEXT_BYTES:
+            raise AcquisitionLimitError(
+                "SLD exceeds its XML text limit",
+                code="sld_complexity_limit",
+            )
+        stack.extend((child, depth + 1) for child in element)
+
+    named_layers = [
+        child
+        for child in root
+        if _xml_local(child.tag) == "NamedLayer"
+        and _direct_sld_name(child) == layer_name
+    ]
+    if len(named_layers) != 1:
+        raise AcquisitionValidationError(
+            "GetStyles did not return the exact requested layer",
+            code="style_layer_unavailable",
+        )
+    named_layer = named_layers[0]
+    standalone_slds: list[tuple[str, bytes]] = []
+    resource_hrefs: list[tuple[str, tuple[str, ...]]] = []
+    standalone_total_bytes = 0
+    for style_name in style_names:
+        matching_styles = [
+            child
+            for child in named_layer
+            if _xml_local(child.tag) == "UserStyle"
+            and _direct_sld_name(child) == style_name
+        ]
+        if len(matching_styles) != 1:
+            raise AcquisitionValidationError(
+                "GetStyles did not return the exact requested style",
+                code="style_unavailable",
+            )
+
+        standalone_root = copy.deepcopy(root)
+        for child in list(standalone_root):
+            standalone_root.remove(child)
+        standalone_layer = copy.deepcopy(named_layer)
+        for child in list(standalone_layer):
+            if _xml_local(child.tag) == "UserStyle" and (
+                _direct_sld_name(child) != style_name
+            ):
+                standalone_layer.remove(child)
+            elif _xml_local(child.tag) == "NamedStyle":
+                standalone_layer.remove(child)
+        standalone_root.append(standalone_layer)
+        for element in standalone_root.iter():
+            for attribute in list(element.attrib):
+                if _xml_local(attribute).casefold() in {
+                    "schemalocation",
+                    "nonamespaceschemalocation",
+                }:
+                    del element.attrib[attribute]
+        standalone = ElementTree.tostring(
+            standalone_root,
+            encoding="utf-8",
+            xml_declaration=True,
+            short_empty_elements=True,
+        )
+        if not standalone or len(standalone) > MAX_PROBE_BYTES:
+            raise AcquisitionLimitError(
+                "standalone SLD exceeds its byte limit",
+                code="sld_size_limit",
+            )
+        standalone_slds.append((style_name, standalone))
+        hrefs = tuple(
+            dict.fromkeys(
+                value.strip()
+                for element in standalone_root.iter()
+                if _xml_local(element.tag).casefold() == "onlineresource"
+                for attribute, value in element.attrib.items()
+                if _xml_local(attribute).casefold() == "href"
+            )
+        )
+        if len(hrefs) > _MAX_STYLE_RESOURCES_PER_SOURCE:
+            raise AcquisitionLimitError(
+                "SLD declares too many auxiliary resources",
+                code="style_resource_count_limit",
+            )
+        resource_hrefs.append((style_name, hrefs))
+        standalone_total_bytes += len(standalone)
+        if standalone_total_bytes > _MAX_SLD_EXTRACTED_BYTES:
+            raise AcquisitionLimitError(
+                "standalone SLD bundle exceeds its aggregate byte limit",
+                code="sld_size_limit",
+            )
+    return _ParsedStyleBundle(
+        sld_version=version,
+        standalone_slds=tuple(standalone_slds),
+        resource_hrefs=tuple(resource_hrefs),
+    )
+
+
+def _direct_sld_name(element: ElementTree.Element) -> str | None:
+    names = [
+        (child.text or "").strip()
+        for child in element
+        if _xml_local(child.tag) == "Name" and (child.text or "").strip()
+    ]
+    if len(names) != 1 or len(names[0]) > 1000:
+        return None
+    return names[0]
+
+
+def _resolve_style_resource_url(endpoint_url: str, raw_href: str) -> str:
+    if (
+        not isinstance(raw_href, str)
+        or not raw_href
+        or len(raw_href) > 8192
+        or raw_href.startswith(("//", "\\"))
+        or "\\" in raw_href
+    ):
+        raise AcquisitionValidationError(
+            "SLD resource URL is invalid",
+            code="style_resource_url_invalid",
+        )
+    try:
+        resolved = normalize_https_url(urljoin(endpoint_url, raw_href))
+        return _require_same_origin(endpoint_url, resolved)
+    except (AcquisitionConfigurationError, ValueError) as error:
+        raise AcquisitionValidationError(
+            "SLD resource origin is not reviewed",
+            code="style_resource_origin_unreviewed",
+        ) from error
+
+
+def _inspect_style_resource(document: bytes) -> _StyleResourceInspection:
+    if (
+        not isinstance(document, bytes)
+        or not document
+        or len(document) > _MAX_STYLE_RESOURCE_BYTES
+    ):
+        raise AcquisitionValidationError(
+            "SLD resource is empty or oversized",
+            code="invalid_style_resource",
+        )
+    if document.startswith(b"\x89PNG\r\n\x1a\n"):
+        if len(document) < 33 or document[12:16] != b"IHDR":
+            raise AcquisitionValidationError(
+                "SLD PNG resource is malformed",
+                code="invalid_style_resource",
+            )
+        return _StyleResourceInspection("image/png", "png")
+    if document.startswith(b"\xff\xd8\xff") and document.endswith(b"\xff\xd9"):
+        return _StyleResourceInspection("image/jpeg", "jpg")
+    if document.startswith((b"GIF87a", b"GIF89a")):
+        return _StyleResourceInspection("image/gif", "gif")
+    if (
+        len(document) >= 12
+        and document[:4] == b"RIFF"
+        and document[8:12] == b"WEBP"
+    ):
+        return _StyleResourceInspection("image/webp", "webp")
+
+    lowered = document[:4096].lower()
+    if (
+        b"\x00" in document
+        or b"<!doctype" in lowered
+        or b"<!entity" in lowered
+    ):
+        raise AcquisitionValidationError(
+            "SLD SVG resource cannot declare DTDs or entities",
+            code="unsafe_style_resource",
+        )
+    try:
+        root = ElementTree.fromstring(document)
+    except ElementTree.ParseError as error:
+        raise AcquisitionValidationError(
+            "SLD resource is not an allowlisted image",
+            code="invalid_style_resource",
+        ) from error
+    if _xml_local(root.tag).casefold() != "svg":
+        raise AcquisitionValidationError(
+            "SLD resource is not an allowlisted image",
+            code="invalid_style_resource",
+        )
+    elements = list(root.iter())
+    if len(elements) > 20_000:
+        raise AcquisitionLimitError(
+            "SLD SVG resource exceeds its complexity limit",
+            code="style_resource_complexity_limit",
+        )
+    for element in elements:
+        if _xml_local(element.tag).casefold() in {
+            "script",
+            "foreignobject",
+            "iframe",
+        }:
+            raise AcquisitionValidationError(
+                "SLD SVG resource contains active content",
+                code="unsafe_style_resource",
+            )
+        for attribute, value in element.attrib.items():
+            if (
+                _xml_local(attribute).casefold()
+                in {"href", "src", "url", "uri"}
+                or _EXTERNAL_SLD_TEXT_RE.search(value)
+            ):
+                raise AcquisitionValidationError(
+                    "SLD SVG resource has an external dependency",
+                    code="unsafe_style_resource",
+                )
+    return _StyleResourceInspection("image/svg+xml", "svg")
+
+
+def _rewrite_style_resource_hrefs(
+    document: bytes,
+    replacements: Mapping[str, str],
+) -> bytes:
+    try:
+        root = ElementTree.fromstring(document)
+    except ElementTree.ParseError as error:
+        raise AcquisitionValidationError(
+            "standalone SLD became malformed",
+            code="invalid_sld",
+        ) from error
+    replaced: set[str] = set()
+    for element in root.iter():
+        if _xml_local(element.tag).casefold() != "onlineresource":
+            continue
+        for attribute, value in list(element.attrib.items()):
+            if _xml_local(attribute).casefold() != "href":
+                continue
+            replacement = replacements.get(value.strip())
+            if replacement is None:
+                raise AcquisitionValidationError(
+                    "SLD resource rewrite is incomplete",
+                    code="style_resource_missing",
+                )
+            element.set(attribute, replacement)
+            replaced.add(value.strip())
+    if replaced != set(replacements):
+        raise AcquisitionValidationError(
+            "SLD resource rewrite evidence is inconsistent",
+            code="style_resource_rewrite_invalid",
+        )
+    return ElementTree.tostring(
+        root,
+        encoding="utf-8",
+        xml_declaration=True,
+        short_empty_elements=True,
+    )
+
+
+def _store_style_package(
+    store: ReferenceBlobStore,
+    *,
+    sld: bytes,
+    resources: tuple[_AcquiredStyleResource, ...],
+    max_bytes: int,
+) -> StoredReferenceBlob:
+    if (
+        not isinstance(sld, bytes)
+        or not sld
+        or len(sld) > MAX_PROBE_BYTES
+        or len(resources) > _MAX_STYLE_RESOURCES_PER_SOURCE
+        or len({item.local_path for item in resources}) != len(resources)
+    ):
+        raise AcquisitionValidationError(
+            "style package resource set is invalid",
+            code="style_package_invalid",
+        )
+    expected_size = len(sld) + sum(
+        item.artifact.blob.size_bytes for item in resources
+    )
+    if expected_size > max_bytes:
+        raise AcquisitionLimitError(
+            "style package exceeds its aggregate byte limit",
+            code="style_package_size_limit",
+        )
+
+    output = io.BytesIO()
+    with zipfile.ZipFile(
+        output,
+        "w",
+        compression=zipfile.ZIP_DEFLATED,
+        compresslevel=9,
+        strict_timestamps=True,
+    ) as archive:
+        _write_deterministic_zip_member(archive, "style.sld", sld)
+        for resource in sorted(resources, key=lambda item: item.local_path):
+            with store.open_blob(resource.artifact.blob.storage_key) as source:
+                payload = source.read(resource.artifact.blob.size_bytes + 1)
+            if (
+                len(payload) != resource.artifact.blob.size_bytes
+                or hashlib.sha256(payload).hexdigest()
+                != resource.artifact.blob.sha256
+            ):
+                raise AcquisitionValidationError(
+                    "style resource CAS evidence is inconsistent",
+                    code="style_resource_integrity",
+                )
+            _write_deterministic_zip_member(
+                archive,
+                resource.local_path,
+                payload,
+            )
+    payload = output.getvalue()
+    if not payload or len(payload) > max_bytes:
+        raise AcquisitionLimitError(
+            "style package exceeds its output byte limit",
+            code="style_package_size_limit",
+        )
+    return store.put_stream(io.BytesIO(payload), max_bytes=max_bytes)
+
+
+def _write_deterministic_zip_member(
+    archive: zipfile.ZipFile,
+    name: str,
+    payload: bytes,
+) -> None:
+    info = zipfile.ZipInfo(name, date_time=(1980, 1, 1, 0, 0, 0))
+    info.compress_type = zipfile.ZIP_DEFLATED
+    info.create_system = 3
+    info.external_attr = 0o100644 << 16
+    archive.writestr(info, payload)
+
+
+def _parse_atom_feed(document: bytes, remote_name: str) -> str:
+    root, elements = _parse_atom_document(document)
+    enclosure_matches: list[str] = []
+    alternate_matches: list[str] = []
+    for entry in (item for item in elements if _xml_local(item.tag) == "entry"):
+        identities = {
+            (child.text or "").strip()
+            for child in entry
+            if _xml_local(child.tag) in {"id", "title"} and (child.text or "").strip()
+        }
+        if remote_name not in identities:
+            continue
+        for link in entry:
+            if _xml_local(link.tag) != "link":
+                continue
+            rel = (link.get("rel") or "alternate").casefold()
+            href = link.get("href")
+            if isinstance(href, str) and href:
+                if rel == "enclosure":
+                    enclosure_matches.append(href)
+                elif rel == "alternate":
+                    alternate_matches.append(href)
+    matches = enclosure_matches or alternate_matches
+    if len(matches) != 1:
+        raise AcquisitionValidationError(
+            "Atom feed does not resolve one unambiguous dataset link",
+            code="atom_link_unavailable",
+        )
+    return matches[0]
+
+
+def _parse_atom_entry_links(document: bytes) -> tuple[str, ...]:
+    _root, elements = _parse_atom_document(document)
+    links: list[str] = []
+    for entry in (item for item in elements if _xml_local(item.tag) == "entry"):
+        for link in entry:
+            if (
+                _xml_local(link.tag) != "link"
+                or (link.get("rel") or "alternate").casefold() != "enclosure"
+            ):
+                continue
+            href = link.get("href")
+            if (
+                not isinstance(href, str)
+                or not href
+                or len(href) > 8192
+                or any(ord(character) < 32 for character in href)
+            ):
+                raise AcquisitionValidationError(
+                    "Atom feed contains an invalid enclosure URL"
+                )
+            links.append(href)
+    if len(links) != len(set(links)):
+        raise AcquisitionValidationError(
+            "Atom feed repeats an enclosure URL",
+            code="atom_link_duplicate",
+        )
+    return tuple(links)
+
+
+def _parse_atom_document(
+    document: bytes,
+) -> tuple[ElementTree.Element, list[ElementTree.Element]]:
+    lowered = document.lower()
+    if (
+        not document
+        or len(document) > MAX_PROBE_BYTES
+        or b"<!doctype" in lowered
+        or b"<!entity" in lowered
+        or b"\x00" in document
+    ):
+        raise AcquisitionValidationError("Atom feed is unsafe or oversized")
+    try:
+        root = ElementTree.fromstring(document)
+    except ElementTree.ParseError as exc:
+        raise AcquisitionValidationError("Atom feed XML is malformed") from exc
+    if _xml_local(root.tag) != "feed":
+        raise AcquisitionValidationError("response is not an Atom feed")
+    elements = list(root.iter())
+    if len(elements) > 100_000:
+        raise AcquisitionLimitError(
+            "Atom feed has too many elements",
+            code="xml_complexity_limit",
+        )
+    return root, elements
+
+
+def _resolve_atom_link(
+    reviewed_origin: str,
+    feed_url: str,
+    href: str,
+) -> str:
+    joined = urljoin(feed_url, href)
+    if (
+        not joined
+        or len(joined) > 8192
+        or "\\" in joined
+        or any(ord(character) < 32 or ord(character) == 127 for character in joined)
+    ):
+        raise AcquisitionValidationError(
+            "Atom feed contains an unsafe enclosure URL"
+        )
+    parts = urlsplit(joined)
+    joined = urlunsplit(
+        (
+            parts.scheme,
+            parts.netloc,
+            quote(parts.path, safe="/%:@!$&'()*+,;=-._~"),
+            quote(parts.query, safe="%=&?/:@!$'()*+,;-._~"),
+            parts.fragment,
+        )
+    )
+    parts = urlsplit(joined)
+    reviewed = urlsplit(normalize_https_url(reviewed_origin))
+    if (
+        parts.scheme.casefold() == "http"
+        and parts.hostname is not None
+        and reviewed.hostname is not None
+        and parts.hostname.rstrip(".").casefold()
+        == reviewed.hostname.rstrip(".").casefold()
+        and parts.port in {None, 80}
+        and parts.username is None
+        and parts.password is None
+    ):
+        joined = urlunsplit(
+            (
+                "https",
+                reviewed.hostname,
+                parts.path,
+                parts.query,
+                "",
+            )
+        )
+    return _require_same_origin(reviewed_origin, joined)
+
+
+def _optional_same_origin_atom_link(
+    reviewed_origin: str,
+    feed_url: str,
+    href: str,
+) -> str | None:
+    try:
+        return _resolve_atom_link(reviewed_origin, feed_url, href)
+    except ValueError:
+        return None
+
+
+def _xml_local(tag: str) -> str:
+    return tag.rsplit("}", 1)[-1]
+
+
+def _ogc_items_url(
+    candidate: SourceCandidate,
+    collection: str,
+    page_size: int,
+    scope: _OGCQueryScope,
+) -> str:
+    configured = _config_optional_text(candidate.config, "items_url", max_chars=8192)
+    if configured is not None:
+        base = configured.replace("{collection}", quote(collection, safe="-._~"))
+        if _ANY_TEMPLATE_TOKEN_RE.search(base):
+            raise AcquisitionConfigurationError("items_url contains an unknown placeholder")
+    else:
+        normalized = normalize_https_url(candidate.endpoint_url)
+        path = urlsplit(normalized).path.rstrip("/")
+        if path.casefold().endswith("/collections"):
+            base = _append_path(_append_path(normalized, collection), "items")
+        else:
+            base = _append_path(
+                _append_path(_append_path(normalized, "collections"), collection),
+                "items",
+            )
+    params = {
+        "limit": str(page_size),
+        "offset": "0",
+        "f": "json",
+    }
+    if scope.bbox_text is not None:
+        params["bbox"] = scope.bbox_text
+    return _merge_query(base, params)
+
+
+def _ogc_query_scope(config: Mapping[str, Any]) -> _OGCQueryScope:
+    raw_bbox = config.get("bbox")
+    raw_crs = config.get("bbox_crs")
+    require_number_matched = config.get("require_number_matched", False)
+    if not isinstance(require_number_matched, bool):
+        raise AcquisitionConfigurationError(
+            "OGC API require_number_matched must be boolean"
+        )
+    if raw_bbox is None:
+        if raw_crs is not None:
+            raise AcquisitionConfigurationError(
+                "OGC API bbox_crs requires a bbox"
+            )
+        return _OGCQueryScope(
+            bbox=None,
+            bbox_text=None,
+            bbox_crs=None,
+            require_number_matched=require_number_matched,
+        )
+    if (
+        not isinstance(raw_bbox, list)
+        or len(raw_bbox) != 4
+        or any(
+            isinstance(item, bool)
+            or not isinstance(item, (int, float))
+            or not math.isfinite(float(item))
+            for item in raw_bbox
+        )
+    ):
+        raise AcquisitionConfigurationError("OGC API bbox is invalid")
+    bbox = tuple(float(item) for item in raw_bbox)
+    west, south, east, north = bbox
+    if (
+        not -180 <= west < east <= 180
+        or not -90 <= south < north <= 90
+    ):
+        raise AcquisitionConfigurationError("OGC API bbox is invalid")
+    if raw_crs != "http://www.opengis.net/def/crs/OGC/1.3/CRS84":
+        raise AcquisitionConfigurationError(
+            "OGC API bbox_crs must be the core CRS84 profile"
+        )
+    return _OGCQueryScope(
+        bbox=bbox,
+        bbox_text=",".join(format(item, ".15g") for item in bbox),
+        bbox_crs=raw_crs,
+        require_number_matched=require_number_matched,
+    )
+
+
+def _require_ogc_page_scope(
+    url: str,
+    *,
+    expected_items_path: str,
+    scope: _OGCQueryScope,
+) -> None:
+    parts = urlsplit(url)
+    if parts.path != expected_items_path:
+        raise AcquisitionValidationError(
+            "OGC API pagination changed the reviewed collection",
+            code="pagination_scope_changed",
+        )
+    if scope.bbox is None:
+        return
+    pairs = parse_qsl(
+        parts.query,
+        keep_blank_values=True,
+        strict_parsing=False,
+    )
+    bbox_values = [
+        value for name, value in pairs if name.casefold() == "bbox"
+    ]
+    if len(bbox_values) != 1:
+        raise AcquisitionValidationError(
+            "OGC API pagination dropped or repeated the reviewed bbox",
+            code="pagination_scope_changed",
+        )
+    try:
+        observed = tuple(
+            float(item) for item in bbox_values[0].split(",")
+        )
+    except ValueError as error:
+        raise AcquisitionValidationError(
+            "OGC API pagination changed the reviewed bbox",
+            code="pagination_scope_changed",
+        ) from error
+    if (
+        len(observed) != 4
+        or any(not math.isfinite(item) for item in observed)
+        or observed != scope.bbox
+    ):
+        raise AcquisitionValidationError(
+            "OGC API pagination changed the reviewed bbox",
+            code="pagination_scope_changed",
+        )
+    crs_values = [
+        value
+        for name, value in pairs
+        if name.casefold() == "bbox-crs"
+    ]
+    if len(crs_values) > 1 or (
+        crs_values and crs_values[0] != scope.bbox_crs
+    ):
+        raise AcquisitionValidationError(
+            "OGC API pagination changed the reviewed bbox CRS",
+            code="pagination_scope_changed",
+        )
+
+
+def _ogc_scope_metadata(scope: _OGCQueryScope) -> dict[str, Any]:
+    if scope.bbox is None:
+        return {}
+    return {
+        "bbox": list(scope.bbox),
+        "bbox_crs": scope.bbox_crs,
+    }
+
+
+def _tile_common(candidate: SourceCandidate) -> dict[str, Any]:
+    bounds = candidate.config.get("bounds")
+    if not isinstance(bounds, dict) or set(bounds) != {"west", "south", "east", "north"}:
+        raise AcquisitionConfigurationError("tile source bounds are missing or malformed")
+    normalized_bounds: dict[str, float] = {}
+    for name in ("west", "south", "east", "north"):
+        value = bounds[name]
+        if (
+            isinstance(value, bool)
+            or not isinstance(value, (int, float))
+            or not math.isfinite(value)
+        ):
+            raise AcquisitionConfigurationError("tile source bounds are not finite")
+        normalized_bounds[name] = float(value)
+    if (
+        not -180 <= normalized_bounds["west"] < normalized_bounds["east"] <= 180
+        or not -90 <= normalized_bounds["south"] < normalized_bounds["north"] <= 90
+    ):
+        raise AcquisitionConfigurationError("tile source bounds are outside WGS84")
+    min_zoom = candidate.config.get("min_zoom")
+    max_zoom = candidate.config.get("max_zoom")
+    if (
+        isinstance(min_zoom, bool)
+        or not isinstance(min_zoom, int)
+        or isinstance(max_zoom, bool)
+        or not isinstance(max_zoom, int)
+        or not 0 <= min_zoom <= max_zoom <= 30
+    ):
+        raise AcquisitionConfigurationError("tile source zoom range is invalid")
+    coverage_required = candidate.config.get("coverage_required", True)
+    if not isinstance(coverage_required, bool):
+        raise AcquisitionConfigurationError("coverage_required must be boolean")
+    max_tile_count = candidate.config.get("max_tile_count", _DEFAULT_MAX_TILE_COUNT)
+    if (
+        isinstance(max_tile_count, bool)
+        or not isinstance(max_tile_count, int)
+        or not 1 <= max_tile_count <= _ABSOLUTE_MAX_TILE_COUNT
+    ):
+        raise AcquisitionConfigurationError("max_tile_count is outside its safe range")
+    estimated_tile_count = _estimate_web_mercator_tile_count(
+        normalized_bounds,
+        min_zoom,
+        max_zoom,
+    )
+    if estimated_tile_count > max_tile_count:
+        raise AcquisitionLimitError(
+            "tile coverage exceeds the reviewed seed limit",
+            code="tile_count_limit",
+        )
+    return {
+        "bounds": normalized_bounds,
+        "min_zoom": min_zoom,
+        "max_zoom": max_zoom,
+        "format": _config_text(
+            candidate.config,
+            "format",
+            default="image/png",
+            max_chars=200,
+        ),
+        "coverage_required": coverage_required,
+        "estimated_tile_count": estimated_tile_count,
+        "max_tile_count": max_tile_count,
+    }
+
+
+def _estimate_web_mercator_tile_count(
+    bounds: dict[str, float],
+    min_zoom: int,
+    max_zoom: int,
+) -> int:
+    total = 0
+    for zoom in range(min_zoom, max_zoom + 1):
+        west, east, north, south = _web_mercator_tile_window(bounds, zoom)
+        total += (east - west + 1) * (south - north + 1)
+        if total > _ABSOLUTE_MAX_TILE_COUNT:
+            return total
+    return total
+
+
+def _web_mercator_tile_window(
+    bounds: Mapping[str, float],
+    zoom: int,
+) -> tuple[int, int, int, int]:
+    def tile_y(latitude: float, scale: int) -> float:
+        clamped = max(-85.0511287798066, min(85.0511287798066, latitude))
+        radians = math.radians(clamped)
+        return (1 - math.asinh(math.tan(radians)) / math.pi) / 2 * scale
+
+    scale = 2**zoom
+    west = max(
+        0,
+        min(scale - 1, math.floor((bounds["west"] + 180) / 360 * scale)),
+    )
+    east = max(
+        0,
+        min(
+            scale - 1,
+            math.floor((bounds["east"] + 180) / 360 * scale - 1e-12),
+        ),
+    )
+    north = max(
+        0,
+        min(scale - 1, math.floor(tile_y(bounds["north"], scale))),
+    )
+    south = max(
+        0,
+        min(scale - 1, math.floor(tile_y(bounds["south"], scale) - 1e-12)),
+    )
+    return west, east, north, south
+
+
+def _xyz_tile_descriptor(candidate: SourceCandidate) -> dict[str, Any]:
+    template = candidate.endpoint_url
+    tokens = _ANY_TEMPLATE_TOKEN_RE.findall(template)
+    if (
+        not tokens
+        or any(_XYZ_TOKEN_RE.fullmatch(token) is None for token in tokens)
+        or not any(token.casefold() == "{z}" for token in tokens)
+        or not any(token.casefold() == "{x}" for token in tokens)
+        or not any(token.casefold() in {"{y}", "{-y}"} for token in tokens)
+    ):
+        raise AcquisitionConfigurationError("XYZ template placeholders are invalid")
+    if len({token.casefold() for token in tokens}) != len(tokens):
+        raise AcquisitionConfigurationError("XYZ template repeats a placeholder")
+    _require_same_origin(candidate.endpoint_url, _ANY_TEMPLATE_TOKEN_RE.sub("0", template))
+    return {
+        **_tile_common(candidate),
+        "url_template": template,
+        "scheme": "tms" if any(token.casefold() == "{-y}" for token in tokens) else "xyz",
+        "layer": candidate.remote_name,
+    }
+
+
+def _wmts_tile_descriptor(
+    candidate: SourceCandidate,
+    probe: SourceProbe,
+) -> dict[str, Any]:
+    metadata = probe.metadata
+    matrix_sets = metadata.get("tile_matrix_sets")
+    if (
+        not isinstance(matrix_sets, list)
+        or not matrix_sets
+        or any(not isinstance(value, str) or not value for value in matrix_sets)
+    ):
+        raise AcquisitionValidationError(
+            "WMTS layer advertises no usable tile matrix set",
+            code="wmts_matrix_set_unavailable",
+        )
+    configured_matrix = _config_optional_text(candidate.config, "tile_matrix_set", max_chars=500)
+    if configured_matrix is not None and configured_matrix not in matrix_sets:
+        raise AcquisitionValidationError(
+            "configured WMTS matrix set is not advertised",
+            code="wmts_matrix_set_unavailable",
+        )
+    common = _tile_common(candidate)
+    definitions = metadata.get("tile_matrix_set_definitions")
+    if not isinstance(definitions, list):
+        raise AcquisitionValidationError(
+            "WMTS matrix-set definitions are malformed",
+            code="wmts_not_materializable",
+        )
+    selected_definition = _select_web_mercator_matrix_set(
+        definitions,
+        configured_identifier=configured_matrix,
+        min_zoom=common["min_zoom"],
+        max_zoom=common["max_zoom"],
+    )
+    selected_identifier = cast(str, selected_definition["identifier"])
+    selected_limits = _validated_wmts_limits(
+        metadata.get("tile_matrix_set_limits", {}).get(selected_identifier, [])
+        if isinstance(metadata.get("tile_matrix_set_limits", {}), dict)
+        else [],
+        selected_definition,
+    )
+    exact_tile_count = _estimate_wmts_tile_count(
+        common["bounds"],
+        min_zoom=common["min_zoom"],
+        max_zoom=common["max_zoom"],
+        matrix_set=selected_definition,
+        limits=selected_limits,
+    )
+    if exact_tile_count <= 0:
+        raise AcquisitionValidationError(
+            "WMTS limits do not intersect the requested coverage",
+            code="wmts_not_materializable",
+        )
+    if exact_tile_count > common["max_tile_count"]:
+        raise AcquisitionLimitError(
+            "tile coverage exceeds the reviewed seed limit",
+            code="tile_count_limit",
+        )
+    common["estimated_tile_count"] = exact_tile_count
+    styles = metadata.get("styles", [])
+    style_names = [item.get("name") for item in styles if isinstance(item, dict)]
+    configured_style = _config_optional_text(
+        candidate.config,
+        "style_name",
+        max_chars=500,
+        allow_empty=True,
+    )
+    if configured_style is not None and configured_style not in {"", *style_names}:
+        raise AcquisitionValidationError(
+            "configured WMTS style is not advertised",
+            code="wmts_style_unavailable",
+        )
+    style = configured_style or next(
+        (
+            cast(str, item["name"])
+            for item in styles
+            if isinstance(item, dict) and item.get("default") is True
+        ),
+        style_names[0] if len(style_names) == 1 else "",
+    )
+    formats = metadata.get("formats", [])
+    if formats and common["format"] not in formats:
+        raise AcquisitionValidationError(
+            "configured WMTS image format is not advertised",
+            code="wmts_format_unavailable",
+        )
+    resources: list[dict[str, Any]] = []
+    for item in metadata.get("resource_urls", []):
+        if not isinstance(item, dict) or item.get("resource_type", "").casefold() != "tile":
+            continue
+        template = item.get("template")
+        if not isinstance(template, str):
+            raise AcquisitionValidationError("WMTS resource template is malformed")
+        template = urljoin(candidate.endpoint_url, template)
+        tokens = _ANY_TEMPLATE_TOKEN_RE.findall(template)
+        allowed_tokens = {
+            "{tilematrixset}",
+            "{tilematrix}",
+            "{tilerow}",
+            "{tilecol}",
+            "{style}",
+            "{layer}",
+        }
+        if (
+            any(token.casefold() not in allowed_tokens for token in tokens)
+            or not {"{tilematrix}", "{tilerow}", "{tilecol}"}.issubset(
+                {token.casefold() for token in tokens}
+            )
+            or "{" in _ANY_TEMPLATE_TOKEN_RE.sub("", template)
+            or "}" in _ANY_TEMPLATE_TOKEN_RE.sub("", template)
+        ):
+            raise AcquisitionValidationError(
+                "WMTS resource template placeholders are malformed"
+            )
+        rendered = _ANY_TEMPLATE_TOKEN_RE.sub("0", template)
+        _require_same_origin(candidate.endpoint_url, rendered)
+        resource_format = item.get("format")
+        if resource_format is None or resource_format == common["format"]:
+            resources.append(
+                {
+                    **item,
+                    "resource_type": "tile",
+                    "template": template,
+                }
+            )
+    return {
+        **common,
+        "layer": probe.canonical_name,
+        "style": style,
+        "tile_matrix_sets": matrix_sets,
+        "selected_tile_matrix_set": selected_identifier,
+        "tile_matrix_set": selected_definition,
+        "tile_matrix_limits": selected_limits,
+        "resource_urls": resources,
+        "kvp": {
+            "endpoint_url": candidate.endpoint_url,
+            "service": "WMTS",
+            "request": "GetTile",
+            "version": probe.service_version or "1.0.0",
+            "layer": probe.canonical_name,
+            "style": style,
+            "format": common["format"],
+            "tile_matrix_set": selected_identifier,
+            "tile_matrix_placeholder": "{TileMatrix}",
+            "tile_row_placeholder": "{TileRow}",
+            "tile_col_placeholder": "{TileCol}",
+        },
+    }
+
+
+def _wms_tile_descriptor(
+    candidate: SourceCandidate,
+    probe: SourceProbe,
+) -> dict[str, Any]:
+    common = _tile_common(candidate)
+    version = probe.service_version or "1.3.0"
+    advertised_crs = probe.metadata.get("crs")
+    if (
+        not isinstance(advertised_crs, list)
+        or not any(
+            isinstance(value, str) and _is_web_mercator_crs(value)
+            for value in advertised_crs
+        )
+    ):
+        raise AcquisitionValidationError(
+            "WMS layer does not advertise WebMercator rendering",
+            code="wms_not_materializable",
+        )
+    advertised_formats = probe.metadata.get("formats")
+    if (
+        not isinstance(advertised_formats, list)
+        or common["format"] not in advertised_formats
+    ):
+        raise AcquisitionValidationError(
+            "WMS layer does not advertise the configured image format",
+            code="wms_not_materializable",
+        )
+    style = (
+        _config_optional_text(
+            candidate.config,
+            "style_name",
+            max_chars=500,
+            allow_empty=True,
+        )
+        or ""
+    )
+    advertised_styles = probe.metadata.get("styles", [])
+    if style and (
+        not isinstance(advertised_styles, list)
+        or style not in advertised_styles
+    ):
+        raise AcquisitionValidationError(
+            "WMS layer does not advertise the configured style",
+            code="wms_not_materializable",
+        )
+    crs_parameter = "CRS" if version.startswith("1.3") else "SRS"
+    descriptor = {
+        **common,
+        "layer": probe.canonical_name,
+        "style": style,
+        "crs": "EPSG:3857",
+        "kvp": {
+            "endpoint_url": candidate.endpoint_url,
+            "service": "WMS",
+            "request": "GetMap",
+            "version": version,
+            "layers": probe.canonical_name,
+            "styles": style,
+            "format": common["format"],
+            "transparent": (
+                "FALSE"
+                if common["format"] in {"image/jpeg", "image/jpg"}
+                else "TRUE"
+            ),
+            crs_parameter: "EPSG:3857",
+            "bbox_placeholder": "{bbox}",
+            "width_placeholder": "{width}",
+            "height_placeholder": "{height}",
+        },
+    }
+    supertile_size = candidate.config.get("wms_supertile_size")
+    if supertile_size is not None:
+        if (
+            isinstance(supertile_size, bool)
+            or not isinstance(supertile_size, int)
+            or supertile_size not in {1, 2, 4, 8}
+        ):
+            raise AcquisitionConfigurationError(
+                "WMS supertile size is outside its safe reviewed range"
+            )
+        coverage_profile = candidate.config.get("coverage_profile")
+        if coverage_profile not in SIUR_WMS_SUPERTILE_COVERAGE_PROFILES:
+            raise AcquisitionConfigurationError(
+                "WMS supertiles require a reviewed SIUR coverage profile"
+            )
+        descriptor["coverage_profile"] = coverage_profile
+        descriptor["wms_supertile_size"] = supertile_size
+    return descriptor
+
+
+def _select_web_mercator_matrix_set(
+    definitions: list[Any],
+    *,
+    configured_identifier: str | None,
+    min_zoom: int,
+    max_zoom: int,
+) -> dict[str, Any]:
+    compatible: list[dict[str, Any]] = []
+    for raw in definitions:
+        if not isinstance(raw, dict):
+            raise AcquisitionValidationError(
+                "WMTS matrix-set definition is malformed",
+                code="wmts_not_materializable",
+            )
+        normalized = _web_mercator_matrix_set(raw)
+        if normalized is not None:
+            compatible.append(normalized)
+    if configured_identifier is not None:
+        compatible = [
+            item for item in compatible if item["identifier"] == configured_identifier
+        ]
+    required_zooms = set(range(min_zoom, max_zoom + 1))
+    compatible = [
+        item
+        for item in compatible
+        if required_zooms.issubset(
+            {matrix["zoom"] for matrix in item["tile_matrices"]}
+        )
+    ]
+    if not compatible:
+        raise AcquisitionValidationError(
+            "WMTS has no WebMercator tile-matrix set covering the requested zooms",
+            code="wmts_not_materializable",
+        )
+
+    def rank(item: dict[str, Any]) -> tuple[int, int, int, str]:
+        identifier = cast(str, item["identifier"])
+        well_known = str(item.get("well_known_scale_set", "")).casefold()
+        known_name = identifier.casefold() in {
+            "googlemapscompatible",
+            "webmercatorquad",
+            "epsg:3857",
+        }
+        return (
+            0 if well_known.rstrip("/").endswith("googlemapscompatible") else 1,
+            0 if known_name else 1,
+            -len(item["tile_matrices"]),
+            identifier,
+        )
+
+    return min(compatible, key=rank)
+
+
+def _web_mercator_matrix_set(raw: dict[str, Any]) -> dict[str, Any] | None:
+    identifier = raw.get("identifier")
+    crs = raw.get("supported_crs")
+    matrices = raw.get("tile_matrices")
+    if (
+        not isinstance(identifier, str)
+        or not identifier
+        or not isinstance(crs, str)
+        or not _is_web_mercator_crs(crs)
+        or not isinstance(matrices, list)
+        or not matrices
+    ):
+        return None
+    normalized_matrices: list[dict[str, Any]] = []
+    seen_zooms: set[int] = set()
+    for matrix in matrices:
+        if not isinstance(matrix, dict):
+            return None
+        width = matrix.get("matrix_width")
+        height = matrix.get("matrix_height")
+        tile_width = matrix.get("tile_width")
+        tile_height = matrix.get("tile_height")
+        scale = matrix.get("scale_denominator")
+        top_left = matrix.get("top_left_corner")
+        matrix_identifier = matrix.get("identifier")
+        if (
+            isinstance(width, bool)
+            or not isinstance(width, int)
+            or width <= 0
+            or width & (width - 1)
+            or height != width
+            or tile_width != 256
+            or tile_height != 256
+            or isinstance(scale, bool)
+            or not isinstance(scale, (int, float))
+            or not math.isfinite(scale)
+            or not isinstance(top_left, list)
+            or len(top_left) != 2
+            or any(
+                isinstance(value, bool)
+                or not isinstance(value, (int, float))
+                or not math.isfinite(value)
+                for value in top_left
+            )
+            or not isinstance(matrix_identifier, str)
+            or not matrix_identifier
+        ):
+            return None
+        zoom = width.bit_length() - 1
+        expected_scale = 559_082_264.0287178 / (2**zoom)
+        if (
+            abs(float(top_left[0]) + 20_037_508.342789244) > 1.0
+            or abs(float(top_left[1]) - 20_037_508.342789244) > 1.0
+            or abs(float(scale) - expected_scale) / expected_scale > 0.0001
+            or zoom in seen_zooms
+        ):
+            return None
+        seen_zooms.add(zoom)
+        normalized_matrices.append({**matrix, "zoom": zoom})
+    normalized_matrices.sort(key=lambda item: item["zoom"])
+    return {**raw, "tile_matrices": normalized_matrices}
+
+
+def _is_web_mercator_crs(value: str) -> bool:
+    normalized = value.strip().casefold().rstrip("/")
+    return bool(
+        re.search(r"(?:[:/]|::)(?:3857|900913)$", normalized)
+        or normalized in {"epsg:3857", "epsg:900913"}
+    )
+
+
+def _validated_wmts_limits(
+    raw_limits: Any,
+    definition: dict[str, Any],
+) -> list[dict[str, Any]]:
+    if not isinstance(raw_limits, list):
+        raise AcquisitionValidationError(
+            "WMTS tile-matrix limits are malformed",
+            code="wmts_not_materializable",
+        )
+    matrices = {
+        item["identifier"]: item
+        for item in definition["tile_matrices"]
+        if isinstance(item, dict) and isinstance(item.get("identifier"), str)
+    }
+    result: list[dict[str, Any]] = []
+    for item in raw_limits:
+        if not isinstance(item, dict) or item.get("tile_matrix") not in matrices:
+            raise AcquisitionValidationError(
+                "WMTS limits reference an unknown tile matrix",
+                code="wmts_not_materializable",
+            )
+        matrix = matrices[item["tile_matrix"]]
+        values = (
+            item.get("min_tile_row"),
+            item.get("max_tile_row"),
+            item.get("min_tile_col"),
+            item.get("max_tile_col"),
+        )
+        if any(isinstance(value, bool) or not isinstance(value, int) for value in values):
+            raise AcquisitionValidationError(
+                "WMTS tile-matrix limits are malformed",
+                code="wmts_not_materializable",
+            )
+        if (
+            values[0] < 0
+            or values[0] > values[1]
+            or values[1] >= matrix["matrix_height"]
+            or values[2] < 0
+            or values[2] > values[3]
+            or values[3] >= matrix["matrix_width"]
+        ):
+            raise AcquisitionValidationError(
+                "WMTS tile-matrix limits exceed their matrix",
+                code="wmts_not_materializable",
+            )
+        result.append(dict(item))
+    return result
+
+
+def _estimate_wmts_tile_count(
+    bounds: Mapping[str, float],
+    *,
+    min_zoom: int,
+    max_zoom: int,
+    matrix_set: Mapping[str, Any],
+    limits: list[dict[str, Any]],
+) -> int:
+    matrices = {
+        item["zoom"]: item
+        for item in matrix_set["tile_matrices"]
+        if isinstance(item, dict)
+        and isinstance(item.get("zoom"), int)
+        and isinstance(item.get("identifier"), str)
+    }
+    limits_by_identifier = {item["tile_matrix"]: item for item in limits}
+    total = 0
+    for zoom in range(min_zoom, max_zoom + 1):
+        matrix = matrices.get(zoom)
+        if matrix is None:
+            raise AcquisitionValidationError(
+                "WMTS matrix coverage has a zoom gap",
+                code="wmts_not_materializable",
+            )
+        min_x, max_x, min_y, max_y = _web_mercator_tile_window(bounds, zoom)
+        limit = limits_by_identifier.get(matrix["identifier"])
+        if limit is not None:
+            min_x = max(min_x, limit["min_tile_col"])
+            max_x = min(max_x, limit["max_tile_col"])
+            min_y = max(min_y, limit["min_tile_row"])
+            max_y = min(max_y, limit["max_tile_row"])
+        if min_x <= max_x and min_y <= max_y:
+            total += (max_x - min_x + 1) * (max_y - min_y + 1)
+        if total > _ABSOLUTE_MAX_TILE_COUNT:
+            return total
+    return total
+
+
+def _probe_manifest(probe: SourceProbe | None) -> dict[str, Any] | None:
+    if probe is None:
+        return None
+    return {
+        "protocol": probe.protocol,
+        "requested_name": probe.requested_name,
+        "canonical_name": probe.canonical_name,
+        "service_version": probe.service_version,
+        "fingerprint_sha256": probe.fingerprint_sha256,
+        "fingerprint_quality": probe.fingerprint_quality,
+        "metadata": probe.metadata,
+    }
+
+
+def _artifact_manifest(index: int, artifact: AcquiredArtifact) -> dict[str, Any]:
+    return {
+        "index": index,
+        "artifact_kind": artifact.artifact_kind,
+        "role": artifact.role,
+        "media_type": artifact.media_type,
+        "sha256": artifact.blob.sha256,
+        "size_bytes": artifact.blob.size_bytes,
+        "storage_backend": artifact.blob.storage_backend,
+        "storage_key": artifact.blob.storage_key,
+        "source_url": artifact.source_url,
+        "final_url": artifact.final_url,
+        "source_version": artifact.source_version,
+        "metadata": artifact.metadata,
+    }
+
+
+def _style_digests(artifacts: list[AcquiredArtifact]) -> dict[str, str]:
+    result: dict[str, str] = {}
+    for artifact in artifacts:
+        if artifact.artifact_kind != "style" or artifact.role != "style":
+            continue
+        source_key = artifact.metadata.get("catalog_style_source_key")
+        if not isinstance(source_key, str) or source_key in result:
+            raise AcquisitionValidationError(
+                "acquired style identities are invalid",
+                code="invalid_style_artifacts",
+            )
+        result[source_key] = artifact.blob.sha256
+    return dict(sorted(result.items()))
+
+
+def _enforce_total_bytes(
+    artifacts: list[AcquiredArtifact],
+    maximum: int,
+) -> None:
+    if sum(item.blob.size_bytes for item in artifacts) > maximum:
+        raise AcquisitionLimitError(
+            "source snapshot exceeds the aggregate byte limit",
+            code="snapshot_too_large",
+        )
+
+
+def _bounded_optional_text(
+    value: str | None,
+    label: str,
+    maximum: int,
+) -> None:
+    if value is not None and (
+        not isinstance(value, str) or len(value) > maximum
+    ):
+        raise AcquisitionValidationError(
+            f"{label} exceeds its persistence limit",
+            code="metadata_too_large",
+        )
+
+
+def _bounded_json_object(
+    value: dict[str, Any],
+    label: str,
+    maximum: int,
+) -> None:
+    if not isinstance(value, dict):
+        raise AcquisitionValidationError(
+            f"{label} must be an object",
+            code="invalid_manifest",
+        )
+    try:
+        # PostgreSQL JSONB's text representation includes separators with a
+        # following space, so use the same conservative form as the database
+        # octet-length constraint rather than the compact manifest encoding.
+        encoded = json.dumps(
+            value,
+            ensure_ascii=False,
+            allow_nan=False,
+            sort_keys=True,
+        ).encode("utf-8")
+    except (TypeError, ValueError, UnicodeError) as exc:
+        raise AcquisitionValidationError(
+            f"{label} contains a non-JSON value",
+            code="invalid_manifest",
+        ) from exc
+    if len(encoded) > maximum:
+        raise AcquisitionValidationError(
+            f"{label} exceeds its persistence limit",
+            code="metadata_too_large",
+        )
+
+
+def _canonical_json(value: Any) -> bytes:
+    try:
+        return json.dumps(
+            value,
+            ensure_ascii=False,
+            allow_nan=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode("utf-8")
+    except (TypeError, ValueError, UnicodeError) as exc:
+        raise AcquisitionValidationError(
+            "acquisition manifest contains a non-JSON value",
+            code="invalid_manifest",
+        ) from exc

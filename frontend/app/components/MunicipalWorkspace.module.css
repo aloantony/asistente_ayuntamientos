@@ -1189,3 +1189,66 @@
     transition: none;
   }
 }
+
+/* --- Barra municipal configurable (ADR-034), sobre las áreas fijas de
+   ADR-048. La reconciliación de ambas está en ADR-052. --------------------- */
+
+/* Botón de gestión, delante de las pestañas como en el prototipo. */
+.tabsManage {
+  display: inline-flex;
+  flex: none;
+  width: 28px;
+  height: 28px;
+  align-items: center;
+  justify-content: center;
+  margin-right: 4px;
+  border: 0;
+  border-radius: 8px;
+  color: var(--text-faint, var(--text-muted));
+  background: transparent;
+  cursor: pointer;
+}
+
+.tabsManage:hover {
+  color: var(--text);
+  background: var(--fill);
+}
+
+/* Escudo del municipio: sustituye a las iniciales cuando se ha subido uno y
+   acepta que se le suelte una imagen encima. */
+.municipalityMark img {
+  display: block;
+  width: 100%;
+  height: 100%;
+  border-radius: inherit;
+  object-fit: contain;
+  padding: 6px;
+  background: var(--surface-raised);
+}
+
+.municipalityMarkTargeted {
+  outline: 2px dashed var(--accent);
+  outline-offset: 4px;
+}
+
+/* Bloque de temperatura, junto al selector de organización. */
+.weatherBlock {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  min-height: 44px;
+  border: 1px solid var(--border-strong);
+  border-radius: 12px;
+  padding: 0 16px;
+  color: var(--text-muted);
+  background: var(--surface-muted);
+  white-space: nowrap;
+}
+
+.weatherBlock strong {
+  color: var(--text);
+  font-family: var(--font-ibm-plex-mono), "IBM Plex Mono", monospace;
+  font-size: 0.82rem;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+}

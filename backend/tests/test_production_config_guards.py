@@ -25,6 +25,9 @@ PRODUCTION_BASE = {
     "secret_key": VALID_SECRET,
     "database_url": "postgresql+psycopg://app:s3cret@db:5432/app",
     "cors_allowed_origins": "https://ayuntamiento.example",
+    # ADR-036 rechaza el comodín en producción, así que una base que dice
+    # describir un despliegue correcto tiene que nombrar su host.
+    "allowed_hosts": "ayuntamiento.example",
     "bootstrap_admin_token": None,
 }
 
@@ -106,10 +109,26 @@ def test_plain_http_origins_are_rejected_because_the_cookie_is_secure() -> None:
     assert "https" in str(error.value)
 
 
-def test_no_cors_origins_is_legitimate() -> None:
-    # ADR-010 pone frontend y backend en el mismo host: ahí no hay petición
-    # cross-origin que permitir, y exigir una entrada sería pedir ruido.
-    assert build(cors_allowed_origins="").cors_origins == []
+def test_production_requires_an_explicit_cors_allowlist() -> None:
+    # ADR-047 daba por legítimo dejarlo vacío, porque ADR-010 pone frontend y
+    # backend en el mismo host. ADR-036 lo endurece y exige la lista explícita,
+    # y esa capa manda: el `.env.production.example` del despliegue ya la trae.
+    with pytest.raises(ValueError) as error:
+        build(cors_allowed_origins="")
+
+    assert "CORS_ALLOWED_ORIGINS" in str(error.value)
+
+    # Fuera de producción sigue siendo un valor corriente.
+    assert (
+        Settings(
+            environment="development",
+            secret_key="change-me-in-development",
+            database_url="postgresql+psycopg://app:app@postgres:5432/app",
+            cors_allowed_origins="",
+            bootstrap_admin_token="dev-bootstrap-token",
+        ).cors_origins
+        == []
+    )
 
 
 def test_every_problem_is_reported_at_once() -> None:
@@ -145,6 +164,7 @@ def routes_for_environment(environment: str) -> set[str]:
         "SECRET_KEY": "x" * MINIMUM_SECRET_KEY_LENGTH,
         "DATABASE_URL": "postgresql+psycopg://app:s3cret@127.0.0.1:5432/app",
         "CORS_ALLOWED_ORIGINS": "https://ayuntamiento.example",
+        "ALLOWED_HOSTS": "ayuntamiento.example",
         "BOOTSTRAP_ADMIN_TOKEN": "",
     }
     completed = subprocess.run(

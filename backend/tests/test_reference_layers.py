@@ -4,6 +4,7 @@ from datetime import datetime, timezone
 from decimal import Decimal
 import threading
 import time
+from types import SimpleNamespace
 
 import pytest
 from conftest import headers_for, unique_suffix
@@ -25,9 +26,17 @@ from app.reference_layers.models import (
     OrganizationReferenceLayerSetting,
     ReferenceCatalogSnapshot,
     ReferenceLayer,
+    ReferenceLayerSource,
     ReferenceLayerStyle,
     ReferenceService,
 )
+from app.reference_layers.delivery_builder import canonical_json_sha256
+from app.reference_layers.reviewed_ortho_evidence import (
+    CATALOG_ENDPOINT_URL,
+    reviewed_ign_ortho_expected_source_definition,
+    reviewed_ign_ortho_substitution,
+)
+from app.reference_layers.routes import _active_reviewed_ortho_projection
 
 
 def make_definition(
@@ -649,10 +658,10 @@ def test_catalog_requires_map_permission_and_never_exposes_upstream_urls(
     assert overlay["effective_opacity"] == 0.75
     assert overlay["delivery_available"] is False
     assert overlay["identify_available"] is False
-    assert overlay["delivery_blocker"] == "attestation_missing"
+    assert overlay["delivery_blocker"] == "remote_proxy_disabled"
     assert overlay["available_style_ids"] == []
     assert overlay["legend_available"] is False
-    assert overlay["metadata_available"] is True
+    assert overlay["metadata_available"] is False
     assert [style["title"] for style in body["styles"]] == [
         "Clasificación por color",
         "Clasificación por trama",
@@ -671,8 +680,197 @@ def test_catalog_requires_map_permission_and_never_exposes_upstream_urls(
     assert "license_status" not in serialized
     assert "cache_policy" not in serialized
     assert "reviewer" not in serialized
+    assert "review_sha256" not in serialized
+    assert "document_sha256" not in serialized
+    assert "license_terms" not in serialized
     assert "attestation_sha256" not in serialized
     assert "idecyl.jcyl.es" not in serialized
+
+
+def test_catalog_exposes_reviewed_ortho_assessment_without_source_urls(
+    client,
+    db,
+    make_user,
+    make_organization,
+    grant_permissions,
+) -> None:
+    organization = make_organization()
+    viewer = make_user()
+    grant_permissions(viewer, organization, ["map.view"])
+    service = ReferenceServiceDefinition(
+        source_key="service:ortho",
+        title="Ortofotos históricas",
+        upstream_protocol="wms",
+        base_url="https://orto.wms.itacyl.es/WMS",
+    )
+    layers = tuple(
+        ReferenceLayerDefinition(
+            source_key=f"layer:siur:{index:064x}",
+            node_type="layer",
+            title=catalog_layer,
+            service_key=service.source_key,
+            remote_name=catalog_layer,
+            role="overlay",
+            renderer="raster_tile",
+            delivery_mode="mirror",
+        )
+        for index, catalog_layer in enumerate(
+            ("Ortofoto_2023", "Ortofoto_2010", "Ortofoto_2021"),
+            start=1,
+        )
+    )
+    apply_catalog_definition(
+        db,
+        ReferenceCatalogDefinition(
+            provider_key="siur",
+            source_url="https://example.test/siur-ortho.json",
+            raw_catalog={"revision": 1},
+            services=(service,),
+            layers=layers,
+            retrieved_at=datetime(2026, 7, 27, tzinfo=timezone.utc),
+        ),
+    )
+
+    response = client.get(
+        "/reference-layers/catalog"
+        f"?provider_key=siur&organization_id={organization.id}",
+        headers=headers_for(viewer),
+    )
+
+    assert response.status_code == 200
+    by_title = {item["title"]: item for item in response.json()["layers"]}
+    assert by_title["Ortofoto_2023"]["source_substitution_status"] == (
+        "substitute_degraded"
+    )
+    assert by_title["Ortofoto_2023"][
+        "source_substitution_selected_layer"
+    ] == "PNOA2023"
+    assert "Valladolid" in by_title["Ortofoto_2023"][
+        "source_substitution_notice"
+    ]
+    assert "2023" in by_title["Ortofoto_2023"][
+        "source_substitution_profile"
+    ]
+    assert by_title["Ortofoto_2023"][
+        "source_substitution_scope"
+    ] == "candidate"
+    assert by_title["Ortofoto_2023"][
+        "source_substitution_attribution"
+    ] == "Obra derivada de PNOA 2023 CC-BY 4.0 scne.es"
+    assert by_title["Ortofoto_2023"][
+        "source_substitution_content_sha256"
+    ] is None
+    assert by_title["Ortofoto_2010"]["source_substitution_status"] == "exact"
+    assert by_title["Ortofoto_2010"][
+        "source_substitution_selected_layer"
+    ] == "PNOA2010"
+    assert by_title["Ortofoto_2021"]["source_substitution_status"] == (
+        "substitute_degraded"
+    )
+    assert by_title["Ortofoto_2021"][
+        "source_substitution_selected_layer"
+    ] == "PNOA2020"
+    assert "anualidad distinta" in by_title["Ortofoto_2021"][
+        "source_substitution_notice"
+    ]
+    assert "www.ign.es" not in response.text
+    assert "orto.wms.itacyl.es" not in response.text
+
+    stored_2023 = db.scalar(
+        select(ReferenceLayer).where(
+            ReferenceLayer.provider_key == "siur",
+            ReferenceLayer.remote_name == "Ortofoto_2023",
+        )
+    )
+    assert stored_2023 is not None
+    db.add(
+        ReferenceLayerSource(
+            provider_key="siur",
+            layer_id=stored_2023.id,
+            source_key="auto:wms_tiles:" + "f" * 32,
+            protocol="wms_tiles",
+            target_kind="tiles",
+            endpoint_url="https://www.ign.es/wms/pnoa-historico",
+            remote_name="PNOA2023",
+            source_format="image/jpeg",
+            sync_strategy="tile_seed",
+            config_json={},
+            definition_sha256="f" * 64,
+            enabled=True,
+            is_primary=True,
+            priority=5,
+        )
+    )
+    db.commit()
+
+    invalid_response = client.get(
+        "/reference-layers/catalog"
+        f"?provider_key=siur&organization_id={organization.id}",
+        headers=headers_for(viewer),
+    )
+
+    assert invalid_response.status_code == 200
+    invalid_2023 = next(
+        item
+        for item in invalid_response.json()["layers"]
+        if item["title"] == "Ortofoto_2023"
+    )
+    assert invalid_2023["source_substitution_status"] == "invalid"
+    assert "fuente primaria" in invalid_2023["source_substitution_notice"]
+    assert invalid_2023["source_substitution_selected_layer"] is None
+    assert "www.ign.es" not in invalid_response.text
+
+
+def test_active_ortho_api_projection_describes_frozen_bytes_not_candidate() -> None:
+    reviewed = reviewed_ign_ortho_substitution(
+        CATALOG_ENDPOINT_URL,
+        "Ortofoto_2023",
+    )
+    assert reviewed is not None
+    frozen = reviewed_ign_ortho_expected_source_definition(reviewed)
+    validation = {"passed": True}
+
+    projection = _active_reviewed_ortho_projection(
+        service=SimpleNamespace(base_url=CATALOG_ENDPOINT_URL),
+        layer=SimpleNamespace(
+            remote_name="Ortofoto_2023",
+            source_key="ortho-2023",
+        ),
+        version=SimpleNamespace(
+            validation_json=validation,
+            validation_sha256=canonical_json_sha256(validation),
+            content_sha256="d" * 64,
+        ),
+        run=SimpleNamespace(
+            source_definition_json=frozen,
+            source_definition_sha256=canonical_json_sha256(frozen),
+        ),
+    )
+
+    assert projection["scope"] == "active_delivery"
+    assert projection["equivalence_status"] == "invalid"
+    assert projection["selected_layer"] == "PNOA2023"
+    assert projection["delivery_content_sha256"] == "d" * 64
+
+    catalog_identity_changed = _active_reviewed_ortho_projection(
+        service=SimpleNamespace(base_url="https://changed.example.test/wms"),
+        layer=SimpleNamespace(
+            remote_name="Ortofoto_2023",
+            source_key="ortho-2023",
+        ),
+        version=SimpleNamespace(
+            validation_json=validation,
+            validation_sha256=canonical_json_sha256(validation),
+            content_sha256="d" * 64,
+        ),
+        run=SimpleNamespace(
+            source_definition_json=frozen,
+            source_definition_sha256=canonical_json_sha256(frozen),
+        ),
+    )
+    assert catalog_identity_changed["scope"] == "active_delivery"
+    assert catalog_identity_changed["equivalence_status"] == "invalid"
+    assert catalog_identity_changed["delivery_content_sha256"] == "d" * 64
 
 
 def test_catalog_excludes_historical_rows_missing_from_current_snapshot(

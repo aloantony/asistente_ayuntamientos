@@ -6,6 +6,7 @@ from fastapi import (
     File,
     HTTPException,
     Query,
+    Request,
     UploadFile,
     status,
 )
@@ -16,6 +17,7 @@ from sqlalchemy.orm import Session, selectinload
 
 from app.auth.dependencies import get_current_user
 from app.core.config import settings
+from app.core.rate_limit import require_rate_limit_slot, upload_rate_limiter
 from app.db.session import get_db
 from app.documents.models import Document
 from app.documents.schemas import DocumentRead, DocumentUpdate
@@ -30,6 +32,12 @@ from app.documents.storage import (
 from app.projects.access import get_project_with_memberships, user_can_access_project
 from app.projects.models import Project
 from app.rbac.permissions import has_permission
+from app.security.events import (
+    DOCUMENT_ARCHIVED,
+    DOCUMENT_DOWNLOADED,
+    DOCUMENT_UPLOADED,
+    record_security_event,
+)
 from app.users.models import User
 
 router = APIRouter(tags=["documents"])
@@ -75,6 +83,7 @@ def list_project_documents(
 )
 def upload_project_document(
     project_id: int,
+    request: Request,
     db: Annotated[Session, Depends(get_db)],
     current_user: Annotated[User, Depends(get_current_user)],
     file: Annotated[UploadFile, File()],
@@ -85,6 +94,11 @@ def upload_project_document(
         current_user,
         project,
         "documents.upload",
+    )
+    require_rate_limit_slot(
+        upload_rate_limiter,
+        str(current_user.id),
+        detail="Too many uploads",
     )
 
     try:
@@ -121,6 +135,20 @@ def upload_project_document(
         uploaded_by_id=current_user.id,
     )
     db.add(document)
+    # Se registra antes del commit para que traza y documento se consoliden
+    # juntos: si la subida se deshace, el evento no debe quedar.
+    db.flush()
+    record_security_event(
+        db,
+        event_type=DOCUMENT_UPLOADED,
+        request=request,
+        user_id=current_user.id,
+        actor_label=current_user.email,
+        organization_id=document.organization_id,
+        target_type="document",
+        target_id=document.id,
+        detail=f"content_type={document.content_type} bytes={document.size_bytes}",
+    )
 
     try:
         db.commit()
@@ -147,11 +175,25 @@ def get_document(
 @router.get("/documents/{document_id}/download")
 def download_document(
     document_id: int,
+    request: Request,
     db: Annotated[Session, Depends(get_db)],
     current_user: Annotated[User, Depends(get_current_user)],
 ) -> FileResponse:
     document = get_existing_document(db, document_id)
     require_document_action(db, current_user, document, "documents.view")
+    # Quién accede a qué documento municipal: es la traza que hace defendible el
+    # piloto con datos reales (ADR-036).
+    record_security_event(
+        db,
+        event_type=DOCUMENT_DOWNLOADED,
+        request=request,
+        user_id=current_user.id,
+        actor_label=current_user.email,
+        organization_id=document.organization_id,
+        target_type="document",
+        target_id=document.id,
+        commit=True,
+    )
 
     try:
         file_path = storage_service.resolve_storage_key(document.storage_key)
@@ -178,6 +220,7 @@ def download_document(
 def update_document(
     document_id: int,
     payload: DocumentUpdate,
+    request: Request,
     db: Annotated[Session, Depends(get_db)],
     current_user: Annotated[User, Depends(get_current_user)],
 ) -> Document:
@@ -187,6 +230,17 @@ def update_document(
     updates = payload.model_dump(exclude_unset=True)
     if "status" in updates and updates["status"] is not None:
         document.status = updates["status"]
+        record_security_event(
+            db,
+            event_type=DOCUMENT_ARCHIVED,
+            request=request,
+            user_id=current_user.id,
+            actor_label=current_user.email,
+            organization_id=document.organization_id,
+            target_type="document",
+            target_id=document.id,
+            detail=f"status={document.status}",
+        )
 
     db.commit()
     db.refresh(document)

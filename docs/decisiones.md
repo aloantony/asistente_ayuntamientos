@@ -278,168 +278,93 @@ La sucesora `20260717_0029` reconcilia ambos caminos. Antes de modificar nada va
 
 En una base con la huella geográfica antigua, la primera operación mutante obligatoria es `upgrade 20260717_0029` o `upgrade head`; el entorno bloquea `downgrade` y `stamp` desde los ambiguos `0026`/`0027`/`0028` hasta reconciliar. Después, el downgrade solo elimina un esquema creado por `0029`, espera como máximo cinco segundos por los locks, cuenta con RLS desactivado o falla de forma cerrada y se niega si hay datasets, snapshots o procedencia municipal. Un esquema geográfico adoptado se preserva siempre. Las variantes aún más antiguas donde adjuntos también utilizó `0026`/`0027` requieren auditoría manual de la huella antes de cualquier `stamp`; no se infieren únicamente a partir del número de revisión.
 
-## ADR-034: Barra superior municipal fija y tipografía institucional (2026-08-03)
+## ADR-034: Barra municipal configurable sobre bloques de contenido (2026-07-29)
 
-El diseño municipal de referencia introduce una barra superior propia de las
-pantallas institucionales: escudo y nombre del municipio a la izquierda,
-navegación por secciones en el centro y un bloque de contexto a la derecha. Esa
-barra no sustituye al menú lateral de ADR-014, que sigue siendo la navegación
-del producto; convive con él y solo aparece en las rutas del ayuntamiento, la
-sede electrónica y la hoja de ruta. El resto del producto se navega igual que
-antes, de modo que un usuario sin acceso a las pantallas municipales no ve
-ningún cambio estructural.
+> Reconciliada con ADR-048 en **ADR-052**: los apartados que aquí se describen conviven con las áreas fijas, añadidos detrás de ellas.
 
-La navegación municipal es fija y vive en código (`frontend/app/lib/topNav.ts`).
-El diseño incluía un editor que permitía renombrar, reordenar, añadir y eliminar
-apartados desde la interfaz, y se descarta de forma deliberada: el menú de un
-ayuntamiento describe su organización, no una preferencia de quien lo mira, y
-mantenerlo declarado en el repositorio lo hace revisable, comparable entre
-municipios y consistente con el modelo de permisos. Las entradas cuyo destino
-todavía no existe se declaran con `enabled: false` y no se renderizan; sirven de
-índice de lo que falta y se activan en la fase que construye su pantalla, sin
-reescribir el modelo ni dejar enlaces rotos en producción.
+La pantalla «Ayuntamiento» del diseño (Claude Design, `Pantalla Principal.dc.html`) deja al usuario crear, renombrar, reordenar y borrar libremente los apartados de su municipio, además de poner su escudo, su nombre y la temperatura del día. Se implementa **extendiendo** el `MunicipalWorkspace` existente, no sustituyéndolo: aquél agrega los módulos operativos ya construidos (inventario, mantenimiento, normativa, personal) y esta decisión le añade el cromo editable.
 
-Se añade **Newsreader** vía `next/font` para el nombre del municipio, único uso
-de serif institucional en la barra. El diseño empleaba además Space Grotesk y
-Space Mono en detalles puntuales; no se incorporan, porque IBM Plex Sans y Mono
-—ya cargadas y autoalojadas— cubren esos usos sin ampliar el peso tipográfico
-que el navegador debe descargar. La decisión es reversible: si una revisión
-visual las echa en falta, añadirlas es un cambio local en el layout raíz.
+El contenido se modela como **bloques genéricos** (`municipal_blocks`: padre, posición, título, cuerpo y carga libre en JSON) en lugar de tablas tipadas por dominio. Tablas tipadas serían más consultables y validables, pero obligarían a una migración por cada epígrafe nuevo y no admiten el «añade el apartado que quieras» que el diseño da por supuesto. El check de `block_type` ya admite los tipos reservados de contenido (`epigraph`, `section`, `item`) para que la fase siguiente no necesite migración; la API solo crea los dos de navegación. Los apartados creados aparecen como pestañas tras las áreas fijas, de modo que la pantalla conserva una sola navegación.
 
-Las pantallas nuevas o rediseñadas usan CSS Modules, no `styles.css`. La hoja
-global supera las 6.000 líneas y concentra el riesgo de colisión entre cambios
-simultáneos; los módulos ya son el patrón de las superficies recientes. En
-`styles.css` solo se añaden tokens compartidos: `--status-blocked` y
-`--status-overdue`, que los estados de la hoja de ruta necesitan en ambos temas
-y que no pueden expresarse con `--danger-fg` o `--accent` sin perder significado.
-## ADR-035: Dominios tenant-scoped de gobierno y personal (2026-08-03)
+El contenido cuelga de `Organization`, no de `Municipality`. `Municipality` es dato de referencia **global compartido entre inquilinos**, mientras que la ficha del Ayuntamiento la edita cada inquilino para sí: colgarla del municipio filtraría contenido editable entre organizaciones. El perfil (`municipal_profiles`) guarda nombre mostrado, escudo, interruptor y coordenadas del bloque de temperatura, uno por organización. La organización la indica siempre quien consume la API: el espacio municipal ya sabe cuál está seleccionada, y un superusuario no tiene «primera organización».
 
-La pantalla del ayuntamiento necesita dos realidades que hasta ahora no existían
-en el modelo: quién gobierna el municipio y quién trabaja en él. Se separan en
-dos dominios, `backend/app/government/` y `backend/app/staff/`, porque responden
-a preguntas distintas y se rigen por reglas distintas. La corporación —alcaldía,
-tenencias, concejalías y secretaría— es información pública que acaba en la sede
-electrónica; la plantilla es información laboral, sensible, de acceso mucho más
-restringido. Mezclarlas en una tabla de «personas del ayuntamiento» habría
-obligado a filtrar por rol en cada consulta y a razonar sobre la confidencialidad
-caso por caso.
+El escudo **no** usa el modelo `Document`: `documents.project_id` es `NOT NULL` y su control de acceso es el del proyecto, ninguna de las dos cosas encaja con una imagen de marca de la organización. Reutiliza el servicio de almacenamiento bajo el prefijo `organizations/<id>/brand/`, conservando escritura por trozos, checksum y defensa de path traversal, con lista blanca propia (solo imágenes) y tope propio (2 MiB).
 
-Ambos dominios se anclan a `organizations`, no a `municipalities`. La
-organización es la unidad de aislamiento del producto y la que ya sostiene el
-modelo de permisos; el municipio describe el territorio. Un cargo o un puesto se
-pueden registrar antes de que el municipio esté dado de alta, así que —a
-diferencia del inventario, que sí exige municipio para poder situar un activo en
-el mapa— aquí las escrituras sólo requieren que la organización esté activa. Las
-lecturas se admiten también con la organización pausada, en modo consulta, igual
-que en el resto de superficies municipales. Las claves ajenas compuestas
-`(id, organization_id)` impiden que un puesto cuelgue de la plantilla de otro
-ayuntamiento o que una ausencia se enganche a una persona ajena: el aislamiento
-se sostiene en la base, no sólo en el filtro de la consulta.
+El bloque de temperatura usa **Open-Meteo** consultado **desde el backend** (`app/town_hall/weather.py`), nunca desde el navegador: así el ayuntamiento no expone a sus usuarios a un tercero. Es un punto de egreso externo nuevo, el primero que no es de IA, y por eso queda fuera del gateway (ADR-013), de `speech.py` (ADR-021) y de `web_search.py` (ADR-022), pero se somete a su misma disciplina: por él solo salen el topónimo público —una sola vez, para geocodificarlo, sin el sufijo de provincia, que el buscador no entiende— y sus coordenadas, jamás datos de usuarios, documentos ni conversaciones, y los logs registran solo metadatos. Open-Meteo se elige sobre AEMET por no requerir clave de API ni alta; el dato es orientativo, no oficial. Las coordenadas resueltas se guardan y se invalidan al cambiar la localidad. La temperatura se cachea en memoria 30 minutos, con la misma condición que el limitador de login: mover a Redis antes de ir a multi-worker (ADR-010). Se pide en un endpoint aparte de la pantalla, de modo que una caída del proveedor no impida cargarla: el bloque muestra entonces un guion, nunca una cifra inventada.
 
-La plantilla se modela como puesto y persona separados, porque el puesto
-sobrevive a quien lo ocupa: en un municipio pequeño el arquitecto puede estar a
-tiempo parcial, vacante o compartido con otro ayuntamiento, y el histórico debe
-seguir siendo legible cuando cambia el titular. `staff_posts` admite además
-contenedores que agrupan puestos sin poder ocuparse, para reproducir la
-estructura por servicios del diseño. Un puesto lo ocupa como mucho una persona a
-la vez, garantizado por índice único; los ciclos del árbol se cierran en la ruta,
-porque la base sólo puede impedir que un puesto sea su propio padre.
+## ADR-035: Publicación en dominio público con proxy inverso único (2026-07-30)
 
-Los permisos siguen la gradación del inventario, adaptada a lo que cada dominio
-puede sufrir. Gobierno usa `government.view` y `government.manage`: la
-corporación cambia en bloque tras unas elecciones, no campo a campo, y no
-justifica un nivel intermedio. Personal usa `staff.view`, `staff.edit` y
-`staff.manage`: corregir un teléfono, anotar una ausencia o abrir un parte de
-trabajo es rutina diaria y vive en `edit`, mientras que tocar la estructura de
-puestos o archivar a una persona —que la retira de las vistas— exige `manage`.
-Los cargos y las fichas no se borran: se archivan, para que actas, acuerdos y
-partes antiguos sigan siendo interpretables.
+El proyecto pasa de correr solo en `localhost` a servirse en un dominio público con datos municipales reales. `docs/arquitectura.md` admitía «contenedores sin hardening de producción (root, un worker, sin TLS); aceptable mientras todo siga en localhost»: esa condición desaparece el día que el DNS apunta al servidor, y con ella la excusa.
 
-Toda modificación de una ficha de personal deja un evento en
-`staff_history_events`, append-only. Son datos laborales y su edición tiene que
-poder auditarse: un cambio de estado, de puesto o de campos queda registrado con
-su autor y su momento, en lugar de sobrescribirse en silencio. El diario y los
-partes (`staff_reports`) y las facturas del personal externo (`staff_invoices`)
-cuelgan de la persona y heredan su organización; facturar sólo se admite en
-quien está marcado como externo, porque en alguien de nómina sería casi siempre
-un error de captura.
+La topología no es una preferencia estética, la fuerzan dos hechos. Primero, la cookie de sesión es `httpOnly`, `SameSite=Lax` y **sin `Domain`** (ADR-010): frontend y API tienen que compartir host, así que queda descartado el par `app.dominio` + `api.dominio`, que además exigiría CORS con credenciales entre orígenes. Segundo, la API **no puede vivir en la raíz**: el backend sirve `/admin/users`, `/admin/groups`, `/admin/roles` y `/admin/permissions`, y el frontend sirve las páginas `/admin`, `/admin/usuarios`, `/admin/grupos` y `/admin/roles`. `/admin/roles` colisiona literalmente. Por eso se elige **un solo hostname con el frontend en `/` y la API bajo `/api`**.
 
-La revisión Alembic `20260803_0034` se serializa detrás de `20260717_0033`
-conforme a ADR-033, y `test_migrations.py` fija la huella estructural de las
-siete tablas nuevas en las dos direcciones del grafo.
-## ADR-036: La hoja de ruta y el estado "vencida" como lectura, no como dato (2026-08-04)
+El prefijo se monta como lo documenta FastAPI: el proxy lo **elimina** (`handle_path /api/*`) y el backend arranca con `--root-path /api` para que sus redirecciones y su esquema no lo pierdan. Encaja con `frontend/app/lib/api.ts` sin tocar código: `NEXT_PUBLIC_API_BASE_URL=https://<dominio>/api` no es loopback, así que `normalizeApiBaseUrl` lo usa literalmente y las peticiones salen del mismo origen. Como efecto secundario CORS queda casi vestigial; se conserva restringido al origen real como red de seguridad, no como mecanismo principal.
 
-La hoja de ruta municipal necesita un dominio propio, `backend/app/tasks/`, con
-`municipal_tasks` y su rastro append-only `municipal_task_events`. No se apoya en
-`maintenance_orders` porque aquel dominio existe para el mantenimiento de un
-activo concreto y exige uno; buena parte del trabajo de un ayuntamiento pequeño
-no cuelga de ningún activo ni de ningún expediente. Una tarea puede referirse a
-un proyecto y asignarse a alguien de la plantilla, pero ninguna de las dos cosas
-es obligatoria, y ambas se atan con claves ajenas compuestas
-`(id, organization_id)` para que no crucen de ayuntamiento.
+Se elige **Caddy** frente a nginx porque emite y renueva los certificados de Let's Encrypt sin certbot ni cron, y la configuración cabe en un fichero legible. Es el único servicio que publica puertos (80, 443 y 443/udp). El tope de cuerpo se pone **en el borde** (30 MB) porque el límite de 25 MiB de la aplicación se aplica mientras escribe el fichero, cuando Starlette ya ha volcado el multipart completo a `/tmp`: sin corte en el proxy, una sesión válida puede llenar el disco.
 
-**"Vencida" no es un estado ni una columna.** El diseño la presenta junto a
-"bloqueada" o "en curso", pero no es de la misma naturaleza: bloqueada describe
-una decisión de alguien, vencida solo dice que la fecha límite ya pasó y la
-tarea sigue abierta. Materializarla obligaría a un proceso que reescribiese
-filas cada medianoche, y entre ejecución y ejecución la base contendría datos
-que ya no son ciertos. Se calcula en la consulta contra `current_date` del
-servidor, y `GET /tasks/summary` devuelve además el `reference_date` que ha
-usado, para que la interfaz decida con la misma fecha que el backend y no con el
-reloj del navegador. `test_migrations.py` comprueba que la columna no existe, de
-modo que un futuro intento de guardarla no pase inadvertido.
+`docker-compose.prod.yml` es un fichero **aparte**, no un override: el de desarrollo usa `network_mode: host` y eso no se retira limpiamente en una capa de merge, de modo que el flujo de desarrollo documentado sigue intacto. En producción desaparece la red de host, Postgres y Redis dejan de publicar puertos y quedan en una red `internal: true` sin salida a Internet, todo lleva `restart: unless-stopped` y healthcheck, los contenedores corren sin privilegios con raíz de solo lectura y capacidades retiradas, y Postgres se fija **por digest**, el mismo que ya usaba CI, en vez de un tag flotante.
 
-El grafo de transiciones es explícito y una tarea cerrada no se edita: se reabre
-a `pending` y desde ahí vuelve a moverse. Así la reapertura queda en el
-histórico en lugar de disimularse como un salto directo. Bloquear exige motivo
-—una tarea bloqueada sin decir qué la bloquea no la puede desatascar nadie, y un
-`CHECK` lo garantiza en la base—, y cancelar o reabrir exigen explicación,
-porque borran o revierten una decisión anterior. Cancelar y reabrir piden
-`tasks.manage`; el resto del movimiento diario vive en `tasks.edit`.
+El backend corre con `--proxy-headers` y `--forwarded-allow-ips` apuntando a una **IP fija** de Caddy en una subred declarada. Sin ello el limitador de login vería la dirección del proxy para todos los clientes y la traza de seguridad registraría siempre la misma IP; con `*`, cualquiera podría falsear `X-Forwarded-For` y esquivar el límite.
 
-La pantalla deja de ser una pestaña de `/ayuntamiento` y pasa a ruta propia
-`/hoja-de-ruta`, con la entrada de la barra superior apuntando ahí. Cruza
-tareas, proyectos y corporación, y no cabe dentro de la ficha de un municipio.
-La revisión Alembic `20260804_0035` se serializa detrás de `20260803_0034`
-conforme a ADR-033.
-## ADR-037: Series municipales propias junto a las cifras oficiales (2026-08-04)
+`NEXT_PUBLIC_API_BASE_URL` se hornea en el bundle del navegador durante `next build`, así que **cambiar de dominio obliga a reconstruir la imagen del frontend**. La `ENV` de la etapa runner no lo cambia; se deja documentado en el propio Dockerfile porque es el error más fácil de cometer.
 
-La pantalla del municipio necesita empadronamiento, clima, parque de viviendas y
-abastecimiento de agua. Todo eso vive en `backend/app/municipal_data/`, separado
-de `municipalities`, porque responde a una pregunta distinta: `municipalities`
-guarda la ficha oficial del municipio —una fila, con su procedencia INE y su
-huella de descarga—, mientras que estas tablas guardan **series temporales que
-mantiene el ayuntamiento**. Meterlas en la ficha habría obligado a decidir qué
-año es "el" año.
+Sigue habiendo un solo worker de uvicorn: el limitador de tasa es en memoria por proceso (ADR-010, ADR-015). Escalar horizontalmente exige moverlo a Redis antes, y esa condición no cambia con este despliegue.
 
-Padrón municipal y cifra oficial del INE conviven a propósito. El padrón se
-cierra antes que la cifra oficial y los ayuntamientos trabajan con él durante
-meses; presentarlos como el mismo dato llevaría a discusiones sobre cuál está
-mal. Por eso cada fila lleva `source` (`municipal`, `ine`, `aemet`, `other`) y la
-serie propia no sobreescribe la del INE que ya resuelve
-`municipalities/ine_population.py`.
+El piloto se despliega **en el mismo VPS donde se desarrolla** (Hetzner CPX42, IP
+pública propia, puertos 80 y 443 libres). Una máquina dedicada sería más segura y
+cuesta unos 4 €/mes, y así se recomienda para cuando el piloto deje de serlo; se
+decide compartir porque el servidor ya está pagado y en marcha, y porque los
+contenedores de la aplicación consumen menos de 300 MB frente a 15 GB de RAM. El
+riesgo que introduce es concreto y se acota con tres medidas: producción se
+despliega desde un clon aparte en `/opt/anacleto` —para que un `git checkout` de
+desarrollo no altere la configuración de la web en marcha—, usa un proyecto de
+Compose propio (`anacleto`) con volúmenes separados, y **nunca se hace `down`, sólo
+`stop`**. Esto último no es cosmético: `prune` sólo borra volúmenes que ningún
+contenedor referencia, así que mientras los contenedores existan los datos están a
+salvo, y `down` es precisamente lo que los deja huérfanos. Queda además prohibido
+`docker system prune -a --volumes` en la máquina; para recuperar disco se usa
+`docker builder prune`, que es donde está el espacio (unos 75 GB de caché).
 
-`climate_records` cubre año y mes en una sola tabla: `reference_month` nulo es el
-resumen anual y con mes la fila es mensual. Duplicar el esquema para lo mismo a
-dos granularidades habría obligado a mantener dos veces cada validación. La
-unicidad es por `(organización, año, mes)`, de modo que la fila anual y las doce
-mensuales del mismo año conviven sin chocar.
+## ADR-036: Endurecimiento del backend expuesto a Internet (2026-07-30)
 
-Los contadores de agua son la única parte que se sitúa en el territorio, así que
-son los únicos que exigen que la organización tenga municipio, igual que el
-inventario; el resto de series no lo necesita y no lo pide. Las lecturas son una
-por contador y día —dos lecturas del mismo día se contradicen— y el consumo se
-deriva restando lecturas consecutivas en lugar de guardarse, por la misma razón
-que "vencida" no es columna en ADR-036: un dato calculable que se almacena
-empieza a envejecer en cuanto cambia el que lo origina.
+Antes de este cambio el backend tenía **un solo middleware** (CORS), publicaba `/docs` y `/openapi.json` sin autenticar, no emitía ninguna cabecera de seguridad, no tenía más defensa CSRF que `SameSite=Lax`, no configuraba logging —de modo que todo `logger.info`, incluida la telemetría del gateway de IA, se descartaba en silencio— y no registraba ni un solo evento de seguridad. Nada de eso era grave en `localhost` y todo lo es en un dominio público.
 
-Los permisos son `municipal_data.view|edit|manage`. No hay `create` separado
-porque estas series se rellenan y se corrigen en el mismo gesto —una cifra de
-padrón mal tecleada se arregla, no se archiva—, y distinguir crear de editar solo
-habría añadido un permiso que nadie concedería por separado.
+**Guardas de arranque.** Con `ENVIRONMENT=production` el backend se niega a arrancar si `SECRET_KEY` es uno de los valores de ejemplo documentados o mide menos de 32 caracteres, si algún origen de CORS no es `https://` o es `*`, o si `ALLOWED_HOSTS` es `*`. El motivo es concreto: el `.env` de desarrollo se copia con facilidad y llevaba `SECRET_KEY=change-me-...`, `BOOTSTRAP_ADMIN_TOKEN=dev-bootstrap-token` y orígenes en claro; el fallo tenía que ser ruidoso y no silencioso. `environment` se valida además contra un enum **sin normalizar**: aceptar `Development` como equivalente de `development` habría ablandado la puerta de ADR-024, que exige la cadena exacta para el puente Codex.
 
-La revisión Alembic `20260804_0036` se serializa detrás de `20260804_0035`
-conforme a ADR-033.
+**Superficie.** `/docs`, `/redoc` y `/openapi.json` solo existen en desarrollo: describían las ~132 rutas, sus esquemas y la cabecera del token de bootstrap sin pedir credenciales. Se añade `TrustedHostMiddleware` con los hostnames reales.
+
+**CSRF.** Se añade una comprobación de `Origin` en los métodos de escritura, como segunda capa sobre la cookie. Si llega `Origin` y no es de los nuestros, 403; si no llega, se permite, porque los clientes de API con `Authorization: Bearer`, el webhook de Telegram y el `TestClient` no lo envían mientras un navegador sí lo hace en toda escritura. No es un token sincronizador —seguiría siendo lo más sólido— pero cubre la forma real del ataque sin romper los caminos legítimos existentes.
+
+Los middlewares se escriben como **ASGI puro** y no sobre `BaseHTTPMiddleware`: el asistente responde por SSE y `BaseHTTPMiddleware` se interpone en el streaming.
+
+**CSP.** La política del frontend se sirve desde el proxy y está verificada contra el código: `img-src` admite las teselas de OpenStreetMap que carga Leaflet, `font-src 'self'` basta porque `next/font` sirve IBM Plex desde nuestro host, y el micrófono se permite porque el modo voz lo usa. `script-src` necesita `'unsafe-inline'`: Next.js App Router inyecta scripts inline para hidratar y el script de tema también es inline. Apretarlo a CSP con nonce exige un `frontend/middleware.ts` y **queda como deuda declarada**, no como algo resuelto. Las respuestas de `/api/*` llevan en cambio `default-src 'none'; sandbox`, que neutraliza cualquier fichero servido con un tipo ejecutable.
+
+**Cuatro vulnerabilidades corregidas.** (1) `GET /town-hall/shield` servía el escudo **inline**, sin `Content-Disposition`, con el content-type declarado por el cliente y `image/svg+xml` en la lista blanca: un usuario con `town_hall.edit` podía almacenar un SVG con script que se ejecutaba en el origen de la API con la cookie de sesión en alcance, y al ser una navegación `GET` la cookie `Lax` viajaba igual. Se sirve como adjunto y la extensión de la cabecera se deriva del content-type validado, no del nombre original, que es el que elige quien sube. Se conserva el soporte de SVG porque el frontend lo pinta en un `<img>`, donde no puede ejecutar scripts. (2) El webhook de Telegram **fallaba en abierto**: sin secreto configurado se saltaba la verificación entera. (3) La llamada gRPC a NVIDIA Riva y el subproceso de ffmpeg no tenían límite temporal y podían inmovilizar el único worker. (4) Hermes, embeddings y Azure usaban `urlopen` desnudo, que sigue redirecciones **reenviando la credencial**; el patrón que ya existía para OpenAI se generaliza a un ayudante compartido.
+
+**Límites de tasa.** Solo login y cambio de contraseña estaban limitados; quedaban abiertos los endpoints que cuestan dinero o CPU en cada llamada: turnos de LLM, síntesis de voz, transcripción (subida de 20 MiB más un ffmpeg por petición), subidas e importación de ordenanzas. Se extienden reutilizando el limitador en memoria en lugar de migrar a Redis: con dos usuarios y un solo worker, mover el estado añade un modo de fallo sin beneficio, y la condición de ADR-010/ADR-015 (Redis antes de multi-worker) sigue en pie. Se añade un **techo por IP** en el login: la clave anterior incluía la cuenta, así que una sola IP podía probar una contraseña contra cuentas distintas sin límite alguno.
+
+**Traza de auditoría.** `security_events` es inmutable por trigger en la base, con el mismo patrón que `maintenance_order_events`, y cubre `UPDATE` **y** `DELETE`: una traza que la propia aplicación pueda reescribir no sirve como prueba, y un backend comprometido no debe poder borrar su rastro. Se instrumentan una decena de puntos de alto valor (login correcto, fallido y bloqueado, logout, cambio y reseteo de contraseña, creación del admin de bootstrap, alta y baja de superusuario, borrado de usuario, subida, descarga y archivado de documentos) en lugar de las 132 rutas. El acceso a documentos es lo que hace defendible el piloto con datos reales. `detail` guarda solo metadatos, nunca contenido: la regla dura del proyecto se mantiene. Se lee por un endpoint **solo de superusuario** y fuera del catálogo RBAC, porque la traza cruza organizaciones —un login fallido no tiene organización— y porque así ningún rol municipal puede concederse acceso a sí mismo. Guarda IP y correo intentado, que son datos personales: la retención es de 90 días con purga programada.
+
+## ADR-037: Copias de seguridad en el servidor con snapshots del proveedor (2026-07-30)
+
+No había ninguna copia de seguridad: ni script, ni cron, ni procedimiento de restauración. La única guía era la prohibición de borrar los volúmenes.
+
+Se elige el esquema **más simple que funciona** para un piloto de dos usuarios: volcado diario en el propio servidor con rotación (7 diarias, 4 semanales, 3 mensuales) más los snapshots automáticos del proveedor de VPS. Se descarta por ahora el destino externo cifrado, que sería más sólido, y **el riesgo residual se acepta explícitamente**: con las copias en la misma máquina, un borrado accidental o un compromiso del servidor se las lleva también. Los snapshots del proveedor son la única red fuera de la máquina, así que **activarlos es obligatorio**, no opcional. La costura para el destino externo queda preparada (una variable y el hueco para cifrar con `age` y subir), sin implementar, para no dejar la ilusión de una protección que no existe.
+
+Al decidirse que producción comparte máquina con el desarrollo (ADR-031), la copia
+externa deja de ser un lujo: las copias locales protegen frente a un error de la
+aplicación, pero no frente a perder o vaciar el servidor, y en esa máquina se
+trabaja a diario. Por eso los backups o snapshots de la consola de Hetzner pasan de
+recomendables a **obligatorios**, y son la única copia real fuera del disco.
+
+La base se vuelca con `pg_dump -Fc` y los documentos se empaquetan con el volumen montado en **solo lectura**: el script no puede escribir en los datos de producción ni por error. Cada copia lleva manifiesto `sha256`, y la restauración lo verifica **antes** de tocar nada. La copia se construye en un directorio `.partial` y se renombra solo al terminar bien, para que una ejecución interrumpida no deje un volcado vacío que la rotación contaría como válido desplazando a uno bueno.
+
+`ops/restore.sh` restaura **por defecto a una base de pruebas** y no toca producción, de modo que el ensayo pueda hacerse cuando se quiera; el modo destructivo exige una confirmación escrita y que backend y worker estén parados. Esto es deliberado: una copia que nunca se ha restaurado no es una copia, es una suposición, y el ensayo es parte del procedimiento de puesta en marcha, no una recomendación.
+
+El fichero de entorno se **parsea**, no se ejecuta con `source`: contiene valores sin comillas con espacios (`APP_NAME=Asistente Ayuntamientos`) que reventaban al interpretarlos como shell, y ejecutar un fichero de secretos como código es innecesariamente peligroso.
+
+La purga de `security_events` desactiva el trigger de inmutabilidad de forma explícita dentro de una transacción y comprueba después que quedó activo. Es la única excepción prevista a la inmutabilidad y por eso vive en una tarea de mantenimiento, fuera de la aplicación.
+
 ## ADR-038: El tiempo se consulta en vivo; el escudo vive en `documents` (2026-08-04)
 
 **Open-Meteo sin tabla.** El tiempo que hace ahora no es un dato del
@@ -489,7 +414,7 @@ Las series del municipio se dibujan con dos componentes SVG escritos aquí,
 series de pocos puntos —un valor por año o por mes— con dos formas: una línea
 para lo continuo y unas barras para lo discreto. Cualquier librería del ramo pesa
 más que toda la pantalla que la usaría, y traería su propio modelo de temas justo
-cuando ADR-034 acaba de fijar que lo visual va en CSS Modules con los tokens del
+cuando ADR-048 acaba de fijar que lo visual va en CSS Modules con los tokens del
 producto.
 
 El pie visible de la figura es también el nombre accesible del SVG,
@@ -559,7 +484,7 @@ modificaciones de crédito, los gastos imputados y los movimientos de tesorería
 crédito disponible son columnas: se calculan en cada consulta sumando partidas,
 modificaciones aprobadas y gastos. Guardarlos obligaría a recalcular en cada
 escritura y a convivir con un total que dejó de cuadrar tras un fallo a medio
-camino. Es el mismo criterio que «vencida» en ADR-036: un dato calculable que se
+camino. Es el mismo criterio que «vencida» en ADR-050: un dato calculable que se
 almacena empieza a envejecer en cuanto cambia el que lo origina.
 
 **El importe de una partida es siempre positivo** y la dirección la marca
@@ -681,7 +606,7 @@ y con eso basta para una vista propia. El resultado es que la fase del mapa
 —señalada como la de mayor riesgo en el plan— no modifica ni una línea del
 código en churn.
 
-Con «Mapa general» activo, **el menú fijo de ADR-034 queda completo**: todas las
+Con «Mapa general» activo, **el menú fijo de ADR-048 queda completo**: todas las
 entradas declaradas tienen pantalla. `visibleTopNavSections` sigue filtrando por
 `enabled` aunque hoy no descarte nada, porque es lo que protegerá el día que se
 declare una entrada nueva antes de construirla.
@@ -775,7 +700,7 @@ leerla.
 reinicios, descubriendo un fallo por vuelta, es la forma más rápida de que
 alguien se rinda a medias y deje dos valores sin cambiar.
 
-**CORS vacío es legítimo.** ADR-010 pone frontend y backend bajo el mismo host,
+**CORS vacío es legítimo.** *(Superado por ADR-036 al integrar la línea del servidor: allí la lista explícita es obligatoria en producción, y su `.env.production.example` ya la trae. Lo que sigue describe el razonamiento original.)*  ADR-010 pone frontend y backend bajo el mismo host,
 donde no hay petición cross-origin que permitir. Exigir una entrada sería pedir
 ruido. Lo que sí se rechaza es un origen de loopback o en texto plano: la cookie
 de sesión se emite `Secure` fuera de desarrollo, así que un origen `http://` no
@@ -790,3 +715,219 @@ Los contenedores dejan de correr como root. Mantienen **un solo worker** de
 uvicorn: los limitadores de peticiones siguen siendo por proceso (ADR-015) y
 añadir workers los desactivaría de hecho. `docs/despliegue.md` recoge el
 procedimiento completo y lo que sigue abierto.
+
+## ADR-048: Barra superior municipal fija y tipografía institucional (2026-08-03)
+
+> Reconciliada con ADR-034 en **ADR-052**: la barra superior sigue fija; la tira de pestañas de la pantalla Ayuntamiento admite apartados propios.
+
+El diseño municipal de referencia introduce una barra superior propia de las
+pantallas institucionales: escudo y nombre del municipio a la izquierda,
+navegación por secciones en el centro y un bloque de contexto a la derecha. Esa
+barra no sustituye al menú lateral de ADR-014, que sigue siendo la navegación
+del producto; convive con él y solo aparece en las rutas del ayuntamiento, la
+sede electrónica y la hoja de ruta. El resto del producto se navega igual que
+antes, de modo que un usuario sin acceso a las pantallas municipales no ve
+ningún cambio estructural.
+
+La navegación municipal es fija y vive en código (`frontend/app/lib/topNav.ts`).
+El diseño incluía un editor que permitía renombrar, reordenar, añadir y eliminar
+apartados desde la interfaz, y se descarta de forma deliberada: el menú de un
+ayuntamiento describe su organización, no una preferencia de quien lo mira, y
+mantenerlo declarado en el repositorio lo hace revisable, comparable entre
+municipios y consistente con el modelo de permisos. Las entradas cuyo destino
+todavía no existe se declaran con `enabled: false` y no se renderizan; sirven de
+índice de lo que falta y se activan en la fase que construye su pantalla, sin
+reescribir el modelo ni dejar enlaces rotos en producción.
+
+Se añade **Newsreader** vía `next/font` para el nombre del municipio, único uso
+de serif institucional en la barra. El diseño empleaba además Space Grotesk y
+Space Mono en detalles puntuales; no se incorporan, porque IBM Plex Sans y Mono
+—ya cargadas y autoalojadas— cubren esos usos sin ampliar el peso tipográfico
+que el navegador debe descargar. La decisión es reversible: si una revisión
+visual las echa en falta, añadirlas es un cambio local en el layout raíz.
+
+Las pantallas nuevas o rediseñadas usan CSS Modules, no `styles.css`. La hoja
+global supera las 6.000 líneas y concentra el riesgo de colisión entre cambios
+simultáneos; los módulos ya son el patrón de las superficies recientes. En
+`styles.css` solo se añaden tokens compartidos: `--status-blocked` y
+`--status-overdue`, que los estados de la hoja de ruta necesitan en ambos temas
+y que no pueden expresarse con `--danger-fg` o `--accent` sin perder significado.
+## ADR-049: Dominios tenant-scoped de gobierno y personal (2026-08-03)
+
+La pantalla del ayuntamiento necesita dos realidades que hasta ahora no existían
+en el modelo: quién gobierna el municipio y quién trabaja en él. Se separan en
+dos dominios, `backend/app/government/` y `backend/app/staff/`, porque responden
+a preguntas distintas y se rigen por reglas distintas. La corporación —alcaldía,
+tenencias, concejalías y secretaría— es información pública que acaba en la sede
+electrónica; la plantilla es información laboral, sensible, de acceso mucho más
+restringido. Mezclarlas en una tabla de «personas del ayuntamiento» habría
+obligado a filtrar por rol en cada consulta y a razonar sobre la confidencialidad
+caso por caso.
+
+Ambos dominios se anclan a `organizations`, no a `municipalities`. La
+organización es la unidad de aislamiento del producto y la que ya sostiene el
+modelo de permisos; el municipio describe el territorio. Un cargo o un puesto se
+pueden registrar antes de que el municipio esté dado de alta, así que —a
+diferencia del inventario, que sí exige municipio para poder situar un activo en
+el mapa— aquí las escrituras sólo requieren que la organización esté activa. Las
+lecturas se admiten también con la organización pausada, en modo consulta, igual
+que en el resto de superficies municipales. Las claves ajenas compuestas
+`(id, organization_id)` impiden que un puesto cuelgue de la plantilla de otro
+ayuntamiento o que una ausencia se enganche a una persona ajena: el aislamiento
+se sostiene en la base, no sólo en el filtro de la consulta.
+
+La plantilla se modela como puesto y persona separados, porque el puesto
+sobrevive a quien lo ocupa: en un municipio pequeño el arquitecto puede estar a
+tiempo parcial, vacante o compartido con otro ayuntamiento, y el histórico debe
+seguir siendo legible cuando cambia el titular. `staff_posts` admite además
+contenedores que agrupan puestos sin poder ocuparse, para reproducir la
+estructura por servicios del diseño. Un puesto lo ocupa como mucho una persona a
+la vez, garantizado por índice único; los ciclos del árbol se cierran en la ruta,
+porque la base sólo puede impedir que un puesto sea su propio padre.
+
+Los permisos siguen la gradación del inventario, adaptada a lo que cada dominio
+puede sufrir. Gobierno usa `government.view` y `government.manage`: la
+corporación cambia en bloque tras unas elecciones, no campo a campo, y no
+justifica un nivel intermedio. Personal usa `staff.view`, `staff.edit` y
+`staff.manage`: corregir un teléfono, anotar una ausencia o abrir un parte de
+trabajo es rutina diaria y vive en `edit`, mientras que tocar la estructura de
+puestos o archivar a una persona —que la retira de las vistas— exige `manage`.
+Los cargos y las fichas no se borran: se archivan, para que actas, acuerdos y
+partes antiguos sigan siendo interpretables.
+
+Toda modificación de una ficha de personal deja un evento en
+`staff_history_events`, append-only. Son datos laborales y su edición tiene que
+poder auditarse: un cambio de estado, de puesto o de campos queda registrado con
+su autor y su momento, en lugar de sobrescribirse en silencio. El diario y los
+partes (`staff_reports`) y las facturas del personal externo (`staff_invoices`)
+cuelgan de la persona y heredan su organización; facturar sólo se admite en
+quien está marcado como externo, porque en alguien de nómina sería casi siempre
+un error de captura.
+
+La revisión Alembic `20260803_0034` se serializa detrás de `20260717_0033`
+conforme a ADR-033, y `test_migrations.py` fija la huella estructural de las
+siete tablas nuevas en las dos direcciones del grafo.
+## ADR-050: La hoja de ruta y el estado "vencida" como lectura, no como dato (2026-08-04)
+
+La hoja de ruta municipal necesita un dominio propio, `backend/app/tasks/`, con
+`municipal_tasks` y su rastro append-only `municipal_task_events`. No se apoya en
+`maintenance_orders` porque aquel dominio existe para el mantenimiento de un
+activo concreto y exige uno; buena parte del trabajo de un ayuntamiento pequeño
+no cuelga de ningún activo ni de ningún expediente. Una tarea puede referirse a
+un proyecto y asignarse a alguien de la plantilla, pero ninguna de las dos cosas
+es obligatoria, y ambas se atan con claves ajenas compuestas
+`(id, organization_id)` para que no crucen de ayuntamiento.
+
+**"Vencida" no es un estado ni una columna.** El diseño la presenta junto a
+"bloqueada" o "en curso", pero no es de la misma naturaleza: bloqueada describe
+una decisión de alguien, vencida solo dice que la fecha límite ya pasó y la
+tarea sigue abierta. Materializarla obligaría a un proceso que reescribiese
+filas cada medianoche, y entre ejecución y ejecución la base contendría datos
+que ya no son ciertos. Se calcula en la consulta contra `current_date` del
+servidor, y `GET /tasks/summary` devuelve además el `reference_date` que ha
+usado, para que la interfaz decida con la misma fecha que el backend y no con el
+reloj del navegador. `test_migrations.py` comprueba que la columna no existe, de
+modo que un futuro intento de guardarla no pase inadvertido.
+
+El grafo de transiciones es explícito y una tarea cerrada no se edita: se reabre
+a `pending` y desde ahí vuelve a moverse. Así la reapertura queda en el
+histórico en lugar de disimularse como un salto directo. Bloquear exige motivo
+—una tarea bloqueada sin decir qué la bloquea no la puede desatascar nadie, y un
+`CHECK` lo garantiza en la base—, y cancelar o reabrir exigen explicación,
+porque borran o revierten una decisión anterior. Cancelar y reabrir piden
+`tasks.manage`; el resto del movimiento diario vive en `tasks.edit`.
+
+La pantalla deja de ser una pestaña de `/ayuntamiento` y pasa a ruta propia
+`/hoja-de-ruta`, con la entrada de la barra superior apuntando ahí. Cruza
+tareas, proyectos y corporación, y no cabe dentro de la ficha de un municipio.
+La revisión Alembic `20260804_0035` se serializa detrás de `20260803_0034`
+conforme a ADR-033.
+## ADR-051: Series municipales propias junto a las cifras oficiales (2026-08-04)
+
+La pantalla del municipio necesita empadronamiento, clima, parque de viviendas y
+abastecimiento de agua. Todo eso vive en `backend/app/municipal_data/`, separado
+de `municipalities`, porque responde a una pregunta distinta: `municipalities`
+guarda la ficha oficial del municipio —una fila, con su procedencia INE y su
+huella de descarga—, mientras que estas tablas guardan **series temporales que
+mantiene el ayuntamiento**. Meterlas en la ficha habría obligado a decidir qué
+año es "el" año.
+
+Padrón municipal y cifra oficial del INE conviven a propósito. El padrón se
+cierra antes que la cifra oficial y los ayuntamientos trabajan con él durante
+meses; presentarlos como el mismo dato llevaría a discusiones sobre cuál está
+mal. Por eso cada fila lleva `source` (`municipal`, `ine`, `aemet`, `other`) y la
+serie propia no sobreescribe la del INE que ya resuelve
+`municipalities/ine_population.py`.
+
+`climate_records` cubre año y mes en una sola tabla: `reference_month` nulo es el
+resumen anual y con mes la fila es mensual. Duplicar el esquema para lo mismo a
+dos granularidades habría obligado a mantener dos veces cada validación. La
+unicidad es por `(organización, año, mes)`, de modo que la fila anual y las doce
+mensuales del mismo año conviven sin chocar.
+
+Los contadores de agua son la única parte que se sitúa en el territorio, así que
+son los únicos que exigen que la organización tenga municipio, igual que el
+inventario; el resto de series no lo necesita y no lo pide. Las lecturas son una
+por contador y día —dos lecturas del mismo día se contradicen— y el consumo se
+deriva restando lecturas consecutivas en lugar de guardarse, por la misma razón
+que "vencida" no es columna en ADR-050: un dato calculable que se almacena
+empieza a envejecer en cuanto cambia el que lo origina.
+
+Los permisos son `municipal_data.view|edit|manage`. No hay `create` separado
+porque estas series se rellenan y se corrigen en el mismo gesto —una cifra de
+padrón mal tecleada se arregla, no se archiva—, y distinguir crear de editar solo
+habría añadido un permiso que nadie concedería por separado.
+
+La revisión Alembic `20260804_0036` se serializa detrás de `20260804_0035`
+conforme a ADR-033.
+
+## ADR-052: Áreas fijas en código y apartados propios de cada ayuntamiento (2026-08-24)
+
+Las dos líneas que esta integración une decidieron por separado cómo se navega
+la pantalla «Ayuntamiento», y llegaron a conclusiones opuestas. ADR-034 la hizo
+**configurable**: cada organización crea, renombra, reordena y borra sus
+apartados sobre el árbol genérico de `municipal_blocks`. ADR-048 la declaró
+**fija** en el repositorio y descartó de forma explícita ese mismo editor,
+porque «el menú de un ayuntamiento describe su organización, no una preferencia
+de quien lo mira». Ninguna de las dos conocía a la otra, y las dos están en
+producción: una en el servidor, la otra en `main`.
+
+**No son la misma superficie.** ADR-048 gobierna la barra superior de las rutas
+municipales (`frontend/app/lib/topNav.ts`, `TopBar.tsx`): qué pantallas existen
+y cómo se llega a ellas. ADR-034 gobierna la tira de pestañas *dentro* de la
+pantalla Ayuntamiento: qué contiene la ficha de ese municipio. Al leerlas como
+si compitieran se pierde que responden a preguntas distintas, y por eso ninguna
+de las dos tenía que ceder entera.
+
+**Las áreas operativas siguen fijas y en código.** Información, Normativa,
+Servicios municipales, Mapa general, Personal y Hoja de ruta son las seis áreas
+de `TAB_DEFINITIONS`. Cada una tiene su modelo, sus permisos y su pantalla; no
+son texto que alguien pueda renombrar sin que deje de cuadrar con lo que hay
+detrás. El argumento de ADR-048 vale aquí sin matices: revisables, comparables
+entre municipios y consistentes con el modelo de permisos.
+
+**Los apartados propios se añaden detrás, nunca en medio.** Lo que la
+organización crea en el editor aparece tras las seis áreas fijas, en la misma
+tira, de modo que la pantalla conserva una sola navegación. Su identificador es
+el de su bloque (`block-<id>`), que no puede colisionar con las claves
+literales de las áreas fijas. Un ayuntamiento que no use el editor ve
+exactamente la pantalla de ADR-048.
+
+**La frontera es quién responde de cada cosa.** Un área fija promete una
+funcionalidad que el producto mantiene; un apartado propio es contenido del que
+responde el ayuntamiento que lo escribió. Por eso lo segundo se guarda como
+bloques genéricos y lo primero no, y por eso borrar un apartado propio no puede
+dejar rota ninguna pantalla: `findTabForBlock` traduce los enlaces antiguos y
+una pestaña que ya no existe se explica en su panel en lugar de romper.
+
+**La pestaña sigue viviendo en la URL.** ADR-034 la guardaba en estado local y
+la escribía con `history.replaceState`; se adopta el criterio de `main`, que la
+deriva de `?tab=` con `useSearchParams`. Es la convención del repositorio —los
+enlaces profundos y el botón atrás deben seguir funcionando— y es lo que ya
+esperaba `UrlDrivenTabs.test.ts`. Los apartados propios se aceptan por su forma
+al leer la URL, porque el árbol del menú todavía no ha llegado en ese momento.
+
+**Lo que no cambia.** El escudo, el nombre mostrado y el bloque de temperatura
+de ADR-034 se conservan tal cual, incluida su disciplina de egreso hacia
+Open-Meteo y el guion cuando el proveedor no responde. `topNav.ts` no se toca:
+la barra superior de ADR-048 sigue siendo fija.

@@ -13,9 +13,9 @@ from app.assistant.gateway import (
     AIGateway,
     AssistantTimeoutError,
     AssistantUnavailableError,
-    _RejectOpenAIRedirects,
     _from_openai_responses_response,
 )
+from app.core.http import _RejectRedirects
 from app.assistant.safety import build_assistant_safety_identifier
 from app.core.config import Settings, settings
 
@@ -755,7 +755,7 @@ def test_stream_read_failures_are_normalized(
 
 
 def test_openai_redirect_handler_rejects_redirects():
-    handler = _RejectOpenAIRedirects()
+    handler = _RejectRedirects()
 
     assert (
         handler.redirect_request(

@@ -1,0 +1,598 @@
+{
+  "schema": "siur-idecyl-local-service-classification/v2",
+  "capture": {
+    "captured_at": "2026-07-27T03:15:00Z",
+    "legacy_inventory": {
+      "resource": "evidence/idecyl_exact/manifest-v1.json",
+      "sha256": "5b60099dfbe8000e286b1da30491e84673a8691baea64c32aa4f284af56cbf07"
+    },
+    "metadata_records": {
+      "resource": "evidence/idecyl_exact/records-20260727.xml",
+      "sha256": "9e7eb47a169eb22303267378cd762357abe0c97137267e37e6e80c4f720e07d5",
+      "source_snapshot_sha256": "ed7b6ea8256313aa1977e6cad89bd0694d752bf519a55705d5c562ecf5180a56"
+    },
+    "wms_capabilities": [
+      {
+        "workspace": "agricultura",
+        "url": "https://idecyl.jcyl.es/geoserver/agricultura/wms?service=WMS&request=GetCapabilities&version=1.3.0",
+        "sha256": "9e406c022c05cea7b19315b4252e7e7836c088f69c7140b193c88eba9c990786"
+      },
+      {
+        "workspace": "energia",
+        "url": "https://idecyl.jcyl.es/geoserver/energia/wms?service=WMS&request=GetCapabilities&version=1.3.0",
+        "sha256": "b004d53cafc3b522d8c47a77a6b3cd8045502211119f293c301751db43a6cf74"
+      },
+      {
+        "workspace": "entidades",
+        "url": "https://idecyl.jcyl.es/geoserver/entidades/wms?service=WMS&request=GetCapabilities&version=1.3.0",
+        "sha256": "2a0fc372c285b915f502ebd991b2e3b5d5b2b74eafb8555d0381dc602a64cd7a"
+      },
+      {
+        "workspace": "espaciosnaturales",
+        "url": "https://idecyl.jcyl.es/geoserver/espaciosnaturales/wms?service=WMS&request=GetCapabilities&version=1.3.0",
+        "sha256": "d49ae8102b6dc6f383168a3fbb96db9f31c42434e098baeed4174efa7f8e5c05"
+      },
+      {
+        "workspace": "florafauna",
+        "url": "https://idecyl.jcyl.es/geoserver/florafauna/wms?service=WMS&request=GetCapabilities&version=1.3.0",
+        "sha256": "edae1821196cd18ac3b88e86f9c6ad556aa1649e46ed25e5d8877969501433b9"
+      },
+      {
+        "workspace": "hidrografia",
+        "url": "https://idecyl.jcyl.es/geoserver/hidrografia/wms?service=WMS&request=GetCapabilities&version=1.3.0",
+        "sha256": "0f027a2764c757398079d84c33a84c092366ec4d6f615777690741951e90274a"
+      },
+      {
+        "workspace": "limites",
+        "url": "https://idecyl.jcyl.es/geoserver/limites/wms?service=WMS&request=GetCapabilities&version=1.3.0",
+        "sha256": "b43c4d7659d741ce1f5e871432d1fe9612d49c438b171784b2f9f6a940388da4"
+      },
+      {
+        "workspace": "mineria",
+        "url": "https://idecyl.jcyl.es/geoserver/mineria/wms?service=WMS&request=GetCapabilities&version=1.3.0",
+        "sha256": "91b9a5f2198c403f7bc0ac9cfb1cbdecfa2fb767f7f5a461790cbeb826719a0c"
+      },
+      {
+        "workspace": "montes",
+        "url": "https://idecyl.jcyl.es/geoserver/montes/wms?service=WMS&request=GetCapabilities&version=1.3.0",
+        "sha256": "7edfc414ad0c6a8f1d6864971d246c76f257b01e72ca469a12581e1e81425d49"
+      },
+      {
+        "workspace": "pesca",
+        "url": "https://idecyl.jcyl.es/geoserver/pesca/wms?service=WMS&request=GetCapabilities&version=1.3.0",
+        "sha256": "280be7231bb5858f3caf3266c1edd62d5e1ab41c58115ec4ad0fb591626bfdd8"
+      },
+      {
+        "workspace": "poblacion",
+        "url": "https://idecyl.jcyl.es/geoserver/poblacion/wms?service=WMS&request=GetCapabilities&version=1.3.0",
+        "sha256": "c61b9ce62ae4effd53b8acc900de00cbdbcadf328ff9eb11e96a8eaedbd567f0"
+      },
+      {
+        "workspace": "sostenibilidad",
+        "url": "https://idecyl.jcyl.es/geoserver/sostenibilidad/wms?service=WMS&request=GetCapabilities&version=1.3.0",
+        "sha256": "f92bc5a8ba5b2c90c54a168e4cda0d597e939933568b7962c63d70dd107921de"
+      },
+      {
+        "workspace": "telecom",
+        "url": "https://idecyl.jcyl.es/geoserver/telecom/wms?service=WMS&request=GetCapabilities&version=1.3.0",
+        "sha256": "730f8e6800db608a165699744a5cedcf8327220a471e80dbc47029223f777e2f"
+      },
+      {
+        "workspace": "urbanismo",
+        "url": "https://idecyl.jcyl.es/geoserver/urbanismo/wms?service=WMS&request=GetCapabilities&version=1.3.0",
+        "sha256": "5ac04456abe2d902cdffc10dad30ddedc9683ecf8b33b2a58a496ab2e259b895"
+      },
+      {
+        "workspace": "vegetacion",
+        "url": "https://idecyl.jcyl.es/geoserver/vegetacion/wms?service=WMS&request=GetCapabilities&version=1.3.0",
+        "sha256": "03df541b26483387e4455b7256d97b674503c31c30e1978e05d1598823f8d5ee"
+      },
+      {
+        "workspace": "viascomunicacion",
+        "url": "https://idecyl.jcyl.es/geoserver/viascomunicacion/wms?service=WMS&request=GetCapabilities&version=1.3.0",
+        "sha256": "c0b63516afe474a43c5088cec70f9edc43769b761f1d4dc5a335f8d63a223d08"
+      }
+    ],
+    "wfs_capabilities": [
+      {
+        "workspace": "energia",
+        "url": "https://idecyl.jcyl.es/geoserver/energia/wfs?service=WFS&request=GetCapabilities&version=2.0.0",
+        "sha256": "53c2eb0bd519a9c66a425b64faad9d6bdc87feeae2d4fee79faec732f86b7ab4",
+        "access_constraints": "www.jcyl.es/licencia-IGCYL-NC",
+        "paging_is_transaction_safe": false
+      },
+      {
+        "workspace": "entidades",
+        "url": "https://idecyl.jcyl.es/geoserver/entidades/wfs?service=WFS&request=GetCapabilities&version=2.0.0",
+        "sha256": "239be6c294ad095beab5413f5f1af6613b9a65ee8ea2af76143321e4c88d34ff",
+        "access_constraints": "www.jcyl.es/licencia-IGCYL-NC",
+        "paging_is_transaction_safe": false
+      },
+      {
+        "workspace": "montes",
+        "url": "https://idecyl.jcyl.es/geoserver/montes/wfs?service=WFS&request=GetCapabilities&version=2.0.0",
+        "sha256": "7ad4329e4766e058786fef55889e5808dc3d94dbe3a4da84a289f2c60294eb21",
+        "access_constraints": "www.jcyl.es/licencia-IGCYL-NC",
+        "paging_is_transaction_safe": false
+      },
+      {
+        "workspace": "pesca",
+        "url": "https://idecyl.jcyl.es/geoserver/pesca/wfs?service=WFS&request=GetCapabilities&version=2.0.0",
+        "sha256": "4d37cfd8ce3902595a43a1121732cb051587454a4430b5d980e1ac7848df7905",
+        "access_constraints": "www.jcyl.es/licencia-IGCYL-NC",
+        "paging_is_transaction_safe": false
+      },
+      {
+        "workspace": "poblacion",
+        "url": "https://idecyl.jcyl.es/geoserver/poblacion/wfs?service=WFS&request=GetCapabilities&version=2.0.0",
+        "sha256": "8aa0d90d1f1bac268ef4c9a00afe24426f3fb7b47dc3fb8fe8b4909242962573",
+        "access_constraints": "www.jcyl.es/licencia-IGCYL-NC",
+        "paging_is_transaction_safe": false
+      },
+      {
+        "workspace": "viascomunicacion",
+        "url": "https://idecyl.jcyl.es/geoserver/viascomunicacion/wfs?service=WFS&request=GetCapabilities&version=2.0.0",
+        "sha256": "813aeef71a8a5e6552536c4c445180a999279f99d977130ab864cb1eb801cf3c",
+        "access_constraints": "www.jcyl.es/licencia-IGCYL-NC",
+        "paging_is_transaction_safe": false
+      }
+    ]
+  },
+  "technical_classifications": [
+    {
+      "audit_layer_id": 39,
+      "local_service_status": "candidate",
+      "metadata_binding": "exact",
+      "published_metadata_fid": "spagobcyltemtlccobmovcar",
+      "reason_codes": [
+        "archive_without_igcyl_nc_file",
+        "external_subscription_lineage_requires_human_review",
+        "general_open_data_terms_linked"
+      ]
+    },
+    {
+      "audit_layer_id": 65,
+      "local_service_status": "restricted",
+      "metadata_binding": "missing",
+      "published_metadata_fid": null,
+      "reason_codes": [
+        "archive_contains_igcyl_nc_license",
+        "public_local_service_not_permitted"
+      ]
+    },
+    {
+      "audit_layer_id": 66,
+      "local_service_status": "restricted",
+      "metadata_binding": "missing",
+      "published_metadata_fid": null,
+      "reason_codes": [
+        "archive_contains_igcyl_nc_license",
+        "public_local_service_not_permitted"
+      ]
+    },
+    {
+      "audit_layer_id": 78,
+      "local_service_status": "restricted",
+      "metadata_binding": "exact",
+      "published_metadata_fid": "SPAGOBCYLMNADTSAMVPE",
+      "reason_codes": [
+        "wfs_igcyl_nc_requires_recipient_acceptance",
+        "wfs_paging_not_transaction_safe"
+      ]
+    },
+    {
+      "audit_layer_id": 84,
+      "local_service_status": "restricted",
+      "metadata_binding": "exact",
+      "published_metadata_fid": "SPAGOBCYLCITDTSTNRCV",
+      "reason_codes": [
+        "wfs_igcyl_nc_requires_recipient_acceptance",
+        "wfs_paging_not_transaction_safe"
+      ]
+    },
+    {
+      "audit_layer_id": 86,
+      "local_service_status": "restricted",
+      "metadata_binding": "exact",
+      "published_metadata_fid": "SPAGOBCYLCITDTSMRCMC",
+      "reason_codes": [
+        "archive_contains_igcyl_nc_license",
+        "public_local_service_not_permitted"
+      ]
+    },
+    {
+      "audit_layer_id": 98,
+      "local_service_status": "restricted",
+      "metadata_binding": "exact",
+      "published_metadata_fid": "spagobcyltemotereginsamb",
+      "reason_codes": [
+        "archive_contains_igcyl_nc_license",
+        "public_local_service_not_permitted"
+      ]
+    },
+    {
+      "audit_layer_id": 105,
+      "local_service_status": "restricted",
+      "metadata_binding": "exact",
+      "published_metadata_fid": "SPAGOBCYLCITDTSHYCAL",
+      "reason_codes": [
+        "archive_contains_igcyl_nc_license",
+        "public_local_service_not_permitted"
+      ]
+    },
+    {
+      "audit_layer_id": 118,
+      "local_service_status": "restricted",
+      "metadata_binding": "exact",
+      "published_metadata_fid": "SPAGOBCYLMNADTSAMPZC",
+      "reason_codes": [
+        "wfs_igcyl_nc_requires_recipient_acceptance",
+        "wfs_paging_not_transaction_safe"
+      ]
+    },
+    {
+      "audit_layer_id": 123,
+      "local_service_status": "restricted",
+      "metadata_binding": "exact",
+      "published_metadata_fid": "spagobcyltemagrspac24rec",
+      "reason_codes": [
+        "https_directory_igcyl_nc_requires_recipient_acceptance",
+        "local_service_requires_persisted_human_review"
+      ]
+    },
+    {
+      "audit_layer_id": 137,
+      "local_service_status": "restricted",
+      "metadata_binding": "mismatch",
+      "published_metadata_fid": "spagobcyltemenaprorn2zec",
+      "reason_codes": [
+        "archive_contains_igcyl_nc_license",
+        "public_local_service_not_permitted"
+      ]
+    },
+    {
+      "audit_layer_id": 142,
+      "local_service_status": "restricted",
+      "metadata_binding": "mismatch",
+      "published_metadata_fid": "spagobcyltemmonprocomcyl",
+      "reason_codes": [
+        "wfs_igcyl_nc_requires_recipient_acceptance",
+        "wfs_paging_not_transaction_safe"
+      ]
+    },
+    {
+      "audit_layer_id": 151,
+      "local_service_status": "restricted",
+      "metadata_binding": "exact",
+      "published_metadata_fid": "spagobcyltemoteapsmigurb",
+      "reason_codes": [
+        "archive_contains_igcyl_nc_license",
+        "public_local_service_not_permitted"
+      ]
+    },
+    {
+      "audit_layer_id": 161,
+      "local_service_status": "restricted",
+      "metadata_binding": "exact",
+      "published_metadata_fid": "spagobcyltemenerensenafl",
+      "reason_codes": [
+        "wfs_igcyl_nc_requires_recipient_acceptance",
+        "wfs_paging_not_transaction_safe"
+      ]
+    },
+    {
+      "audit_layer_id": 166,
+      "local_service_status": "restricted",
+      "metadata_binding": "exact",
+      "published_metadata_fid": "spagobcyltemagrspac22rec",
+      "reason_codes": [
+        "https_directory_igcyl_nc_requires_recipient_acceptance",
+        "local_service_requires_persisted_human_review"
+      ]
+    },
+    {
+      "audit_layer_id": 171,
+      "local_service_status": "restricted",
+      "metadata_binding": "mismatch",
+      "published_metadata_fid": "spagobcyltemmontesconrep",
+      "reason_codes": [
+        "wfs_igcyl_nc_requires_recipient_acceptance",
+        "wfs_paging_not_transaction_safe"
+      ]
+    },
+    {
+      "audit_layer_id": 194,
+      "local_service_status": "restricted",
+      "metadata_binding": "exact",
+      "published_metadata_fid": "spagobcyltemenerensenacr",
+      "reason_codes": [
+        "wfs_igcyl_nc_requires_recipient_acceptance",
+        "wfs_paging_not_transaction_safe"
+      ]
+    },
+    {
+      "audit_layer_id": 197,
+      "local_service_status": "restricted",
+      "metadata_binding": "exact",
+      "published_metadata_fid": "spagobcyltemplamunsecdes",
+      "reason_codes": [
+        "archive_contains_igcyl_nc_license",
+        "public_local_service_not_permitted"
+      ]
+    },
+    {
+      "audit_layer_id": 213,
+      "local_service_status": "restricted",
+      "metadata_binding": "mismatch",
+      "published_metadata_fid": "spagobcyltemenaproznizhi",
+      "reason_codes": [
+        "archive_contains_igcyl_nc_license",
+        "public_local_service_not_permitted"
+      ]
+    },
+    {
+      "audit_layer_id": 223,
+      "local_service_status": "restricted",
+      "metadata_binding": "exact",
+      "published_metadata_fid": "spagobcylbasuadlimautesp",
+      "reason_codes": [
+        "archive_contains_igcyl_nc_license",
+        "public_local_service_not_permitted"
+      ]
+    },
+    {
+      "audit_layer_id": 225,
+      "local_service_status": "restricted",
+      "metadata_binding": "mismatch",
+      "published_metadata_fid": "spagobcyltemespprofauacr",
+      "reason_codes": [
+        "archive_contains_igcyl_nc_license",
+        "public_local_service_not_permitted"
+      ]
+    },
+    {
+      "audit_layer_id": 230,
+      "local_service_status": "restricted",
+      "metadata_binding": "mismatch",
+      "published_metadata_fid": "spagobcyltemenproznizpp",
+      "reason_codes": [
+        "archive_contains_igcyl_nc_license",
+        "public_local_service_not_permitted"
+      ]
+    },
+    {
+      "audit_layer_id": 232,
+      "local_service_status": "restricted",
+      "metadata_binding": "exact",
+      "published_metadata_fid": "spagobcyltemhabvegesprn2",
+      "reason_codes": [
+        "archive_contains_igcyl_nc_license",
+        "public_local_service_not_permitted"
+      ]
+    },
+    {
+      "audit_layer_id": 234,
+      "local_service_status": "restricted",
+      "metadata_binding": "exact",
+      "published_metadata_fid": "spagobcylbasuadlimproesp",
+      "reason_codes": [
+        "archive_contains_igcyl_nc_license",
+        "public_local_service_not_permitted"
+      ]
+    },
+    {
+      "audit_layer_id": 237,
+      "local_service_status": "restricted",
+      "metadata_binding": "exact",
+      "published_metadata_fid": "spagobcylbasentnucdispob",
+      "reason_codes": [
+        "archive_contains_igcyl_nc_license",
+        "public_local_service_not_permitted"
+      ]
+    },
+    {
+      "audit_layer_id": 243,
+      "local_service_status": "restricted",
+      "metadata_binding": "exact",
+      "published_metadata_fid": "spagobcyltempobinehab2024",
+      "reason_codes": [
+        "wfs_igcyl_nc_requires_recipient_acceptance",
+        "wfs_paging_not_transaction_safe"
+      ]
+    },
+    {
+      "audit_layer_id": 246,
+      "local_service_status": "restricted",
+      "metadata_binding": "exact",
+      "published_metadata_fid": "spagobcylbasentnuceatelm",
+      "reason_codes": [
+        "wfs_igcyl_nc_requires_recipient_acceptance",
+        "wfs_paging_not_transaction_safe"
+      ]
+    },
+    {
+      "audit_layer_id": 268,
+      "local_service_status": "restricted",
+      "metadata_binding": "mismatch",
+      "published_metadata_fid": "spagobcyltemcadnitagusub",
+      "reason_codes": [
+        "archive_contains_igcyl_nc_license",
+        "public_local_service_not_permitted"
+      ]
+    },
+    {
+      "audit_layer_id": 279,
+      "local_service_status": "restricted",
+      "metadata_binding": "exact",
+      "published_metadata_fid": "spagobcylbasuadlinmuncyl",
+      "reason_codes": [
+        "archive_contains_igcyl_nc_license",
+        "public_local_service_not_permitted"
+      ]
+    },
+    {
+      "audit_layer_id": 281,
+      "local_service_status": "restricted",
+      "metadata_binding": "exact",
+      "published_metadata_fid": "spagobcyltempobinehab2015",
+      "reason_codes": [
+        "wfs_igcyl_nc_requires_recipient_acceptance",
+        "wfs_paging_not_transaction_safe"
+      ]
+    },
+    {
+      "audit_layer_id": 296,
+      "local_service_status": "restricted",
+      "metadata_binding": "exact",
+      "published_metadata_fid": "spagobcyltemgesforrodale",
+      "reason_codes": [
+        "archive_contains_igcyl_nc_license",
+        "public_local_service_not_permitted"
+      ]
+    }
+  ],
+  "restricted_https_distributions": [
+    {
+      "audit_layer_id": 123,
+      "profile": "idecyl-sigpac-2024-https-provinces-20260727-v2",
+      "verified_on": "2026-07-27",
+      "root_directory_url": "https://ftp.itacyl.es/cartografia/05_SIGPAC/2024_ETRS89/",
+      "province_directory_url": "https://ftp.itacyl.es/cartografia/05_SIGPAC/2024_ETRS89/Parcelario_SIGPAC_CyL_Provincias/",
+      "root_index_sha256": "28d5a28dee3dcee8cc1d21801d508ed959cbe212143664013e8acceb256655b4",
+      "province_index_sha256": "7a0cf5e12369b9bd6f6380220aa43a48fca910bc01d0c2967f87903455bd0479",
+      "archive_names": [
+        "AVILA.zip",
+        "BURGOS.zip",
+        "LEON.zip",
+        "PALENCIA.zip",
+        "SALAMANCA.zip",
+        "SEGOVIA.zip",
+        "SORIA.zip",
+        "VALLADOLID.zip",
+        "ZAMORA.zip"
+      ],
+      "selection_rule": "exact_nine_castilla_y_leon_province_archives_v1",
+      "license_name": "LICENCIA-IGCYL-NC",
+      "license_url": "https://ftp.itacyl.es/cartografia/LICENCIA-IGCYL-NC-2012.pdf",
+      "authorization_effect": "none_without_persisted_human_mirror_review"
+    },
+    {
+      "audit_layer_id": 166,
+      "profile": "idecyl-sigpac-2022-https-provinces-20260727-v2",
+      "verified_on": "2026-07-27",
+      "root_directory_url": "https://ftp.itacyl.es/cartografia/05_SIGPAC/2022_ETRS89/",
+      "province_directory_url": "https://ftp.itacyl.es/cartografia/05_SIGPAC/2022_ETRS89/Parcelario_SIGPAC_CyL_Provincias/",
+      "root_index_sha256": "6f7d6c29bf2c42660f17a75dcb0efb7b8321e5de69a60a8c7ebdb69fdeae7ebd",
+      "province_index_sha256": "4ef68079eb3f3dea123397398015b1f16afde5ad8bac9c9a1120b0cc0ca47f5b",
+      "archive_names": [
+        "AVILA.zip",
+        "BURGOS.zip",
+        "LEON.zip",
+        "PALENCIA.zip",
+        "SALAMANCA.zip",
+        "SEGOVIA.zip",
+        "SORIA.zip",
+        "VALLADOLID.zip",
+        "ZAMORA.zip"
+      ],
+      "selection_rule": "exact_nine_castilla_y_leon_province_archives_v1",
+      "license_name": "LICENCIA-IGCYL-NC",
+      "license_url": "https://ftp.itacyl.es/cartografia/LICENCIA-IGCYL-NC-2012.pdf",
+      "authorization_effect": "none_without_persisted_human_mirror_review"
+    }
+  ],
+  "candidate_source": {
+    "audit_layer_id": 39,
+    "profile": "idecyl-telefonia-carreteras-gpkgzip-20260727-v2",
+    "selected_protocol": "download",
+    "selected_target_kind": "vector",
+    "selected_endpoint_url": "https://opendata.jcyl.es/ficheros/carto/comunicaciones/telecom/telefonia_movil_cyl_cobertura_carreteras_gpkg.zip",
+    "selected_remote_name": "telefonia_movil_cyl_cobertura_carreteras",
+    "selected_sync_strategy": "conditional_get",
+    "data_format": "geopackage-zip",
+    "media_type": "application/x-zip-compressed",
+    "archive_member": "telefonia_movil_cyl_cobertura_carreteras.gpkg",
+    "input_layer": "telefonia_movil_cyl_cobertura_carreteras",
+    "archive_max_uncompressed_bytes": 67108864,
+    "direct_distribution": {
+      "archive_sha256": "a2ef017ba261e9acf35836a6110b019d14529c5c8b893b176367be8d4bd2d80f",
+      "content_length": 15128443,
+      "entry_count": 9,
+      "uncompressed_bytes": 30507569,
+      "last_modified": "Tue, 24 Mar 2026 23:04:49 GMT",
+      "etag": "\"fcbccd9de2bbdc1:0\"",
+      "accept_ranges": true
+    },
+    "official_metadata": {
+      "fid": "spagobcyltemtlccobmovcar",
+      "title": "Telefonía móvil CyL: cobertura carreteras 2025",
+      "record_raw_sha256": "200b764090aa2a481b862ae3f074df80da5198a0ff9a3a0d93f2a34dc3547569",
+      "terms_url": "https://datosabiertos.jcyl.es/web/jcyl/RISP/es/Plantilla100/1284235967637/_/_/_",
+      "attribution": "© Junta de Castilla y León",
+      "reuse_summary": "Uso libre y gratuito; cita obligada a la propiedad de la fuente.",
+      "archive_metadata_sha256": "ce258098327ad81db7cf895651c3145e15020e836b97c88e1fb77c889f6ffe58",
+      "archive_readme_sha256": "c30449d60d6b23ce34838e57a80c0daf965c9aff02501cc786f3b61519c3056c",
+      "lineage_caveat": "Los datos de cobertura fueron adquiridos mediante una suscripción externa a la base de datos de cobertura móvil GeoHash; el registro y el archivo no expresan una reserva específica de derechos de ese tercero."
+    },
+    "archive_styles": [
+      {
+        "remote_name": "telefonia_movil_cyl_cobertura_carreteras_4g_cnmc",
+        "archive_member": "telefonia_movil_cyl_cobertura_carreteras_4g_cnmc.sld",
+        "sha256": "2995abceba55d608c909d2724e2ce11eec4707ebde91c0da0882b917c455658d"
+      },
+      {
+        "remote_name": "telefonia_movil_cyl_cobertura_carreteras_5g_cnmc_mj",
+        "archive_member": "telefonia_movil_cyl_cobertura_carreteras_5g_cnmc_mj.sld",
+        "sha256": "1671f145a59cec3e0311135d82e9f758cae2aa25e155df8406bad898a4e89ea3"
+      },
+      {
+        "remote_name": "telefonia_movil_cyl_cobertura_carreteras_tc_cnmc_mj",
+        "archive_member": "telefonia_movil_cyl_cobertura_carreteras.sld",
+        "sha256": "8bb06e986094c0615377e8515b00a6569e3a83974b8cbd861868e2cd9d2dc24d"
+      }
+    ],
+    "source_content_parity": {
+      "schema_version": "reference-source-content-parity-spec/v1",
+      "expected": {
+        "archive_sha256": "a2ef017ba261e9acf35836a6110b019d14529c5c8b893b176367be8d4bd2d80f",
+        "archive_size_bytes": 15128443,
+        "archive_entry_count": 9,
+        "archive_uncompressed_bytes": 30507569,
+        "archive_member": "telefonia_movil_cyl_cobertura_carreteras.gpkg",
+        "archive_member_crc32": "54cf2ecf",
+        "archive_member_size_bytes": 30257152,
+        "archive_member_sha256": "aafcb66667ddada76d1d544f323df067e6812e2a1ff4aaef155b4bcbefa6c7ec",
+        "feature_layer": "telefonia_movil_cyl_cobertura_carreteras",
+        "feature_layers": [
+          "telefonia_movil_cyl_cobertura_carreteras"
+        ],
+        "feature_count": 11791,
+        "geometry_type": "MULTICURVE",
+        "crs": "EPSG:25830",
+        "declared_bounds": {
+          "west": 168237.799850254,
+          "south": 4440957.340005213,
+          "east": 597820.9034,
+          "north": 4780213.362590703
+        },
+        "geometry_bounds": {
+          "west": 168237.799850254,
+          "south": 4440957.340005213,
+          "east": 597820.9034,
+          "north": 4780213.362590703
+        },
+        "empty_geometry_count": 0,
+        "data_schema_sha256": "2162a000496895384f15e17c1192ed2ac276921244a62c2530ff1e340e9cac0e",
+        "sample_sha256": "4364e40337a9781488aaf5ac3e1dc472db29d16f351fdde4eca72e1138e562e7",
+        "content_identity_sha256": "4c0e3d479a6668837a3f31f3e6b98ecfc48fb6e733d8c959ac013107a6ee6fd0"
+      },
+      "spec_sha256": "fb86dd729e3f679cc8899bf47f340f35ced01ba6dea82daa6d12cb57ea6f56e8"
+    },
+    "review_requirements": [
+      "Confirmar que las condiciones enlazadas permiten conservar el archivo y publicar un servicio local derivado.",
+      "Confirmar que la atribución «© Junta de Castilla y León» es suficiente en el servicio local.",
+      "Valorar expresamente la advertencia de procedencia GeoHash por suscripción externa antes de autorizar."
+    ],
+    "authorization_effect": "none_without_persisted_human_mirror_review"
+  }
+}

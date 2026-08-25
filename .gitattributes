@@ -1,0 +1,2 @@
+# Hash-bound upstream evidence must retain the exact downloaded bytes.
+backend/app/reference_layers/evidence/** -text -whitespace

@@ -21,7 +21,7 @@ describe("modelo de navegación municipal", () => {
       sections.every((section) => section.items.every((item) => item.enabled)),
     ).toBe(true);
     // El modelo declarado y el visible ya coinciden: todas las pantallas del
-    // menú fijo de ADR-034 están construidas. `visibleTopNavSections` sigue
+    // menú fijo de ADR-048 están construidas. `visibleTopNavSections` sigue
     // filtrando, que es lo que protege el día que se declare una entrada nueva.
     expect(sections.length).toBe(TOP_NAV_SECTIONS.length);
     expect(

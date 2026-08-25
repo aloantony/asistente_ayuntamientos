@@ -1969,7 +1969,9 @@ def test_realtime_session_creates_openai_client_secret(
         )
         return FakeHTTPResponse({"value": "ek_test", "expires_at": 123})
 
-    monkeypatch.setattr("app.assistant.realtime.urlrequest.urlopen", fake_urlopen)
+    monkeypatch.setattr(
+        "app.assistant.realtime.urlopen_without_redirects", fake_urlopen
+    )
     conversation = client.post(
         "/assistant/conversations",
         json={},
@@ -2187,7 +2189,9 @@ def test_realtime_session_history_marks_finished_actions_as_already_processed(
         captured["payload"] = json.loads(request.data.decode("utf-8"))
         return FakeHTTPResponse({"value": "ek_test", "expires_at": 123})
 
-    monkeypatch.setattr("app.assistant.realtime.urlrequest.urlopen", fake_urlopen)
+    monkeypatch.setattr(
+        "app.assistant.realtime.urlopen_without_redirects", fake_urlopen
+    )
     session_response = client.post(
         f"/assistant/conversations/{conversation['id']}/realtime/session",
         headers=headers_for(user),
@@ -7932,7 +7936,12 @@ def test_hermes_blocking_timeout_is_classified_as_turn_timeout(monkeypatch):
     def raise_timeout(*args, **kwargs):
         raise TimeoutError("socket deadline")
 
-    monkeypatch.setattr(assistant_gateway.urlrequest, "urlopen", raise_timeout)
+    # El gateway sale por `urlopen_without_redirects` (ADR-036), no por
+    # `urlrequest.urlopen`: parchear el seam viejo dejaba pasar una
+    # conexión real y el fallo llegaba como caída, no como plazo agotado.
+    monkeypatch.setattr(
+        assistant_gateway, "urlopen_without_redirects", raise_timeout
+    )
 
     with pytest.raises(AssistantTimeoutError):
         assistant_gateway.complete_hermes_agent(

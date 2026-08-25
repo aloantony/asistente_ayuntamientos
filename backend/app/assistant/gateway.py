@@ -24,6 +24,7 @@ from urllib import request as urlrequest
 import anthropic
 
 from app.core.config import settings
+from app.core.http import urlopen_without_redirects
 
 logger = logging.getLogger(__name__)
 
@@ -43,13 +44,6 @@ class AssistantUnavailableError(Exception):
 
 class AssistantTimeoutError(AssistantUnavailableError):
     """The AI gateway exceeded the timeout assigned to this request."""
-
-
-class _RejectOpenAIRedirects(urlrequest.HTTPRedirectHandler):
-    """Never forward an OpenAI bearer token through an HTTP redirect."""
-
-    def redirect_request(self, req, fp, code, msg, headers, newurl):
-        return None
 
 
 @dataclass(frozen=True)
@@ -847,8 +841,7 @@ def _openai_responses_headers(*, accept: str) -> dict[str, str]:
 
 
 def _openai_responses_urlopen(request, *, timeout: float):
-    opener = urlrequest.build_opener(_RejectOpenAIRedirects())
-    return opener.open(request, timeout=timeout)
+    return urlopen_without_redirects(request, timeout=timeout)
 
 
 def _iter_openai_responses_sse(
@@ -965,7 +958,7 @@ def hermes_agent_healthy(*, timeout: float) -> bool:
         method="GET",
     )
     try:
-        with urlrequest.urlopen(request, timeout=timeout) as response:
+        with urlopen_without_redirects(request, timeout=timeout) as response:
             return 200 <= response.status < 300
     except (urlerror.HTTPError, urlerror.URLError, TimeoutError):
         return False
@@ -1004,7 +997,7 @@ def complete_hermes_agent(
     )
 
     try:
-        with urlrequest.urlopen(request, timeout=timeout) as response:
+        with urlopen_without_redirects(request, timeout=timeout) as response:
             response_data = json.loads(response.read().decode("utf-8"))
     except urlerror.HTTPError as error:
         logger.error(
@@ -1082,7 +1075,7 @@ def complete_hermes_agent_stream(
     response_model = model
     tool_calls: dict[int, dict] = {}
     try:
-        with urlrequest.urlopen(request, timeout=timeout) as response:
+        with urlopen_without_redirects(request, timeout=timeout) as response:
             while True:
                 raw_line = response.readline()
                 if not raw_line:

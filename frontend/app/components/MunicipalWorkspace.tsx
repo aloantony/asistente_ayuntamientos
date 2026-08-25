@@ -5,6 +5,7 @@ import {
   Building2,
   CircleAlert,
   ClipboardList,
+  CloudSun,
   Landmark,
   Map as MapIcon,
   RefreshCw,
@@ -20,6 +21,7 @@ import {
   useEffect,
   useRef,
   useState,
+  type DragEvent,
   type KeyboardEvent,
 } from "react";
 import { fetchMunicipality } from "../lib/fetchers";
@@ -38,8 +40,13 @@ import {
   canViewMunicipalHub,
   canViewStaff as hasStaffAccess,
 } from "../lib/permissions";
-import { useSession } from "../lib/session";
+import { canEditTownHall, useSession } from "../lib/session";
 import styles from "./MunicipalWorkspace.module.css";
+import { townHallShieldUrl } from "../lib/api";
+import { useTownHallController } from "../lib/useTownHallController";
+import { TownHallContentPanel } from "./TownHallContentPanel";
+import { TownHallEpigraphCard } from "./TownHallEpigraphCard";
+import { TownHallNavEditor } from "./TownHallNavEditor";
 import {
   fetchClimateSeries,
   fetchHouseholdSeries,
@@ -104,14 +111,76 @@ import {
   type Ordinance,
   type StaffPost,
   type StaffWorker,
+  type TownHall,
+  type TownHallNavSection,
   type User,
 } from "./types";
 
+// Las áreas fijas conservan sus claves literales (ADR-048); los apartados que
+// el usuario crea en el editor del menú se identifican con el id de su bloque
+// (ADR-034). Ambas viven en la misma tira de pestañas: ver ADR-052.
+type CustomTab = `block-${number}`;
+type ActiveTab = WorkspaceTab | CustomTab;
+
 type TabDefinition = {
-  id: WorkspaceTab;
+  id: ActiveTab;
   label: string;
   icon: LucideIcon;
 };
+
+function isCustomTab(tab: string): tab is CustomTab {
+  return /^block-\d+$/.test(tab);
+}
+
+/** Localiza la pestaña de un bloque: si es un epígrafe, la de su pestaña padre.
+ *  Sirve para que los enlaces antiguos a un epígrafe sigan llevando a su sitio,
+ *  ahora que un epígrafe es una tarjeta dentro de una pestaña y no una pestaña. */
+function findTabForBlock(townHall: TownHall | null, tab: ActiveTab) {
+  if (townHall === null || !isCustomTab(tab)) {
+    return null;
+  }
+
+  const blockId = Number(tab.slice("block-".length));
+  for (const section of townHall.nav) {
+    if (section.id === blockId) {
+      return { sectionId: section.id, epigraphId: null as number | null };
+    }
+    if (section.items.some((candidate) => candidate.id === blockId)) {
+      return { sectionId: section.id, epigraphId: blockId };
+    }
+  }
+
+  return null;
+}
+
+/** Reordena los epígrafes de una pestaña colocando el arrastrado ante el
+ *  destino. Devuelve el árbol completo porque es lo que guarda el backend. */
+function moveEpigraph(
+  nav: TownHallNavSection[],
+  sectionId: number,
+  draggedId: number,
+  targetId: number,
+) {
+  if (draggedId === targetId) {
+    return null;
+  }
+
+  const section = nav.find((candidate) => candidate.id === sectionId);
+  const from = section?.items.findIndex((item) => item.id === draggedId) ?? -1;
+  const to = section?.items.findIndex((item) => item.id === targetId) ?? -1;
+
+  if (section === undefined || from === -1 || to === -1) {
+    return null;
+  }
+
+  const items = [...section.items];
+  const [moved] = items.splice(from, 1);
+  items.splice(to, 0, moved);
+
+  return nav.map((candidate) =>
+    candidate.id === sectionId ? { ...candidate, items } : candidate,
+  );
+}
 
 // Rótulos tomados de la navegación municipal de referencia. Los identificadores
 // no cambian: se usan en enlaces `?tab=` repartidos por el producto.
@@ -124,6 +193,26 @@ const TAB_DEFINITIONS: TabDefinition[] = [
   { id: "roadmap", label: "Hoja de ruta", icon: ClipboardList },
 ];
 
+/** Convierte el texto libre del editor de series en puntos. Una línea por
+ *  punto, «etiqueta: valor»; lo que no encaje se descarta en silencio. */
+function parseSeriesPoints(raw: string) {
+  const points: { x: string; y: number }[] = [];
+
+  for (const line of raw.split("\n")) {
+    const separator = line.lastIndexOf(":");
+    if (separator === -1) {
+      continue;
+    }
+    const x = line.slice(0, separator).trim();
+    const y = Number(line.slice(separator + 1).trim().replace(",", "."));
+    if (x && Number.isFinite(y)) {
+      points.push({ x, y });
+    }
+  }
+
+  return points;
+}
+
 function isWorkspaceTab(value: string | null): value is WorkspaceTab {
   return TAB_DEFINITIONS.some(({ id }) => id === value);
 }
@@ -132,15 +221,23 @@ function isWorkspaceTab(value: string | null): value is WorkspaceTab {
 // donde dice, el botón atrás funciona y el rótulo no se queda desincronizado.
 export function resolveWorkspaceTab(
   searchParams: Pick<URLSearchParams, "get">,
-): WorkspaceTab {
+): ActiveTab {
   const requestedTab = searchParams.get("tab");
-  return isWorkspaceTab(requestedTab) ? requestedTab : "summary";
+  if (isWorkspaceTab(requestedTab)) {
+    return requestedTab;
+  }
+  // Los apartados propios se aceptan por su forma: el árbol del menú todavía
+  // no ha llegado cuando se lee la URL. Si luego resulta que no existe, el
+  // panel lo dice; no se puede validar aquí.
+  return requestedTab !== null && isCustomTab(requestedTab)
+    ? requestedTab
+    : "summary";
 }
 
 export function buildWorkspaceTabHref(
   pathname: string,
   searchParams: Pick<URLSearchParams, "toString">,
-  tab: WorkspaceTab,
+  tab: ActiveTab,
 ) {
   const params = new URLSearchParams(searchParams.toString());
   // «summary» es el valor por defecto: no se escribe en la URL para que la
@@ -248,6 +345,16 @@ function MunicipalWorkspaceContent() {
   const [loadAttempt, setLoadAttempt] = useState(0);
   const requestSequenceRef = useRef(0);
   const tabButtonRefs = useRef<Array<HTMLButtonElement | null>>([]);
+  const [isMenuEditorOpen, setIsMenuEditorOpen] = useState(false);
+  const [isShieldTargeted, setIsShieldTargeted] = useState(false);
+  // Tarjetas de epígrafe desplegadas y epígrafe que se está arrastrando. Es
+  // estado de presentación, no de selección: la URL sigue llevando la pestaña.
+  const [openEpigraphIds, setOpenEpigraphIds] = useState<number[]>([]);
+  const [draggedEpigraphId, setDraggedEpigraphId] = useState<number | null>(
+    null,
+  );
+  // Pestaña a la que ya se le desplegó el primer epígrafe.
+  const expandedTabRef = useRef<ActiveTab | null>(null);
 
   const contexts = user ? getMunicipalContexts(user) : [];
   const selectedContext =
@@ -256,6 +363,11 @@ function MunicipalWorkspaceContent() {
     ) ??
     contexts[0] ??
     null;
+  const activeOrganizationId = selectedContext?.organization.id ?? null;
+  const townHallController = useTownHallController({
+    handleRequestError,
+    organizationId: activeOrganizationId,
+  });
   const permissionSignature = (user?.permissions ?? []).slice().sort().join(",");
   const canViewOrdinances = Boolean(
     user &&
@@ -623,6 +735,91 @@ function MunicipalWorkspaceContent() {
     loadAttempt,
   ]);
 
+  // Perfil del municipio y menú configurable: se cargan aparte de los módulos
+  // operativos, para que un fallo en uno no arrastre al otro (ADR-034).
+  useEffect(() => {
+    if (!user || !canViewMunicipalHub(user) || activeOrganizationId === null) {
+      return;
+    }
+
+    void townHallController.loadTownHall();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [user?.id, activeOrganizationId]);
+
+  const weatherEnabled = townHallController.townHall?.profile.weather_enabled;
+  const weatherLocation = townHallController.townHall?.profile.weather_location;
+
+  useEffect(() => {
+    if (!weatherEnabled) {
+      return;
+    }
+
+    void townHallController.loadWeather();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [weatherEnabled, weatherLocation]);
+
+  // Cambia cuando el árbol se recarga con otras pestañas o epígrafes.
+  const navSignature = (townHallController.townHall?.nav ?? [])
+    .map(
+      (section) =>
+        `${section.id}:${section.items.map((item) => item.id).join("-")}`,
+    )
+    .join("|");
+
+  // Al entrar en una pestaña propia se despliega su primer epígrafe: abrirla
+  // con todo plegado no enseñaría nada. Solo una vez por pestaña, para no
+  // volver a plegar lo que el usuario abra después de renombrar o reordenar.
+  useEffect(() => {
+    const currentTownHall = townHallController.townHall;
+
+    if (!isCustomTab(activeTab)) {
+      expandedTabRef.current = null;
+      setOpenEpigraphIds((current) => (current.length === 0 ? current : []));
+      return;
+    }
+
+    const placement = findTabForBlock(currentTownHall, activeTab);
+
+    if (placement === null) {
+      return;
+    }
+
+    // Un enlace antiguo podía apuntar a un epígrafe: hoy es una tarjeta, así
+    // que se traduce a su pestaña, con esa tarjeta ya desplegada.
+    if (placement.epigraphId !== null) {
+      expandedTabRef.current = `block-${placement.sectionId}`;
+      setOpenEpigraphIds([placement.epigraphId]);
+      selectWorkspaceTab(`block-${placement.sectionId}`);
+      return;
+    }
+
+    if (expandedTabRef.current === activeTab) {
+      return;
+    }
+
+    expandedTabRef.current = activeTab;
+    const section = currentTownHall?.nav.find(
+      ({ id }) => id === placement.sectionId,
+    );
+    const first = section?.items[0]?.id;
+    setOpenEpigraphIds(first === undefined ? [] : [first]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeTab, navSignature]);
+
+  // Cada tarjeta desplegada trae su propio contenido; las plegadas no piden
+  // nada. Un fallo deja la tarjeta sin contenido y con su botón de reintento,
+  // así que no se vuelve a pedir solo.
+  const openEpigraphKey = openEpigraphIds.join(",");
+
+  useEffect(() => {
+    for (const blockId of openEpigraphIds) {
+      if (townHallController.contents[blockId] === undefined) {
+        void townHallController.loadContent(blockId);
+      }
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [openEpigraphKey]);
+
   if (!user) {
     return null;
   }
@@ -634,8 +831,25 @@ function MunicipalWorkspaceContent() {
   }
 
   const isPaused = selectedContext.organization.status === "paused";
+  const townHall = townHallController.townHall;
+  const canEditMenu = canEditTownHall(user);
+  const municipalityLabel =
+    townHall?.profile.display_name?.trim() || selectedContext.municipality.name;
+
+  // Las pestañas del editor se añaden tras las áreas fijas, de modo que la
+  // tira siga siendo una sola navegación (ADR-052).
+  const workspaceTabs: TabDefinition[] = [
+    ...TAB_DEFINITIONS,
+    ...(townHall?.nav ?? []).map((section) => ({
+      id: `block-${section.id}` as CustomTab,
+      label: section.title,
+      icon: Landmark,
+    })),
+  ];
+  const activeSection =
+    townHall?.nav.find(({ id }) => `block-${id}` === activeTab) ?? null;
   const activeTabDefinition =
-    TAB_DEFINITIONS.find((tab) => tab.id === activeTab) ?? TAB_DEFINITIONS[0];
+    workspaceTabs.find((tab) => tab.id === activeTab) ?? workspaceTabs[0];
 
   function handleTabKeyDown(
     event: KeyboardEvent<HTMLButtonElement>,
@@ -644,14 +858,14 @@ function MunicipalWorkspaceContent() {
     let nextIndex: number | null = null;
 
     if (event.key === "ArrowRight") {
-      nextIndex = (currentIndex + 1) % TAB_DEFINITIONS.length;
+      nextIndex = (currentIndex + 1) % workspaceTabs.length;
     } else if (event.key === "ArrowLeft") {
       nextIndex =
-        (currentIndex - 1 + TAB_DEFINITIONS.length) % TAB_DEFINITIONS.length;
+        (currentIndex - 1 + workspaceTabs.length) % workspaceTabs.length;
     } else if (event.key === "Home") {
       nextIndex = 0;
     } else if (event.key === "End") {
-      nextIndex = TAB_DEFINITIONS.length - 1;
+      nextIndex = workspaceTabs.length - 1;
     }
 
     if (nextIndex === null) {
@@ -659,17 +873,17 @@ function MunicipalWorkspaceContent() {
     }
 
     event.preventDefault();
-    selectWorkspaceTab(TAB_DEFINITIONS[nextIndex].id);
+    selectWorkspaceTab(workspaceTabs[nextIndex].id);
     tabButtonRefs.current[nextIndex]?.focus();
   }
 
-  function selectWorkspaceTab(tab: WorkspaceTab, moveFocus = false) {
+  function selectWorkspaceTab(tab: ActiveTab, moveFocus = false) {
     router.replace(buildWorkspaceTabHref(pathname, searchParams, tab), {
       scroll: false,
     });
 
     if (moveFocus) {
-      const tabIndex = TAB_DEFINITIONS.findIndex(({ id }) => id === tab);
+      const tabIndex = workspaceTabs.findIndex(({ id }) => id === tab);
       window.requestAnimationFrame(() => {
         tabButtonRefs.current[tabIndex]?.focus();
       });
@@ -707,6 +921,56 @@ function MunicipalWorkspaceContent() {
     selectWorkspaceTab("summary");
   }
 
+  function handleShieldDrop(event: DragEvent<HTMLSpanElement>) {
+    event.preventDefault();
+    setIsShieldTargeted(false);
+
+    const file = event.dataTransfer.files?.[0];
+    if (canEditMenu && file && file.type.startsWith("image/")) {
+      void townHallController.uploadShield(file);
+    }
+  }
+
+  function toggleEpigraph(blockId: number) {
+    setOpenEpigraphIds((current) =>
+      current.includes(blockId)
+        ? current.filter((id) => id !== blockId)
+        : [...current, blockId],
+    );
+  }
+
+  // Reordenar por arrastre o por el menú acaba en el mismo sitio: el árbol
+  // entero, que es lo que el backend guarda de una vez.
+  function reorderEpigraph(draggedId: number, targetId: number) {
+    if (townHall === null || activeSection === null) {
+      return;
+    }
+
+    const next = moveEpigraph(
+      townHall.nav,
+      activeSection.id,
+      draggedId,
+      targetId,
+    );
+
+    if (next !== null) {
+      void townHallController.reorderNav(next);
+    }
+  }
+
+  function moveEpigraphBy(blockId: number, offset: number) {
+    if (activeSection === null) {
+      return;
+    }
+
+    const index = activeSection.items.findIndex(({ id }) => id === blockId);
+    const target = activeSection.items[index + offset];
+
+    if (target !== undefined) {
+      reorderEpigraph(blockId, target.id);
+    }
+  }
+
   function retryWorkspace() {
     setLoadAttempt((value) => value + 1);
   }
@@ -715,12 +979,40 @@ function MunicipalWorkspaceContent() {
     <section className={styles.workspace}>
       <header className={styles.masthead}>
         <div className={styles.identity}>
-          <span className={styles.municipalityMark} aria-hidden="true">
-            {getInitials(selectedContext.municipality.name)}
+          {/* El escudo sustituye a las iniciales cuando se ha subido uno; se
+              reemplaza soltando una imagen encima (ADR-034). */}
+          <span
+            aria-hidden="true"
+            className={`${styles.municipalityMark}${
+              isShieldTargeted ? ` ${styles.municipalityMarkTargeted}` : ""
+            }`}
+            onDragLeave={() => setIsShieldTargeted(false)}
+            onDragOver={(event) => {
+              if (!canEditMenu) {
+                return;
+              }
+              event.preventDefault();
+              setIsShieldTargeted(true);
+            }}
+            onDrop={handleShieldDrop}
+            title={
+              canEditMenu
+                ? "Arrastra una imagen para cambiar el escudo"
+                : undefined
+            }
+          >
+            {townHall?.profile.has_shield ? (
+              <img
+                alt=""
+                src={townHallShieldUrl(townHallController.shieldVersion)}
+              />
+            ) : (
+              getInitials(municipalityLabel)
+            )}
           </span>
           <div>
             <p>Espacio municipal</p>
-            <h1>{selectedContext.municipality.name}</h1>
+            <h1>{municipalityLabel}</h1>
             <span>
               {selectedContext.municipality.province} ·{" "}
               {selectedContext.municipality.autonomous_community}
@@ -751,6 +1043,27 @@ function MunicipalWorkspaceContent() {
           <small>
             {isPaused ? "Modo de consulta · organización pausada" : "Datos en producción"}
           </small>
+          {townHall?.profile.weather_enabled ? (
+            <span
+              className={styles.weatherBlock}
+              title={
+                townHallController.weather
+                  ? `Temperatura de hoy en ${townHallController.weather.location}`
+                  : "Temperatura no disponible ahora mismo"
+              }
+            >
+              <CloudSun aria-hidden="true" size={18} strokeWidth={1.6} />
+              {/* Si el proveedor no responde se muestra un guion, nunca una
+                  cifra inventada (ADR-034). */}
+              <strong>
+                {townHallController.weather
+                  ? `${Math.round(
+                      townHallController.weather.temperature_celsius,
+                    )}°C`
+                  : "—"}
+              </strong>
+            </span>
+          ) : null}
         </div>
       </header>
 
@@ -762,7 +1075,33 @@ function MunicipalWorkspaceContent() {
       ) : null}
 
       <nav aria-label="Áreas del ayuntamiento" className={styles.tabs} role="tablist">
-        {TAB_DEFINITIONS.map(({ id, label, icon: Icon }, index) => (
+        {canEditMenu ? (
+          <button
+            aria-label="Gestionar pestañas"
+            className={styles.tabsManage}
+            onClick={() => setIsMenuEditorOpen(true)}
+            title="Gestionar pestañas"
+            type="button"
+          >
+            {/* El prototipo abre las pestañas con el mismo asa de seis puntos
+                que las tarjetas, no con un engranaje. */}
+            <svg
+              aria-hidden="true"
+              fill="currentColor"
+              height="14"
+              viewBox="0 0 24 24"
+              width="14"
+            >
+              <circle cx="9" cy="6" r="1.5" />
+              <circle cx="15" cy="6" r="1.5" />
+              <circle cx="9" cy="12" r="1.5" />
+              <circle cx="15" cy="12" r="1.5" />
+              <circle cx="9" cy="18" r="1.5" />
+              <circle cx="15" cy="18" r="1.5" />
+            </svg>
+          </button>
+        ) : null}
+        {workspaceTabs.map(({ id, label, icon: Icon }, index) => (
           <button
             aria-controls={`municipal-panel-${id}`}
             aria-selected={activeTab === id}
@@ -906,7 +1245,7 @@ function MunicipalWorkspaceContent() {
             posts={staffPosts}
             workers={staffWorkers}
           />
-        ) : (
+        ) : activeTab === "roadmap" ? (
           <HojaDeRuta
             assets={assets}
             canViewMap={canViewMap}
@@ -915,8 +1254,199 @@ function MunicipalWorkspaceContent() {
             organizationId={selectedContext.organization.id}
             user={user}
           />
+        ) : activeSection !== null ? (
+          <div className={styles.tabContent}>
+            {activeSection.items.length === 0 ? (
+              <section className={`panel ${styles.pageState}`}>
+                <Landmark aria-hidden="true" size={28} strokeWidth={1.6} />
+                <p className="eyebrow">{activeSection.title}</p>
+                <h1>Sin epígrafes</h1>
+                <p className="muted">
+                  {canEditMenu
+                    ? "Añade el primero desde «Gestionar pestañas», el botón que abre la fila."
+                    : "Esta pestaña todavía no tiene contenido."}
+                </p>
+              </section>
+            ) : (
+              // Epígrafes apilados en tarjetas, como el prototipo: una por
+              // epígrafe, plegables y reordenables por arrastre.
+              <article className="townhall-epigraph-stack">
+                {activeSection.items.map((item, index) => {
+                  const content = townHallController.contents[item.id];
+                  const isLoadingEpigraph =
+                    townHallController.loadingContentIds.includes(item.id);
+
+                  return (
+                    <TownHallEpigraphCard
+                      canEdit={canEditMenu}
+                      canMoveDown={index < activeSection.items.length - 1}
+                      canMoveUp={index > 0}
+                      isOpen={openEpigraphIds.includes(item.id)}
+                      isSaving={townHallController.isSavingTownHall}
+                      key={item.id}
+                      onDelete={() =>
+                        void townHallController.archiveBlock(item.id)
+                      }
+                      onDragStart={() => setDraggedEpigraphId(item.id)}
+                      onDrop={() => {
+                        if (draggedEpigraphId !== null) {
+                          reorderEpigraph(draggedEpigraphId, item.id);
+                          setDraggedEpigraphId(null);
+                        }
+                      }}
+                      onMoveDown={() => moveEpigraphBy(item.id, 1)}
+                      onMoveUp={() => moveEpigraphBy(item.id, -1)}
+                      onRename={(title) =>
+                        void townHallController.renameBlock(item.id, title)
+                      }
+                      onToggle={() => toggleEpigraph(item.id)}
+                      title={item.title}
+                    >
+                      {content !== undefined ? (
+                        <TownHallContentPanel
+                          canEdit={canEditMenu}
+                          content={content}
+                          embedded
+                          isSaving={townHallController.isSavingTownHall}
+                          onAdd={() =>
+                            void townHallController.addContentItem(
+                              item.id,
+                              "Nuevo elemento",
+                            )
+                          }
+                          onAddAttachment={(itemId, file) =>
+                            void townHallController.addAttachment(
+                              item.id,
+                              itemId,
+                              file,
+                            )
+                          }
+                          onArchive={(itemId) =>
+                            void townHallController.archiveContentItem(
+                              item.id,
+                              itemId,
+                            )
+                          }
+                          onChangeLayout={(layout) =>
+                            void townHallController.setSectionLayout(
+                              item.id,
+                              layout,
+                            )
+                          }
+                          onRemoveAttachment={(itemId, attachmentIndex) =>
+                            void townHallController.removeAttachment(
+                              item.id,
+                              itemId,
+                              attachmentIndex,
+                            )
+                          }
+                          onSaveBody={(itemId, body) =>
+                            void townHallController.saveContentItem(
+                              item.id,
+                              itemId,
+                              { body: body.trim() === "" ? null : body },
+                            )
+                          }
+                          onSaveFields={(itemId, fields) =>
+                            void townHallController.saveContentFields(
+                              item.id,
+                              itemId,
+                              fields,
+                            )
+                          }
+                          onSavePoints={(itemId, raw) =>
+                            void townHallController.saveContentPoints(
+                              item.id,
+                              itemId,
+                              parseSeriesPoints(raw),
+                            )
+                          }
+                          onSaveTitle={(itemId, title) =>
+                            void townHallController.saveContentItem(
+                              item.id,
+                              itemId,
+                              { title },
+                            )
+                          }
+                        />
+                      ) : isLoadingEpigraph ? (
+                        <p
+                          aria-live="polite"
+                          className="townhall-epigraph-state"
+                          role="status"
+                        >
+                          Cargando el contenido…
+                        </p>
+                      ) : (
+                        <div className="townhall-epigraph-state">
+                          <p>No se pudo cargar el contenido de este epígrafe.</p>
+                          <button
+                            className={styles.primaryAction}
+                            onClick={() =>
+                              void townHallController.loadContent(item.id)
+                            }
+                            type="button"
+                          >
+                            Reintentar
+                          </button>
+                        </div>
+                      )}
+                    </TownHallEpigraphCard>
+                  );
+                })}
+              </article>
+            )}
+          </div>
+        ) : (
+          // Pestaña propia cuyo árbol todavía no ha llegado: la barra ya está
+          // pintada, así que solo falta decir que se está trayendo.
+          <div
+            aria-busy="true"
+            aria-live="polite"
+            className={styles.loadingState}
+            role="status"
+          >
+            <RefreshCw aria-hidden="true" size={22} />
+            <div>
+              <strong>Cargando la pestaña</strong>
+              <span>Recuperando sus epígrafes…</span>
+            </div>
+          </div>
         )}
       </div>
+
+      {canEditMenu && isMenuEditorOpen && townHall !== null ? (
+        <TownHallNavEditor
+          fallbackName={selectedContext.municipality.name}
+          isSaving={townHallController.isSavingTownHall}
+          onAddItem={(sectionId) =>
+            void townHallController.addItem(sectionId, "Nuevo epígrafe")
+          }
+          onAddSection={() => void townHallController.addSection("Nueva pestaña")}
+          onArchiveBlock={(blockId) =>
+            void townHallController.archiveBlock(blockId)
+          }
+          onChangeWeatherLocation={(location) =>
+            void townHallController.updateProfile({
+              weather_location: location === "" ? null : location,
+            })
+          }
+          onClose={() => setIsMenuEditorOpen(false)}
+          onRenameBlock={(blockId, title) =>
+            void townHallController.renameBlock(blockId, title)
+          }
+          onRenameMunicipality={(name) =>
+            void townHallController.updateProfile({
+              display_name: name === "" ? null : name,
+            })
+          }
+          onReorder={(nav) => void townHallController.reorderNav(nav)}
+          onToggleWeather={(enabled) =>
+            void townHallController.updateProfile({ weather_enabled: enabled })
+          }
+          townHall={townHall}
+        />
+      ) : null}
     </section>
   );
 }

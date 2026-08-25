@@ -16,6 +16,7 @@ from urllib import error as urlerror
 from urllib import request as urlrequest
 
 from app.core.config import settings
+from app.core.http import urlopen_without_redirects
 
 logger = logging.getLogger(__name__)
 
@@ -689,7 +690,7 @@ def _embed_openai_compatible(text: str) -> list[float]:
         method="POST",
     )
     try:
-        with urlrequest.urlopen(
+        with urlopen_without_redirects(
             request,
             timeout=settings.embeddings_timeout_seconds,
         ) as response:
