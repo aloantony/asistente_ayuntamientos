@@ -1,6 +1,6 @@
 # Despliegue en un dominio público
 
-Actualizado: 2026-07-30
+Actualizado: 2026-08-31
 
 Procedimiento para publicar Anacleto en un dominio propio sobre un VPS con Docker.
 Decisiones de fondo en ADR-035 (topología y TLS), ADR-036 (endurecimiento) y
@@ -227,10 +227,14 @@ curl -s https://www.miconcejo.es/api/admin/security-events?event_type=auth.login
   -H "Authorization: Bearer <token de superusuario>"
 ```
 
-Actualizar a una versión nueva del código:
+Actualizar a una versión nueva del código. El `git pull` da por supuesto que el
+clon **no tiene modificaciones locales**: si `git status` muestra alguna, es que un
+arreglo aplicado a mano nunca llegó a `main`, y el pull lo machacaría. Llévalo al
+repositorio antes de actualizar.
 
 ```bash
 cd /opt/anacleto
+git status --short          # debe salir vacío
 git pull
 docker compose --env-file .env.production -f docker-compose.prod.yml up -d --build
 docker compose --env-file .env.production -f docker-compose.prod.yml exec backend alembic upgrade head
@@ -258,6 +262,13 @@ Consecuencias prácticas:
   se puede respaldar ni restaurar con la imagen actual.
 - Lo limpio para el piloto es **empezar con base vacía** y crear los datos reales
   desde la aplicación.
+
+**Resuelto el 2026-08-31 por la primera vía**: el servicio `postgres` de
+`docker-compose.prod.yml` ya no usa el tag de `pgvector`, sino la imagen que
+construye `./postgres` (PG17 + pgvector 0.8.2 + PostGIS 3.6.4), la misma de
+desarrollo y CI. La cadena de migraciones se aplica entera desde cero y una base
+con la extensión `postgis` se puede respaldar y restaurar. El piloto arrancó de
+todos modos con base vacía, que es lo que se hizo el 2026-08-25.
 
 ---
 
