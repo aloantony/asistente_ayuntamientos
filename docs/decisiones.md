@@ -931,3 +931,51 @@ al leer la URL, porque el árbol del menú todavía no ha llegado en ese momento
 de ADR-034 se conservan tal cual, incluida su disciplina de egreso hacia
 Open-Meteo y el guion cuando el proveedor no responde. `topNav.ts` no se toca:
 la barra superior de ADR-048 sigue siendo fija.
+
+## ADR-053: Estructura de partida del Ayuntamiento, sembrada bajo petición (2026-08-31)
+
+Un ayuntamiento recién dado de alta abre la pantalla «Ayuntamiento» y encuentra
+una fila de pestañas vacía. Sabe que puede crear apartados —tiene el editor de
+ADR-052— pero no cuáles, y el coste de arranque cae entero sobre el primer
+usuario. El diseño de referencia sí sabe cuáles, así que la estructura de partida
+se toma de él y se siembra, con el mismo patrón que ADR-043 usó para la taxonomía
+del inventario: `backend/app/town_hall/seed.py` y
+`POST /town-hall/structure/seed`.
+
+**Los nombres no se inventan.** Salen del proyecto exportado de Claude Design:
+el orden de los epígrafes es su `infoDefault`, sus títulos son `infoDefTitles` y
+las pestañas internas de cada uno salen de su registro de `applyTabOv`.
+
+**El diseño tiene un nivel más que el modelo**, y hay que colapsar uno: allí es
+pestaña → epígrafe → pestaña interna → contenido, y aquí pestaña → apartado →
+elemento. Se colapsa el del epígrafe, porque cada pestaña interna suya trae un
+formato distinto —la demografía es una serie, el análisis de agua son ficheros,
+los teléfonos son contactos— y un apartado sólo admite un formato. Así que el
+epígrafe con pestañas internas se convierte en pestaña y sus pestañas internas en
+apartados; los que no las tienen caen juntos en «Información del municipio».
+Quedan cuatro pestañas y dieciséis apartados.
+
+**Normativa municipal queda fuera a propósito.** Es el único epígrafe del diseño
+que ya está construido en otro sitio: la biblioteca de ordenanzas con su búsqueda
+semántica, más el área fija de Normativa. Sembrarlo aquí habría bifurcado el
+dominio, que es justo lo que la fase B6 decidió no hacer.
+
+**Se siembra bajo petición, no al arrancar**, por la misma razón que ADR-043:
+hacerlo en el `lifespan` impondría la estructura a organizaciones que no la
+quieren y resucitaría en cada reinicio lo que alguien archivó a conciencia.
+
+**Y no siembra contenido municipal.** Ni un teléfono, ni un concejal, ni un dato
+del padrón: eso sólo lo tiene el ayuntamiento, y un dato de ejemplo en una
+pantalla institucional es peor que una pantalla vacía. El seed crea el esqueleto;
+lo que va dentro lo escribe quien responde de ello.
+
+**La idempotencia aguanta el renombrado.** Cada bloque sembrado lleva su clave en
+`data_json` junto al formato, así que el ayuntamiento que llame «Teléfonos» a
+«Teléfonos de interés» no se encuentra un duplicado en la siguiente llamada. Si
+no hay marca se compara el título, que cubre el caso contrario: la pestaña la
+creó alguien a mano antes de sembrar y lo que falta son sus apartados. Archivado
+sigue archivado. Hay tests para los tres casos.
+
+La marca convive con `write_layout` de las rutas: ambos conservan lo que ya
+hubiera en `data_json`, de modo que cambiar el formato de un apartado sembrado no
+borra su clave ni al revés.

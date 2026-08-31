@@ -26,6 +26,7 @@ from app.town_hall.access import (
 )
 from app.town_hall import weather
 from app.town_hall.models import MunicipalBlock, MunicipalProfile
+from app.town_hall.seed import ensure_initial_town_hall_structure
 from app.town_hall.schemas import (
     BLOCK_PARENT_TYPES,
     SECTION_LAYOUTS,
@@ -45,6 +46,7 @@ from app.town_hall.schemas import (
     MunicipalSeriesPoint,
     MunicipalWeatherRead,
     TownHallRead,
+    TownHallStructureSeedResult,
 )
 from app.users.models import User
 
@@ -795,6 +797,36 @@ def delete_attachment(
     storage_service.delete_file(removed["storage_key"])
 
     return build_content(db, require_parent_of(db, block))
+
+
+@router.post(
+    "/structure/seed",
+    response_model=TownHallStructureSeedResult,
+    status_code=status.HTTP_201_CREATED,
+)
+def seed_town_hall_structure(
+    db: Annotated[Session, Depends(get_db)],
+    current_user: Annotated[User, Depends(get_current_user)],
+    organization_id: Annotated[int | None, Query(ge=1)] = None,
+) -> TownHallStructureSeedResult:
+    """Siembra las pestañas y apartados de partida del Ayuntamiento.
+
+    Bajo petición y no al arrancar: la estructura es un punto de partida que
+    cada ayuntamiento adapta, no un catálogo del producto. Repetir la llamada no
+    deshace nada — sólo se crea lo que falte. No siembra contenido municipal.
+    """
+    organization = resolve_organization(db, current_user, organization_id)
+    require_town_hall_edit(db, current_user, organization.id)
+
+    created = ensure_initial_town_hall_structure(
+        db,
+        organization.id,
+        created_by_id=current_user.id,
+    )
+    return TownHallStructureSeedResult(
+        organization_id=organization.id,
+        created=created,
+    )
 
 
 @router.post(

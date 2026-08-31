@@ -79,6 +79,12 @@ class TownHallRead(BaseModel):
     nav: list[MunicipalNavSectionRead] = []
 
 
+class TownHallStructureSeedResult(BaseModel):
+    organization_id: int
+    # Claves de lo creado en esta llamada; vacía si ya estaba todo.
+    created: list[str] = []
+
+
 class MunicipalContentField(BaseModel):
     label: str = Field(min_length=1, max_length=120)
     value: str = Field(default="", max_length=2000)

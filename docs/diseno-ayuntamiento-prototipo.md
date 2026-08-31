@@ -49,6 +49,10 @@ Lo ya construido y reutilizable:
 Siete epígrafes, todos con menú contextual propio (renombrar, subir, bajar, eliminar) y reordenables
 por arrastre. **La tarjeta —plegado, arrastre y menú— está hecha (§9); los contenidos, en la Fase B.**
 
+> **Corregido en §10 (2026-08-31)**: la tabla de abajo se escribió con la copia truncada y *no* son
+> los siete epígrafes del diseño. Los de verdad están en su `infoDefault`. Se conserva porque el
+> inventario de contenidos sigue valiendo; la lista buena es la de §10.
+
 | Epígrafe | Contenido del prototipo |
 |---|---|
 | Información general | Apartados y elementos anidados, texto editable en línea |
@@ -422,3 +426,44 @@ Con una pestaña «Información» y los siete epígrafes del diseño, sobre Chro
 
 El botón «Gestionar pestañas» pasa a usar el asa de seis puntos del prototipo; llevaba un
 engranaje, que no sale del diseño.
+
+## 10. La estructura de partida se siembra (2026-08-31) — HECHO
+
+El cuerpo del Ayuntamiento estaba terminado desde §9, pero un ayuntamiento real abría la pantalla y
+encontraba la fila de pestañas vacía. Se añade un seed por organización y bajo petición
+(`backend/app/town_hall/seed.py`, `POST /town-hall/structure/seed`), con el patrón de ADR-043. La
+decisión está en **ADR-053**.
+
+### 10.1 Los siete epígrafes de §2 no eran los del diseño
+
+`infoDefault` del proyecto exportado es, en este orden:
+
+```
+["estructura", "datos", "suministros", "normativa", "archivo", "telefonos", "org"]
+```
+
+y sus títulos, de `infoDefTitles`: **Estructura de Gobierno · Datos del municipio · Suministros ·
+Normativa municipal · Archivo municipal · Teléfonos de interés · Organismos y empresas**.
+
+La tabla de §2 daba otros siete: colaba «Información general» y «Corporación municipal» como
+epígrafes de primer nivel —son una pestaña interna de *Datos del municipio* y una sección de
+*Estructura de Gobierno*— y se dejaba fuera «Suministros» y «Organismos y empresas». Es el mismo
+error que §8 corrigió en otros puntos: se leyó el 2,8 % del fichero.
+
+### 10.2 Cuatro pestañas, dieciséis apartados
+
+El diseño tiene cuatro niveles (pestaña → epígrafe → pestaña interna → contenido) y el modelo tres
+(pestaña → apartado → elemento). Se colapsa el del epígrafe, porque cada pestaña interna suya trae un
+formato distinto y un apartado sólo admite uno:
+
+| Pestaña | Apartados (formato) |
+|---|---|
+| Información del municipio | Estructura de Gobierno (`people`), Corporación Municipal (`people`), Suministros (`series`), Organismos y empresas (`text`) |
+| Datos del municipio | Información general (`data`), Datos demográficos (`series`), Registro climatológico (`series`), Análisis de agua potable (`files`), Patrimonio (`data`) |
+| Archivo municipal | Archivo (`files`), Fototeca (`files`), Crónicas (`text`), Himno (`text`) |
+| Teléfonos de interés | Servicios e instituciones (`contacts`), Equipo de gobierno (`contacts`), Personal municipal (`contacts`) |
+
+**Normativa municipal se deja fuera**: ya existe como biblioteca de ordenanzas y como área fija, y
+sembrarla aquí bifurcaría el dominio (fase B6).
+
+El seed **no crea contenido municipal**: ni teléfonos, ni concejales, ni padrón. Sólo el esqueleto.
