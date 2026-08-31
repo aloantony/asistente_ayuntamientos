@@ -1,0 +1,300 @@
+from app.town_hall.schemas import SECTION_LAYOUTS
+from app.town_hall.seed import INITIAL_TOWN_HALL_STRUCTURE
+from tests.conftest import headers_for
+
+
+def seed(client, headers, organization_id=None):
+    params = {} if organization_id is None else {"organization_id": organization_id}
+    return client.post("/town-hall/structure/seed", params=params, headers=headers)
+
+
+def read_nav(client, headers, organization_id=None):
+    params = {} if organization_id is None else {"organization_id": organization_id}
+    response = client.get("/town-hall", params=params, headers=headers)
+    assert response.status_code == 200, response.text
+    return response.json()["nav"]
+
+
+def expected_tab_count():
+    return len(INITIAL_TOWN_HALL_STRUCTURE)
+
+
+def expected_section_count():
+    return sum(len(tab["sections"]) for tab in INITIAL_TOWN_HALL_STRUCTURE)
+
+
+def test_every_seeded_layout_is_one_the_api_accepts():
+    """Un formato inventado se guardaría y luego se leería como `text`."""
+    for tab in INITIAL_TOWN_HALL_STRUCTURE:
+        for _, title, layout in tab["sections"]:
+            assert layout in SECTION_LAYOUTS, title
+
+
+def test_seed_keys_are_unique():
+    keys = []
+    for tab in INITIAL_TOWN_HALL_STRUCTURE:
+        keys.append(tab["key"])
+        keys.extend(f"{tab['key']}/{key}" for key, _, _ in tab["sections"])
+
+    # La clave es lo que hace idempotente al seed: repetida, dejaría de serlo.
+    assert len(keys) == len(set(keys))
+
+
+def test_normativa_is_left_out_on_purpose():
+    """La biblioteca de ordenanzas ya cubre ese epígrafe del diseño (fase B6)."""
+    titles = {
+        title.casefold()
+        for tab in INITIAL_TOWN_HALL_STRUCTURE
+        for _, title, _ in tab["sections"]
+    }
+    titles |= {str(tab["title"]).casefold() for tab in INITIAL_TOWN_HALL_STRUCTURE}
+
+    assert not any("normativa" in title for title in titles)
+
+
+def test_the_seed_creates_the_whole_starting_structure(
+    client,
+    make_user,
+    make_organization,
+    grant_permissions,
+):
+    user = make_user()
+    organization = make_organization(name="Ayuntamiento de Fuentelcésped")
+    grant_permissions(user, organization, ["town_hall.edit", "town_hall.view"])
+    auth = headers_for(user)
+
+    response = seed(client, auth)
+    nav = read_nav(client, auth)
+
+    assert response.status_code == 201
+    assert response.json()["organization_id"] == organization.id
+    assert len(response.json()["created"]) == expected_tab_count() + expected_section_count()
+    # El orden de las pestañas y de sus apartados es el del diseño, no el alfabeto.
+    assert [tab["title"] for tab in nav] == [
+        tab["title"] for tab in INITIAL_TOWN_HALL_STRUCTURE
+    ]
+    assert [item["title"] for item in nav[0]["items"]] == [
+        title for _, title, _ in INITIAL_TOWN_HALL_STRUCTURE[0]["sections"]
+    ]
+
+
+def test_each_seeded_section_carries_its_layout(
+    client,
+    make_user,
+    make_organization,
+    grant_permissions,
+):
+    user = make_user()
+    organization = make_organization(name="Ayuntamiento con formatos")
+    grant_permissions(user, organization, ["town_hall.edit", "town_hall.view"])
+    auth = headers_for(user)
+    seed(client, auth)
+
+    nav = read_nav(client, auth)
+    layouts = {}
+    for section in nav:
+        for item in section["items"]:
+            content = client.get(
+                f"/town-hall/blocks/{item['id']}/content", headers=auth
+            ).json()
+            layouts[item["title"]] = content["layout"]
+
+    expected = {
+        title: layout
+        for tab in INITIAL_TOWN_HALL_STRUCTURE
+        for _, title, layout in tab["sections"]
+    }
+    # Sin esto el seed dejaría todo en `text` y la demografía no se dibujaría.
+    assert layouts == expected
+
+
+def test_the_seed_creates_no_municipal_content(
+    client,
+    make_user,
+    make_organization,
+    grant_permissions,
+):
+    user = make_user()
+    organization = make_organization(name="Ayuntamiento sin datos")
+    grant_permissions(user, organization, ["town_hall.edit", "town_hall.view"])
+    auth = headers_for(user)
+    seed(client, auth)
+
+    nav = read_nav(client, auth)
+    for section in nav:
+        for item in section["items"]:
+            content = client.get(
+                f"/town-hall/blocks/{item['id']}/content", headers=auth
+            ).json()
+            # Los teléfonos y los concejales los pone el ayuntamiento, no el seed.
+            assert content["items"] == []
+
+
+def test_seeding_twice_creates_nothing_new(
+    client,
+    make_user,
+    make_organization,
+    grant_permissions,
+):
+    user = make_user()
+    organization = make_organization(name="Ayuntamiento repetido")
+    grant_permissions(user, organization, ["town_hall.edit", "town_hall.view"])
+    auth = headers_for(user)
+
+    first = seed(client, auth)
+    second = seed(client, auth)
+    nav = read_nav(client, auth)
+
+    assert len(first.json()["created"]) > 0
+    assert second.json()["created"] == []
+    assert len(nav) == expected_tab_count()
+    assert sum(len(section["items"]) for section in nav) == expected_section_count()
+
+
+def test_a_renamed_section_is_not_seeded_again(
+    client,
+    make_user,
+    make_organization,
+    grant_permissions,
+):
+    user = make_user()
+    organization = make_organization(name="Ayuntamiento que renombra")
+    grant_permissions(user, organization, ["town_hall.edit", "town_hall.view"])
+    auth = headers_for(user)
+    seed(client, auth)
+
+    nav = read_nav(client, auth)
+    phones = next(
+        section for section in nav if section["title"] == "Teléfonos de interés"
+    )
+    client.patch(
+        f"/town-hall/blocks/{phones['id']}",
+        json={"title": "Teléfonos"},
+        headers=auth,
+    )
+
+    second = seed(client, auth)
+    after = read_nav(client, auth)
+    titles = [section["title"] for section in after]
+
+    # La marca del seed sobrevive al renombrado: sin ella habría duplicado.
+    assert second.json()["created"] == []
+    assert "Teléfonos" in titles
+    assert "Teléfonos de interés" not in titles
+    assert len(after) == expected_tab_count()
+
+
+def test_an_archived_section_is_not_recreated(
+    client,
+    make_user,
+    make_organization,
+    grant_permissions,
+):
+    user = make_user()
+    organization = make_organization(name="Ayuntamiento que archiva")
+    grant_permissions(user, organization, ["town_hall.edit", "town_hall.view"])
+    auth = headers_for(user)
+    seed(client, auth)
+
+    nav = read_nav(client, auth)
+    archive = next(
+        section for section in nav if section["title"] == "Archivo municipal"
+    )
+    client.patch(
+        f"/town-hall/blocks/{archive['id']}",
+        json={"status": "archived"},
+        headers=auth,
+    )
+
+    second = seed(client, auth)
+    after = read_nav(client, auth)
+
+    # Archivar es una decisión del municipio; el seed no la revierte.
+    assert second.json()["created"] == []
+    assert "Archivo municipal" not in [section["title"] for section in after]
+
+
+def test_a_hand_made_tab_is_completed_instead_of_duplicated(
+    client,
+    make_user,
+    make_organization,
+    grant_permissions,
+):
+    user = make_user()
+    organization = make_organization(name="Ayuntamiento a mano")
+    grant_permissions(user, organization, ["town_hall.edit", "town_hall.view"])
+    auth = headers_for(user)
+
+    created = client.post(
+        "/town-hall/blocks",
+        json={"block_type": "nav_section", "title": "Teléfonos de interés"},
+        headers=auth,
+    ).json()
+
+    seed(client, auth)
+    nav = read_nav(client, auth)
+    phones = [
+        section for section in nav if section["title"] == "Teléfonos de interés"
+    ]
+
+    assert len(phones) == 1
+    assert phones[0]["id"] == created["id"]
+    assert [item["title"] for item in phones[0]["items"]] == [
+        title
+        for tab in INITIAL_TOWN_HALL_STRUCTURE
+        if tab["key"] == "telefonos"
+        for _, title, _ in tab["sections"]
+    ]
+
+
+def test_seeding_requires_the_edit_permission(
+    client,
+    make_user,
+    make_organization,
+    grant_permissions,
+):
+    user = make_user()
+    organization = make_organization(name="Ayuntamiento sólo de lectura")
+    grant_permissions(user, organization, ["town_hall.view"])
+
+    response = seed(client, headers_for(user))
+
+    assert response.status_code == 403
+    assert response.json()["detail"] == "Permission required: town_hall.edit"
+    assert read_nav(client, headers_for(user)) == []
+
+
+def test_the_seed_does_not_reach_another_organization(
+    client,
+    make_user,
+    make_organization,
+    grant_permissions,
+):
+    user = make_user()
+    target = make_organization(name="Ayuntamiento objetivo")
+    other = make_organization(name="Ayuntamiento ajeno")
+    grant_permissions(user, target, ["town_hall.edit", "town_hall.view"])
+    grant_permissions(user, other, ["town_hall.view"])
+    auth = headers_for(user)
+
+    seed(client, auth, target.id)
+
+    assert read_nav(client, auth, other.id) == []
+
+
+def test_seeding_another_organization_requires_permission_there(
+    client,
+    make_user,
+    make_organization,
+    grant_permissions,
+):
+    user = make_user()
+    own = make_organization(name="Ayuntamiento propio")
+    other = make_organization(name="Ayuntamiento vecino")
+    grant_permissions(user, own, ["town_hall.edit"])
+    auth = headers_for(user)
+
+    response = seed(client, auth, other.id)
+
+    # Tener el permiso en la propia organización no abre la del vecino.
+    assert response.status_code == 403
