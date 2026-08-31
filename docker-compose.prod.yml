@@ -108,6 +108,11 @@ services:
     env_file:
       - .env.production
     command: ["sh", "-c", "rq worker --url \"$REDIS_URL\" default"]
+    # El worker hereda el HEALTHCHECK de la imagen del backend, que sondea HTTP
+    # en el 8000; aquí sólo corre `rq worker` y no hay HTTP que sondear, así que
+    # aparecía siempre como unhealthy estando sano.
+    healthcheck:
+      disable: true
     volumes:
       - document_storage:/var/lib/asistente_ayuntamientos/documents
     depends_on:
@@ -149,9 +154,14 @@ services:
     logging: *default-logging
 
   postgres:
-    # Fijado por digest, el mismo que CI: un tag flotante puede cambiar de
-    # versión mayor menor bajo los pies entre dos despliegues.
-    image: pgvector/pgvector:0.8.0-pg17@sha256:40b404964359299eefdd5f8518facf1886c562848cf4de13b6eaf91cb70c2b87
+    # PG17 con pgvector Y PostGIS, construida desde ./postgres: es la imagen que
+    # ya usan el Compose de desarrollo y CI. El tag pgvector que había aquí no
+    # trae PostGIS y la migración 20260717_0030 aborta contra él, así que la
+    # cadena completa no se podía aplicar desde cero. El pineado por digest no
+    # se pierde: postgres/Dockerfile fija su base pgvector por sha256.
+    build:
+      context: ./postgres
+    image: asistente-ayuntamientos-postgres:17-postgis-pgvector
     restart: unless-stopped
     environment:
       POSTGRES_DB: ${POSTGRES_DB:-app}
