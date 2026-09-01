@@ -862,18 +862,29 @@ function MunicipalWorkspaceContent() {
   const isPaused = selectedContext.organization.status === "paused";
   const townHall = townHallController.townHall;
   const canEditMenu = canEditTownHall(user);
-  // Las pestañas del editor se añaden tras las áreas fijas, de modo que la
-  // tira siga siendo una sola navegación (ADR-052).
+  // En el diseño la fila la forman los apartados configurables, no unas
+  // pestañas fijas con los apartados detrás. El primer apartado ocupa el sitio
+  // de «Información»: conserva el identificador `summary` para que los enlaces
+  // antiguos sigan valiendo, pero lleva su título y pinta sus epígrafes.
+  const sections = townHall?.nav ?? [];
+  const [firstSection, ...extraSections] = sections;
   const workspaceTabs: TabDefinition[] = [
-    ...TAB_DEFINITIONS,
-    ...(townHall?.nav ?? []).map((section) => ({
+    {
+      ...TAB_DEFINITIONS[0],
+      label: firstSection?.title ?? TAB_DEFINITIONS[0].label,
+    },
+    ...extraSections.map((section) => ({
       id: `block-${section.id}` as CustomTab,
       label: section.title,
       icon: Landmark,
     })),
+    ...TAB_DEFINITIONS.slice(1),
   ];
+  // «summary» es el primer apartado; los demás van por su identificador.
   const activeSection =
-    townHall?.nav.find(({ id }) => `block-${id}` === activeTab) ?? null;
+    (activeTab === "summary"
+      ? (firstSection ?? null)
+      : (sections.find(({ id }) => `block-${id}` === activeTab) ?? null));
   const activeTabDefinition =
     workspaceTabs.find((tab) => tab.id === activeTab) ?? workspaceTabs[0];
 
@@ -1074,6 +1085,29 @@ function MunicipalWorkspaceContent() {
         id={`municipal-panel-${activeTabDefinition.id}`}
         role="tabpanel"
       >
+        {activeTab === "summary" && !isLoading && !error && municipality && organization ? (
+          <InformacionMunicipio
+            canViewOrdinances={canViewOrdinances}
+            governmentSection={
+              <EstructuraGobierno
+                canView={canViewGovernment}
+                error={resourceErrors.government}
+                members={government}
+                onRetry={retryWorkspace}
+              />
+            }
+            seriesSection={
+              <SeriesMunicipio
+                climate={climate}
+                households={households}
+                padron={padron}
+              />
+            }
+            onTabChange={(tab) => selectWorkspaceTab(tab, true)}
+            ordinances={ordinances}
+            organization={organization}
+          />
+        ) : null}
         {isLoading ? (
           <div
             aria-busy="true"
@@ -1102,28 +1136,6 @@ function MunicipalWorkspaceContent() {
             icon={CircleAlert}
             title="No se pudo abrir el espacio municipal"
             tone="error"
-          />
-        ) : activeTab === "summary" ? (
-          <InformacionMunicipio
-            canViewOrdinances={canViewOrdinances}
-            governmentSection={
-              <EstructuraGobierno
-                canView={canViewGovernment}
-                error={resourceErrors.government}
-                members={government}
-                onRetry={retryWorkspace}
-              />
-            }
-            seriesSection={
-              <SeriesMunicipio
-                climate={climate}
-                households={households}
-                padron={padron}
-              />
-            }
-            onTabChange={(tab) => selectWorkspaceTab(tab, true)}
-            ordinances={ordinances}
-            organization={organization}
           />
         ) : activeTab === "administration" ? (
           <div className={styles.tabContent}>
