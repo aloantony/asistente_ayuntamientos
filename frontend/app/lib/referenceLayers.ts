@@ -393,7 +393,7 @@ export async function fetchReferenceCatalog(
     `/reference-layers/catalog?provider_key=${SIUR_PROVIDER_KEY}&organization_id=${safeOrganizationId}`,
     accessToken,
     "No se pudo cargar la cartografía SIUR.",
-    { signal },
+    { cache: "no-store", signal },
   );
   validateReferenceCatalog(catalog, safeOrganizationId);
   return catalog;

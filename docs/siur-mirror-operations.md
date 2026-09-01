@@ -53,6 +53,44 @@ ser autorizada y tampoco puede dejar sin turno a otra fuente ya revisada. El
 worker repite la validación antes de cualquier petición de red y entre etapas;
 el filtro del planificador reduce ruido, pero no sustituye ese segundo cierre.
 
+## Gate reproducible de preparación
+
+El estado operativo permite capas pendientes durante el despliegue. El gate de
+integración es deliberadamente más estricto y solo tiene modo de lectura:
+
+```bash
+python -m app.reference_layers.mirror_readiness \
+  --provider-key siur
+```
+
+El código de salida es 0 únicamente cuando el snapshot y las fuentes no tienen
+drift, la matriz vigente cubre todas las hojas sin estrategias `blocked` ni
+composiciones sin materializar, todas las fuentes habilitadas conservan una
+autorización actual y programación diaria, y cada capa tiene entrega, estilos
+y metadatos locales completos. También exige que el proxy remoto esté
+desactivado. El código 1 devuelve un informe válido pero incompleto; 2 indica
+evidencia estructural inválida y 3 una dependencia local no disponible.
+
+Para la aceptación final se añade la verificación física:
+
+```bash
+python -m app.reference_layers.mirror_readiness \
+  --provider-key siur \
+  --physical
+```
+
+Este perfil relee y verifica los artefactos del CAS, las tablas PostGIS y los
+metadatos inmutables, y hace smoke contra el renderizador local. Nunca llama a
+un origen upstream, ejecuta watchers, encola descargas ni modifica la base de
+datos. La sesión usa una transacción PostgreSQL `REPEATABLE READ, READ ONLY` y
+el JSON queda cercado por los hashes de catálogo, fuentes y estrategias.
+
+El informe declara por separado lo que este gate no puede demostrar: corte de
+salida a Internet, navegación real por mapa/leyenda/identify, continuidad ante
+una descarga corrupta y promoción/rollback reales. Esos cuatro puntos siguen
+formando parte de la prueba integral de independencia descrita en
+[Espejo cartográfico SIUR local](siur-local-mirror.md).
+
 ## Aplicación atómica de revisiones
 
 Cuando la persona revisora confirma varias fuentes, no se aplican una a una.

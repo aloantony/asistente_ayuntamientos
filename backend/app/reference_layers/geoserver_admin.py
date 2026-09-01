@@ -858,6 +858,7 @@ class GeoServerAdminClient:
         if _layer_styles_contain(
             existing_styles,
             style,
+            layer_name=layer,
             workspace=self._workspace,
             rest_root=self._rest_root,
         ):
@@ -873,6 +874,11 @@ class GeoServerAdminClient:
                     "name": f"{self._workspace}:{style}",
                 }
             },
+            # GeoServer's layer-style controller negotiates an empty response
+            # and returns 406 when the generic JSON helper requests JSON.
+            # The resource is re-read and validated below, so accepting any
+            # response representation does not weaken the closed client.
+            accept="*/*",
         )
         if status == 201:
             return PublicationResult("layer_style", style, True)
@@ -888,6 +894,7 @@ class GeoServerAdminClient:
         if not _layer_styles_contain(
             existing_styles,
             style,
+            layer_name=layer,
             workspace=self._workspace,
             rest_root=self._rest_root,
         ):
@@ -1209,7 +1216,13 @@ class GeoServerAdminClient:
             )
         return response.body
 
-    def _post_json(self, path: str, payload: Mapping[str, Any]) -> int:
+    def _post_json(
+        self,
+        path: str,
+        payload: Mapping[str, Any],
+        *,
+        accept: str = JSON_CONTENT_TYPE,
+    ) -> int:
         body = json.dumps(
             payload,
             ensure_ascii=True,
@@ -1219,6 +1232,7 @@ class GeoServerAdminClient:
             path,
             body=body,
             content_type=JSON_CONTENT_TYPE,
+            accept=accept,
         )
 
     def _post_raw(
@@ -1227,6 +1241,7 @@ class GeoServerAdminClient:
         *,
         body: bytes,
         content_type: str,
+        accept: str = JSON_CONTENT_TYPE,
         max_body_bytes: int = MAX_SLD_BYTES,
     ) -> int:
         if (
@@ -1243,7 +1258,7 @@ class GeoServerAdminClient:
             path,
             body=body,
             content_type=content_type,
-            accept=JSON_CONTENT_TYPE,
+            accept=accept,
             # GeoServer uses 403 for some duplicate catalog creations (styles
             # in particular) and 409 for others.  Callers always re-read and
             # validate the exact resource before accepting either as a race.
@@ -2803,7 +2818,7 @@ def _validate_coverage_payload(
 def _validate_layer_payload(payload: Mapping[str, Any], name: str) -> None:
     layer = _nested_mapping(payload, "layer")
     try:
-        _assert_fields(layer, {"name": name, "enabled": True}, "layer")
+        _validate_layer_identity(layer, name)
     except GeoServerAdminConflictError as error:
         raise GeoServerLayerSmokeError(
             "local GeoServer layer catalog smoke failed"
@@ -2815,13 +2830,30 @@ def _validate_publication_layer_payload(
     name: str,
 ) -> None:
     layer = _nested_mapping(payload, "layer")
-    _assert_fields(layer, {"name": name, "enabled": True}, "layer")
+    _validate_layer_identity(layer, name)
+
+
+def _validate_layer_identity(
+    layer: Mapping[str, Any],
+    name: str,
+) -> None:
+    # GeoServer's layer representation omits ``enabled`` in current releases;
+    # that flag belongs to the underlying feature type or coverage, which the
+    # publication method validates separately. Reject an explicit false value
+    # while allowing the documented layer response shape. The subsequent WMS
+    # smoke proves that the resource is actually renderable.
+    _assert_fields(layer, {"name": name}, "layer")
+    if "enabled" in layer and layer.get("enabled") is not True:
+        raise GeoServerAdminConflictError(
+            "existing local GeoServer layer differs"
+        )
 
 
 def _layer_styles_contain(
     payload: Mapping[str, Any],
     style_name: str,
     *,
+    layer_name: str,
     workspace: str,
     rest_root: str,
 ) -> bool:
@@ -2891,8 +2923,12 @@ def _layer_styles_contain(
             f"{rest_root}/workspaces/{_segment(workspace)}/styles/"
             f"{_segment(style_name)}.json"
         )
+        layer_scoped_path = (
+            f"{rest_root}/layers/{_segment(workspace)}:"
+            f"{_segment(layer_name)}/styles/{_segment(style_name)}.json"
+        )
         if (
-            parsed_href.path == expected_path
+            parsed_href.path in {expected_path, layer_scoped_path}
             and not parsed_href.query
             and not parsed_href.fragment
         ):

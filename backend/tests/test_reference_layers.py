@@ -647,6 +647,8 @@ def test_catalog_requires_map_permission_and_never_exposes_upstream_urls(
     )
 
     assert response.status_code == 200
+    assert response.headers["cache-control"] == "private, no-store, max-age=0"
+    assert response.headers["pragma"] == "no-cache"
     body = response.json()
     assert body["snapshot"]["provider_key"] == "siur"
     assert [layer["source_key"] for layer in body["layers"]] == [

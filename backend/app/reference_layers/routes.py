@@ -144,6 +144,7 @@ def _active_reviewed_ortho_projection(
 def get_reference_catalog(
     db: Annotated[Session, Depends(get_db)],
     current_user: Annotated[User, Depends(get_current_user)],
+    response: Response,
     provider_key: Annotated[
         str,
         Query(min_length=1, max_length=64, pattern=r"^[a-z0-9][a-z0-9_.:/-]*$"),
@@ -151,6 +152,8 @@ def get_reference_catalog(
     organization_id: Annotated[int | None, Query(ge=1)] = None,
 ) -> ReferenceCatalogRead:
     require_catalog_view(db, current_user, organization_id)
+    response.headers["Cache-Control"] = "private, no-store, max-age=0"
+    response.headers["Pragma"] = "no-cache"
     snapshot = db.scalar(
         select(ReferenceCatalogSnapshot)
         .where(

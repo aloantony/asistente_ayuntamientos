@@ -1814,18 +1814,31 @@ def handle_run_failure(
     """Finish once; lifecycle 0037 atomically owns every fallback decision."""
 
     with session_factory() as db:
+        run = db.get(ReferenceSyncRun, lease.run_id)
+        checkpoint_stats = (
+            dict(run.stats_json)
+            if run is not None and isinstance(run.stats_json, dict)
+            else {}
+        )
+        checkpoint_stats.update(failure.stats_json or {})
+        checkpoint_stats["retryable_classification"] = failure.retryable
         finish_sync_run(
             db,
             lease,
             outcome=failure.outcome,
+            observed_etag=run.observed_etag if run is not None else None,
+            observed_last_modified=(
+                run.observed_last_modified if run is not None else None
+            ),
+            observed_version=(
+                run.observed_version if run is not None else None
+            ),
+            observed_manifest_sha256=(
+                run.observed_manifest_sha256 if run is not None else None
+            ),
             error_code=failure.code,
             error_summary=failure.summary,
-            stats_json=_bounded_stats(
-                {
-                    "retryable_classification": failure.retryable,
-                    **(failure.stats_json or {}),
-                }
-            ),
+            stats_json=_bounded_stats(checkpoint_stats),
         )
     with session_factory() as db:
         child = db.scalar(

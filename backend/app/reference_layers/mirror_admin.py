@@ -46,13 +46,16 @@ from app.reference_layers.mirror_lifecycle import (
     DeliveryTransitionPreview,
     ManualSyncEnqueueResult,
     MirrorLifecycleError,
+    PublicationRetryResult,
     PromotionResult,
     delivery_state_matches_promotion_head,
     enqueue_manual_sync_run,
     preview_manual_sync_run,
+    preview_publication_retry,
     preview_reactivate_delivery,
     preview_rollback_delivery_version,
     reactivate_delivery,
+    retry_failed_publication,
     rollback_delivery_version,
     stored_promotion_hash_is_valid,
 )
@@ -936,6 +939,45 @@ def execute_manual_enqueue(
     }
 
 
+def execute_publication_retry(
+    db: Session,
+    *,
+    provider_key: str,
+    run_id: int,
+    expected_source_definition_sha256: str,
+    expected_generation: int,
+    actor_user_id: int,
+    reason: str,
+    apply: bool,
+) -> dict[str, Any]:
+    """Validate and optionally resume one built local delivery."""
+
+    _validate_provider_key(provider_key)
+    actor = _require_active_actor(db, actor_user_id)
+    arguments = {
+        "provider_key": provider_key,
+        "run_id": run_id,
+        "expected_source_definition_sha256": (
+            expected_source_definition_sha256
+        ),
+        "expected_generation": expected_generation,
+        "requested_by_id": actor.id,
+        "reason": reason,
+    }
+    result: PublicationRetryResult
+    if apply:
+        result = retry_failed_publication(db, **arguments)
+    else:
+        result = preview_publication_retry(db, **arguments)
+    return {
+        "ok": True,
+        "mode": "apply" if apply else "dry-run",
+        "applied": apply,
+        "actor_user_id": actor.id,
+        "publication_retry": asdict(result),
+    }
+
+
 def staging_gc(
     *,
     apply: bool,
@@ -1072,6 +1114,31 @@ def _parser() -> argparse.ArgumentParser:
     enqueue_mode.add_argument("--dry-run", action="store_true")
     enqueue_mode.add_argument("--apply", action="store_true")
 
+    retry_parser = commands.add_parser(
+        "retry-publication",
+        help="resume one built delivery after a local-renderer failure",
+    )
+    retry_parser.add_argument("--provider-key", default="siur")
+    retry_parser.add_argument("--run-id", type=int, required=True)
+    retry_parser.add_argument(
+        "--expected-source-definition-sha256",
+        required=True,
+    )
+    retry_parser.add_argument(
+        "--expected-generation",
+        type=int,
+        required=True,
+    )
+    retry_parser.add_argument(
+        "--actor-user-id",
+        type=int,
+        required=True,
+    )
+    retry_parser.add_argument("--reason", required=True)
+    retry_mode = retry_parser.add_mutually_exclusive_group(required=True)
+    retry_mode.add_argument("--dry-run", action="store_true")
+    retry_mode.add_argument("--apply", action="store_true")
+
     tile_preflight = commands.add_parser(
         "tile-preflight",
         help="project all current tile archives against aggregate CAS capacity",
@@ -1193,6 +1260,21 @@ def main(argv: Sequence[str] | None = None) -> int:
                             arguments.expected_generation
                         ),
                         check_mode=arguments.check_mode,
+                        actor_user_id=arguments.actor_user_id,
+                        reason=arguments.reason,
+                        apply=arguments.apply,
+                    )
+                elif arguments.command == "retry-publication":
+                    result = execute_publication_retry(
+                        db,
+                        provider_key=arguments.provider_key,
+                        run_id=arguments.run_id,
+                        expected_source_definition_sha256=(
+                            arguments.expected_source_definition_sha256
+                        ),
+                        expected_generation=(
+                            arguments.expected_generation
+                        ),
                         actor_user_id=arguments.actor_user_id,
                         reason=arguments.reason,
                         apply=arguments.apply,

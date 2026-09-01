@@ -373,6 +373,24 @@ def layer_styles_payload(*names: str) -> dict:
     }
 
 
+def layer_scoped_styles_payload(*names: str) -> dict:
+    return {
+        "styles": {
+            "style": [
+                {
+                    "name": name,
+                    "href": (
+                        "http://127.0.0.1:8081/geoserver/rest/layers/"
+                        "siur:planning_v_012345/styles/"
+                        f"{name}.json"
+                    ),
+                }
+                for name in names
+            ],
+        }
+    }
+
+
 def disk_quota_xml(
     *,
     enabled: bool = True,
@@ -1597,7 +1615,14 @@ def test_layer_style_is_associated_by_qualified_name_and_is_idempotent() -> None
                 VALID_SLD,
                 content_type="application/vnd.ogc.sld+xml",
             ),
-            json_response(layer_payload()),
+            json_response(
+                {
+                    "layer": {
+                        "name": "planning_v_012345",
+                        "type": "VECTOR",
+                    }
+                }
+            ),
             json_response(layer_styles_payload()),
             status_response(201),
         ]
@@ -1618,6 +1643,7 @@ def test_layer_style_is_associated_by_qualified_name_and_is_idempotent() -> None
         "style": {"name": "siur:planning_style_v_012345"}
     }
     assert headers["Content-Type"] == "application/json"
+    assert headers["Accept"] == "*/*"
 
     client, factory = make_client(
         [
@@ -1628,7 +1654,7 @@ def test_layer_style_is_associated_by_qualified_name_and_is_idempotent() -> None
             ),
             json_response(layer_payload()),
             json_response(
-                layer_styles_payload("planning_style_v_012345")
+                layer_scoped_styles_payload("planning_style_v_012345")
             ),
         ]
     )

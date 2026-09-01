@@ -98,6 +98,14 @@ _MAX_VERSION_LENGTH = 2_048
 _MAX_ERROR_SUMMARY_LENGTH = 4_096
 _MAX_STATS_JSON_BYTES = 1_048_576
 _MANUAL_SYNC_AUDIT_KEY = "manual_enqueue"
+_PUBLICATION_RETRY_AUDIT_KEY = "publication_retries"
+_RETRYABLE_PUBLICATION_ERROR_CODES = frozenset(
+    {
+        "local_renderer_failed",
+        "local_renderer_rejected",
+        "local_renderer_unavailable",
+    }
+)
 
 TerminalOutcome = Literal["unchanged", "succeeded", "rejected", "failed"]
 
@@ -224,6 +232,23 @@ class ManualSyncEnqueueResult:
     requested_by_id: int
     reason: str
     run_id: int | None
+
+
+@dataclass(frozen=True)
+class PublicationRetryResult:
+    provider_key: str
+    layer_id: int
+    source_id: int
+    source_definition_sha256: str
+    expected_generation: int
+    requested_by_id: int
+    reason: str
+    run_id: int
+    version_id: int
+    previous_status: Literal["rejected", "failed"]
+    previous_error_code: str
+    resulting_attempt_no: int
+    applied: bool
 
 
 @dataclass(frozen=True)
@@ -1532,6 +1557,119 @@ def deactivate_delivery(
         raise
 
 
+def preview_publication_retry(
+    db: Session,
+    *,
+    provider_key: str,
+    run_id: int,
+    expected_source_definition_sha256: str,
+    expected_generation: int,
+    requested_by_id: int,
+    reason: str,
+) -> PublicationRetryResult:
+    """Validate recovery of one built but unpublished delivery."""
+
+    try:
+        arguments = _validated_publication_retry_arguments(
+            provider_key=provider_key,
+            run_id=run_id,
+            expected_source_definition_sha256=(
+                expected_source_definition_sha256
+            ),
+            expected_generation=expected_generation,
+            requested_by_id=requested_by_id,
+            reason=reason,
+        )
+        run, version = _lock_and_validate_publication_retry(
+            db,
+            **arguments,
+        )
+        return _publication_retry_result(
+            run,
+            version,
+            applied=False,
+            **arguments,
+        )
+    finally:
+        db.rollback()
+
+
+def retry_failed_publication(
+    db: Session,
+    *,
+    provider_key: str,
+    run_id: int,
+    expected_source_definition_sha256: str,
+    expected_generation: int,
+    requested_by_id: int,
+    reason: str,
+    now: datetime | None = None,
+) -> PublicationRetryResult:
+    """Requeue an exact immutable delivery after a local renderer failure.
+
+    Acquisition and materialization are not repeated. The existing delivery
+    remains bound to the same run and authorization; the worker resumes at its
+    idempotent publication checkpoint.
+    """
+
+    moment = _moment(now)
+    try:
+        arguments = _validated_publication_retry_arguments(
+            provider_key=provider_key,
+            run_id=run_id,
+            expected_source_definition_sha256=(
+                expected_source_definition_sha256
+            ),
+            expected_generation=expected_generation,
+            requested_by_id=requested_by_id,
+            reason=reason,
+        )
+        run, version = _lock_and_validate_publication_retry(
+            db,
+            **arguments,
+        )
+        result = _publication_retry_result(
+            run,
+            version,
+            applied=True,
+            **arguments,
+        )
+        history = _validated_publication_retry_history(run.stats_json)
+        history.append(
+            {
+                "attempt_no": run.attempt_no,
+                "error_code": run.error_code,
+                "error_summary": run.error_summary,
+                "reason": arguments["reason"],
+                "requested_by_id": requested_by_id,
+                "retried_at": _utc_isoformat(moment),
+                "status": run.status,
+            }
+        )
+        stats = preserve_manual_sync_audit(run, dict(run.stats_json))
+        stats[_PUBLICATION_RETRY_AUDIT_KEY] = history
+        run.stats_json = _bounded_json_object(
+            stats,
+            "stats_json",
+            _MAX_STATS_JSON_BYTES,
+        )
+        run.status = "queued"
+        run.attempt_no += 1
+        run.queued_at = moment
+        run.started_at = None
+        run.finished_at = None
+        run.lease_token = None
+        run.lease_expires_at = None
+        run.heartbeat_at = None
+        run.error_code = None
+        run.error_summary = None
+        db.commit()
+        return result
+    except Exception:
+        db.rollback()
+        raise
+
+
 def preview_reactivate_delivery(
     db: Session,
     *,
@@ -2718,6 +2856,315 @@ def _validated_manual_sync_arguments(
     }
 
 
+def _validated_publication_retry_arguments(
+    *,
+    provider_key: str,
+    run_id: int,
+    expected_source_definition_sha256: str,
+    expected_generation: int,
+    requested_by_id: int,
+    reason: str,
+) -> dict[str, Any]:
+    if (
+        not isinstance(provider_key, str)
+        or _PROVIDER_KEY_RE.fullmatch(provider_key) is None
+    ):
+        raise MirrorLifecycleError("provider key is invalid")
+    if (
+        not isinstance(run_id, int)
+        or isinstance(run_id, bool)
+        or run_id <= 0
+    ):
+        raise MirrorLifecycleError("run id must be a positive integer")
+    if (
+        not isinstance(expected_source_definition_sha256, str)
+        or _SHA256_RE.fullmatch(expected_source_definition_sha256) is None
+    ):
+        raise MirrorLifecycleError(
+            "expected source-definition hash is invalid"
+        )
+    _validate_expected_generation(expected_generation)
+    if (
+        not isinstance(requested_by_id, int)
+        or isinstance(requested_by_id, bool)
+        or requested_by_id <= 0
+    ):
+        raise MirrorLifecycleError(
+            "requesting actor id must be a positive integer"
+        )
+    return {
+        "provider_key": provider_key,
+        "run_id": run_id,
+        "expected_source_definition_sha256": (
+            expected_source_definition_sha256
+        ),
+        "expected_generation": expected_generation,
+        "requested_by_id": requested_by_id,
+        "reason": _bounded_required_text(reason, "reason", 1_024),
+    }
+
+
+def _lock_and_validate_publication_retry(
+    db: Session,
+    *,
+    provider_key: str,
+    run_id: int,
+    expected_source_definition_sha256: str,
+    expected_generation: int,
+    requested_by_id: int,
+    reason: str,
+) -> tuple[ReferenceSyncRun, ReferenceDeliveryVersion]:
+    del requested_by_id, reason
+    preliminary = db.get(ReferenceSyncRun, run_id)
+    if preliminary is None or preliminary.provider_key != provider_key:
+        raise MirrorLifecycleError(
+            "publication retry run is unavailable for this provider"
+        )
+    _lock_delivery_layer(db, provider_key, preliminary.layer_id)
+    run = db.scalar(
+        select(ReferenceSyncRun)
+        .where(
+            ReferenceSyncRun.id == run_id,
+            ReferenceSyncRun.provider_key == provider_key,
+        )
+        .with_for_update()
+    )
+    if run is None or run.layer_id != preliminary.layer_id:
+        raise MirrorLifecycleError("publication retry run identity changed")
+    if (
+        run.status not in {"rejected", "failed"}
+        or run.error_code not in _RETRYABLE_PUBLICATION_ERROR_CODES
+        or run.finished_at is None
+        or run.lease_token is not None
+        or run.lease_expires_at is not None
+    ):
+        raise MirrorLifecycleError(
+            "publication retry requires a terminal local-renderer failure"
+        )
+    if (
+        run.source_definition_sha256
+        != expected_source_definition_sha256
+        or not sync_run_source_definition_is_valid(run)
+    ):
+        raise MirrorLifecycleError(
+            "publication retry source-definition hash is stale or invalid"
+        )
+    source = db.scalar(
+        select(ReferenceLayerSource)
+        .where(
+            ReferenceLayerSource.id == run.source_id,
+            ReferenceLayerSource.provider_key == provider_key,
+            ReferenceLayerSource.layer_id == run.layer_id,
+        )
+        .with_for_update()
+    )
+    if source is None or (
+        not source.enabled
+        or source.definition_sha256
+        != expected_source_definition_sha256
+        or not stored_source_definition_is_valid(source)
+    ):
+        raise MirrorLifecycleError(
+            "publication retry source is disabled, stale or invalid"
+        )
+    layer, snapshot = _locked_current_layer_catalog(
+        db,
+        provider_key=provider_key,
+        layer_id=run.layer_id,
+    )
+    if (
+        not stored_catalog_snapshot_is_valid(snapshot)
+        or not catalog_snapshot_contains_active_layer(snapshot, layer)
+    ):
+        raise MirrorLifecycleError(
+            "publication retry current catalog evidence is invalid"
+        )
+    state, _ = _locked_delivery_state_and_chain(
+        db,
+        provider_key=provider_key,
+        layer_id=run.layer_id,
+    )
+    generation = state.generation if state is not None else 0
+    if state is not None and state.status == "disabled":
+        raise MirrorLifecycleError(
+            "publication retry delivery is administratively disabled"
+        )
+    if (
+        generation != expected_generation
+        or run.expected_active_generation != expected_generation
+    ):
+        raise MirrorPromotionConflict(
+            "publication retry expected generation is stale"
+        )
+    open_run = db.scalar(
+        select(
+            exists().where(
+                ReferenceSyncRun.provider_key == provider_key,
+                ReferenceSyncRun.layer_id == run.layer_id,
+                ReferenceSyncRun.status.in_(("queued", "running")),
+            )
+        )
+    )
+    if open_run:
+        raise MirrorLifecycleError(
+            "publication retry layer already has an open run"
+        )
+    versions = tuple(
+        db.scalars(
+            select(ReferenceDeliveryVersion)
+            .where(
+                ReferenceDeliveryVersion.sync_run_id == run.id,
+                ReferenceDeliveryVersion.source_id == run.source_id,
+                ReferenceDeliveryVersion.provider_key == provider_key,
+                ReferenceDeliveryVersion.layer_id == run.layer_id,
+            )
+            .with_for_update()
+        )
+    )
+    if len(versions) != 1:
+        raise MirrorLifecycleError(
+            "publication retry requires one immutable delivery"
+        )
+    version = versions[0]
+    if (
+        version.delivery_kind != source.target_kind
+        or version.catalog_snapshot_id != snapshot.id
+        or version.catalog_definition_sha256
+        != snapshot.definition_sha256
+    ):
+        raise MirrorLifecycleError(
+            "publication retry delivery identity is stale"
+        )
+    if db.scalar(
+        select(
+            exists().where(
+                ReferenceDeliveryPromotion.to_version_id == version.id
+            )
+        )
+    ):
+        raise MirrorLifecycleError(
+            "publication retry delivery was already promoted"
+        )
+    try:
+        require_current_source_authorization(
+            db,
+            source=source,
+            require_acquisition=False,
+        )
+        require_version_local_service_authorization(
+            db,
+            version=version,
+            source=source,
+            run=run,
+        )
+    except MirrorAuthorizationError as error:
+        raise MirrorLifecycleError(
+            f"publication retry authorization rejected: {error.code}"
+        ) from error
+    _validate_current_version_catalog(db, version)
+    if len(_validated_publication_retry_history(run.stats_json)) >= 16:
+        raise MirrorLifecycleError(
+            "publication retry audit history is exhausted"
+        )
+    return run, version
+
+
+def _publication_retry_result(
+    run: ReferenceSyncRun,
+    version: ReferenceDeliveryVersion,
+    *,
+    provider_key: str,
+    run_id: int,
+    expected_source_definition_sha256: str,
+    expected_generation: int,
+    requested_by_id: int,
+    reason: str,
+    applied: bool,
+) -> PublicationRetryResult:
+    if (
+        run.id != run_id
+        or run.provider_key != provider_key
+        or version.sync_run_id != run.id
+        or run.source_definition_sha256
+        != expected_source_definition_sha256
+        or run.status not in {"rejected", "failed"}
+        or not isinstance(run.error_code, str)
+    ):
+        raise MirrorLifecycleError(
+            "publication retry result identity is invalid"
+        )
+    return PublicationRetryResult(
+        provider_key=provider_key,
+        layer_id=run.layer_id,
+        source_id=run.source_id,
+        source_definition_sha256=expected_source_definition_sha256,
+        expected_generation=expected_generation,
+        requested_by_id=requested_by_id,
+        reason=reason,
+        run_id=run.id,
+        version_id=version.id,
+        previous_status=run.status,
+        previous_error_code=run.error_code,
+        resulting_attempt_no=run.attempt_no + 1,
+        applied=applied,
+    )
+
+
+def _validated_publication_retry_history(
+    stats_json: dict[str, Any],
+) -> list[dict[str, Any]]:
+    if not isinstance(stats_json, dict):
+        raise MirrorLifecycleError(
+            "publication retry audit evidence is invalid"
+        )
+    raw = stats_json.get(_PUBLICATION_RETRY_AUDIT_KEY, [])
+    if not isinstance(raw, list) or len(raw) > 16:
+        raise MirrorLifecycleError(
+            "publication retry audit history is invalid"
+        )
+    result: list[dict[str, Any]] = []
+    required = {
+        "attempt_no",
+        "error_code",
+        "error_summary",
+        "reason",
+        "requested_by_id",
+        "retried_at",
+        "status",
+    }
+    for item in raw:
+        if (
+            not isinstance(item, dict)
+            or set(item) != required
+            or not isinstance(item.get("attempt_no"), int)
+            or isinstance(item.get("attempt_no"), bool)
+            or item["attempt_no"] <= 0
+            or item.get("status") not in {"rejected", "failed"}
+            or item.get("error_code")
+            not in _RETRYABLE_PUBLICATION_ERROR_CODES
+            or not isinstance(item.get("reason"), str)
+            or not item["reason"].strip()
+            or len(item["reason"]) > 1_024
+            or not isinstance(item.get("requested_by_id"), int)
+            or isinstance(item.get("requested_by_id"), bool)
+            or item["requested_by_id"] <= 0
+            or not isinstance(item.get("retried_at"), str)
+        ):
+            raise MirrorLifecycleError(
+                "publication retry audit evidence is invalid"
+            )
+        summary = item.get("error_summary")
+        if summary is not None and (
+            not isinstance(summary, str)
+            or len(summary) > _MAX_ERROR_SUMMARY_LENGTH
+        ):
+            raise MirrorLifecycleError(
+                "publication retry audit evidence is invalid"
+            )
+        result.append(dict(item))
+    return result
+
+
 def _lock_and_validate_manual_sync_source(
     db: Session,
     *,
@@ -3328,7 +3775,7 @@ def preserve_manual_sync_audit(
     run: ReferenceSyncRun,
     replacement: dict[str, Any],
 ) -> dict[str, Any]:
-    """Keep operator identity/reason immutable across run checkpoints."""
+    """Keep reserved operator audit evidence across run checkpoints."""
 
     result = dict(replacement)
     if run.trigger_kind != "manual":
@@ -3336,46 +3783,59 @@ def preserve_manual_sync_audit(
             raise MirrorLifecycleError(
                 "manual enqueue audit key is reserved"
             )
-        return _bounded_json_object(
-            result,
-            "stats_json",
-            _MAX_STATS_JSON_BYTES,
+    else:
+        existing = (
+            run.stats_json.get(_MANUAL_SYNC_AUDIT_KEY)
+            if isinstance(run.stats_json, dict)
+            else None
         )
-    existing = (
-        run.stats_json.get(_MANUAL_SYNC_AUDIT_KEY)
-        if isinstance(run.stats_json, dict)
-        else None
+        expected = {
+            "reason": (
+                existing.get("reason")
+                if isinstance(existing, dict)
+                else None
+            ),
+            "requested_by_id": (
+                existing.get("requested_by_id")
+                if isinstance(existing, dict)
+                else None
+            ),
+        }
+        if (
+            not isinstance(expected["reason"], str)
+            or not expected["reason"].strip()
+            or len(expected["reason"]) > 1_024
+            or not isinstance(expected["requested_by_id"], int)
+            or isinstance(expected["requested_by_id"], bool)
+            or expected["requested_by_id"] <= 0
+            or run.requested_by_id not in {None, expected["requested_by_id"]}
+        ):
+            raise MirrorLifecycleError(
+                "manual enqueue audit evidence is invalid"
+            )
+        supplied = result.get(_MANUAL_SYNC_AUDIT_KEY)
+        if supplied is not None and supplied != expected:
+            raise MirrorLifecycleError(
+                "manual enqueue audit evidence cannot be replaced"
+            )
+        result[_MANUAL_SYNC_AUDIT_KEY] = expected
+    existing_retry_history = _validated_publication_retry_history(
+        run.stats_json,
     )
-    expected = {
-        "reason": (
-            existing.get("reason")
-            if isinstance(existing, dict)
-            else None
-        ),
-        "requested_by_id": (
-            existing.get("requested_by_id")
-            if isinstance(existing, dict)
-            else None
-        ),
-    }
-    if (
-        not isinstance(expected["reason"], str)
-        or not expected["reason"].strip()
-        or len(expected["reason"]) > 1_024
-        or not isinstance(expected["requested_by_id"], int)
-        or isinstance(expected["requested_by_id"], bool)
-        or expected["requested_by_id"] <= 0
-        or run.requested_by_id not in {None, expected["requested_by_id"]}
-    ):
+    supplied_retry_history = result.get(_PUBLICATION_RETRY_AUDIT_KEY)
+    if existing_retry_history:
+        if (
+            supplied_retry_history is not None
+            and supplied_retry_history != existing_retry_history
+        ):
+            raise MirrorLifecycleError(
+                "publication retry audit evidence cannot be replaced"
+            )
+        result[_PUBLICATION_RETRY_AUDIT_KEY] = existing_retry_history
+    elif supplied_retry_history is not None:
         raise MirrorLifecycleError(
-            "manual enqueue audit evidence is invalid"
+            "publication retry audit key is reserved"
         )
-    supplied = result.get(_MANUAL_SYNC_AUDIT_KEY)
-    if supplied is not None and supplied != expected:
-        raise MirrorLifecycleError(
-            "manual enqueue audit evidence cannot be replaced"
-        )
-    result[_MANUAL_SYNC_AUDIT_KEY] = expected
     return _bounded_json_object(
         result,
         "stats_json",
