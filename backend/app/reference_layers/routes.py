@@ -68,7 +68,10 @@ from app.reference_layers.schemas import (
     ReferenceLayerStyleRead,
     ReferenceServiceRead,
 )
-from app.reference_layers.wms_delivery import catalog_delivery_availability
+from app.reference_layers.wms_delivery import (
+    attested_proxy_attributions,
+    catalog_delivery_availability,
+)
 from app.reference_layers.wms_routes import router as wms_router
 from app.users.models import User
 
@@ -396,6 +399,15 @@ def get_reference_catalog(
         db,
         services=services,
     )
+    # A proxied service still owes its provider the credit its licence demands,
+    # and SIUR ships none in the catalog. Mirror authorizations win when they
+    # exist, because a reviewer wrote those by hand for an exact source.
+    for service_id, credit in attested_proxy_attributions(
+        db,
+        services=services,
+    ).items():
+        if not service_attributions.get(service_id):
+            service_attributions[service_id] = credit
 
     layer_reads: list[ReferenceLayerRead] = []
     for layer in layers:

@@ -1016,3 +1016,62 @@ por delante de las configurables. Reducirla a las cuatro del diseño es una
 decisión aparte, todavía sin tomar: obliga a redirigir los enlaces `?tab=` que
 hay repartidos por el producto y a decidir dónde va la ficha de identidad
 municipal, que el diseño no contempla.
+
+## ADR-055: El proxy WMS de SIUR se encuentra con el GeoServer real (2026-09-01)
+
+La entrega por proxy de las capas de SIUR estaba implementada por completo
+—catálogo, cadena de evidencia, teselas, leyenda e identificación— pero nunca se
+había ejecutado contra `idecyl.jcyl.es`. Sus pruebas usan documentos sintéticos
+y, al contrastarla con el servicio real, ninguna capa podía llegar a servirse.
+Aparecieron cuatro obstáculos, todos en el camino que va del GetCapabilities
+descargado a la atestación.
+
+**El importador no arrancaba.** `siur_delivery_import` era el único CLI del
+módulo que no llamaba a `register_all_models()`, así que SQLAlchemy no podía
+resolver las relaciones por nombre y el mandato moría con «No se pudo completar
+la transacción» antes de leer nada. Se alinea con `siur_sync` y
+`mirror_review_packet`.
+
+**GeoServer anuncia su endpoint con el servicio ya seleccionado.** Todos los
+espacios de trabajo de IDECyL publican su `OnlineResource` como
+`/geoserver/<ws>/ows?SERVICE=WMS&`, y el parser rechazaba cualquier cadena de
+consulta. Ese prefijo no lleva parámetros de petición, así que ahora se descarta
+en lugar de rechazarse; cualquier otro parámetro —un token, un `bbox`, otro
+servicio— sigue siendo fatal. La comprobación vive en `_require_service_selector_only`
+y `validate_siur_wms_endpoint` no se toca: sigue prohibiendo cadenas de consulta
+en todo lo demás, incluida la URL que el proxy acaba llamando.
+
+**`/ows` y `/wms` son el mismo servlet.** El catálogo guarda la forma `/wms` que
+viene de `settings.json` y GetCapabilities declara la forma `/ows`. Atar la
+atestación a su servicio con una igualdad literal de cadenas las hacía
+incompatibles siempre. `siur_wms_endpoints_are_equivalent` compara el espacio de
+trabajo dentro del allowlist, de modo que la atadura sigue existiendo pero deja
+de depender de la grafía.
+
+**La versión declarada del catálogo se respeta cuando existe.** SIUR sólo declara
+versión WMS en 3 de sus 33 servicios y deja el resto a nulo. Un nulo significa
+«el catálogo no lo sabe», no «vale cualquier versión»: cuando hay versión
+declarada tiene que coincidir con la atestada, y cuando no la hay la
+instantánea de capacidades —inmutable y con hash— es la autoridad. No se relaja
+nada más, porque la propiedad de que la evidencia desajustada corta la entrega
+antes de tocar la red es justamente lo que protege este módulo.
+
+**Lo que sigue sin poder servirse.** IDECyL no anuncia `GetLegendGraphic` ni
+`application/json` en `GetFeatureInfo`, así que leyendas e identificación
+permanecen no disponibles por diseño del origen, no por una limitación nuestra.
+Los tres servicios con versión `1.1.1` declarada (`urbanismo`, `limites`,
+`entidades`, 28 capas) tampoco pueden atestarse todavía: su GetCapabilities
+1.1.1 lleva DOCTYPE y el parser prohíbe DTD por defensa XXE, y el 1.3.0 que sí
+se puede leer contradice la versión del catálogo. Desbloquearlos exige una
+promoción de catálogo revisada, no una relajación de la comprobación.
+
+**Añadido el 2026-09-01, al preparar la promoción de producción.** El WMC que
+`settings.json` declara hoy (`assets/wmcs/default.xml`) trae la capa
+`plau_cyl_planes_parciales` con **dos** estilos marcados `current="1"`. El parser
+rechazaba el documento entero por ambiguo, lo que dejaba la promoción sin sonda
+posible: el WMC revisado en julio ya no sirve porque SIUR ha partido
+`ot_cyl_instrumentos_ambito` en `_regional` y `_subregional`, y su identidad
+antigua no casa. Ahora una selección ambigua **no selecciona nada** en esa capa
+en lugar de tumbar el documento: la capa conserva el estilo predeterminado que
+`settings.json` ya deriva y la sonda simplemente deja de confirmar un
+predeterminado ahí. No se adivina, y el resto del WMC sigue comprobándose.

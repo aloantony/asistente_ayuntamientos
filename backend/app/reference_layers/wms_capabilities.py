@@ -6,7 +6,7 @@ from dataclasses import dataclass
 import hashlib
 import json
 import re
-from urllib.parse import urlsplit, urlunsplit
+from urllib.parse import parse_qsl, urlsplit, urlunsplit
 from xml.etree import ElementTree
 
 from app.reference_layers.wms_proxy import (
@@ -380,18 +380,44 @@ def _normalize_endpoint(value: str) -> str:
     if not isinstance(value, str):
         raise WMSCapabilitiesError("WMS endpoint is invalid")
     candidate = value.strip()
+    split = urlsplit(candidate)
+    if split.query:
+        # GeoServer always advertises its OnlineResource with the service
+        # selector already applied ("/ows?SERVICE=WMS&"). That prefix carries no
+        # request parameters, so it is dropped rather than refused; anything
+        # else -- a token, a preset bbox, a second service -- is still fatal.
+        _require_service_selector_only(split.query)
+        candidate = urlunsplit(
+            (split.scheme, split.netloc, split.path, "", "")
+        )
     try:
         parsed = validate_siur_wms_endpoint(candidate)
     except UnsafeWMSEndpointError as exc:
         raise WMSCapabilitiesError(
             "WMS endpoint is outside the SIUR allowlist"
         ) from exc
-    split = urlsplit(candidate)
-    if split.query:
-        raise WMSCapabilitiesError("WMS endpoint contains parameters")
     return urlunsplit(
         (parsed.scheme, parsed.hostname or "", parsed.path, "", "")
     )
+
+
+def _require_service_selector_only(query: str) -> None:
+    if len(query) > 64:
+        raise WMSCapabilitiesError("WMS endpoint contains parameters")
+    try:
+        pairs = parse_qsl(
+            query,
+            keep_blank_values=True,
+            strict_parsing=False,
+            errors="strict",
+        )
+    except (UnicodeError, ValueError) as exc:
+        raise WMSCapabilitiesError(
+            "WMS endpoint contains parameters"
+        ) from exc
+    for name, item in pairs:
+        if name.casefold() != "service" or item.casefold() != "wms":
+            raise WMSCapabilitiesError("WMS endpoint contains parameters")
 
 
 def _local_name(tag: str) -> str:

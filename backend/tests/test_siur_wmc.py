@@ -378,3 +378,24 @@ def test_wmc_parser_rejects_utf16_before_doctype_or_entity_processing() -> None:
 
     with pytest.raises(SiurWmcError, match="must use UTF-8 encoding"):
         parse_wmc_evidence(utf16)
+
+
+def test_wmc_with_two_current_styles_selects_none_instead_of_guessing() -> None:
+    # SIUR publishes plau_cyl_planes_parciales with two styles marked current.
+    # The document stays parseable evidence, but it must stop asserting a
+    # default for that layer rather than pick one of the two. See ADR-055.
+    document = exact_fixture()
+    marker = b'<Style>'
+    assert document.count(b'current="1"') == 11
+    ambiguous = document.replace(marker, b'<Style current="1">', 1)
+
+    evidence = parse_wmc_evidence(ambiguous)
+
+    assert len(evidence.layers) == 11
+    ambiguous_layers = [
+        layer
+        for layer in evidence.layers
+        if not any(style.selected for style in layer.styles)
+    ]
+    assert len(ambiguous_layers) == 1
+    assert evidence.selected_style_count == 10
