@@ -11,6 +11,7 @@ import stat
 
 from sqlalchemy.exc import SQLAlchemyError
 
+from app.db.model_registry import register_all_models
 from app.db.session import SessionLocal
 from app.reference_layers.delivery_evidence import (
     MAX_LICENSE_REVIEW_BYTES,
@@ -106,6 +107,7 @@ def _approval_issue(
 def main(argv: list[str] | None = None) -> int:
     args = _build_parser().parse_args(argv)
     try:
+        register_all_models()
         capabilities = parse_wms_capabilities(
             _read_bounded(
                 args.capabilities,

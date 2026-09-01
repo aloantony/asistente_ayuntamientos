@@ -526,7 +526,21 @@ def _parse_styles(
             )
         )
     if selected_count > 1:
-        raise SiurWmcError(f"Layer {ordinal}: multiple current styles")
+        # SIUR publishes a WMC where plau_cyl_planes_parciales marks two styles
+        # as current. The document stays valid evidence, but its selection for
+        # that layer is ambiguous, so it selects nothing rather than guessing:
+        # the layer keeps whatever default settings.json already derives, and
+        # the probe simply stops confirming a default here. See ADR-055.
+        return tuple(
+            WmcStyleEvidence(
+                source_key=style.source_key,
+                remote_name=style.remote_name,
+                title=style.title,
+                selected=False,
+                legend_url=style.legend_url,
+            )
+            for style in styles
+        )
     return tuple(styles)
 
 

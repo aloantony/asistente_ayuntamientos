@@ -25,6 +25,7 @@ from app.reference_layers.models import (
 )
 from app.reference_layers.wms_proxy import (
     UnsafeWMSEndpointError,
+    siur_wms_endpoints_are_equivalent,
     validate_siur_wms_endpoint,
 )
 
@@ -391,9 +392,20 @@ def _load_current_service_evidence(
         raise WMSDeliveryLicenseDeniedError
     if attestation.attestation_kind != "delivery":
         raise WMSDeliveryEvidenceUnavailableError
+    # A declared catalog version still has to agree with the attested
+    # capabilities. SIUR only declares one for a handful of services, and the
+    # sync leaves the rest null; a null is "the catalog does not know", not
+    # "any version goes", because the attested snapshot remains the authority
+    # for the version the proxy will actually request.
     if (
-        service.base_url != capabilities.get_map_endpoint
-        or service.version != capabilities.wms_version
+        not siur_wms_endpoints_are_equivalent(
+            service.base_url,
+            capabilities.get_map_endpoint,
+        )
+        or (
+            service.version is not None
+            and service.version != capabilities.wms_version
+        )
         or capabilities.wms_version not in {"1.1.1", "1.3.0"}
     ):
         raise WMSDeliveryCapabilityError
@@ -486,3 +498,50 @@ def _string_list(
     if len(value) != len(set(value)):
         raise WMSDeliveryEvidenceUnavailableError
     return tuple(value)
+
+
+# The reviewed Gobierno Abierto notice grants reuse in exchange for this exact
+# credit. SIUR itself leaves "attribution" empty in settings.json, and the
+# importer deliberately never writes catalog inventory, so the credit is
+# projected here for any service whose approved review permits proxy delivery.
+# It restates the obligation the human review already accepted; see ADR-055.
+PROVIDER_REQUIRED_ATTRIBUTION = {
+    "siur": "Origen de los datos: Junta de Castilla y León",
+}
+
+
+def attested_proxy_attributions(
+    db: Session,
+    *,
+    services: list[ReferenceService],
+) -> dict[int, str]:
+    """Return the credit each proxied service must display, by service id."""
+
+    result: dict[int, str] = {}
+    for service in services:
+        required = PROVIDER_REQUIRED_ATTRIBUTION.get(service.provider_key)
+        if required is None:
+            continue
+        snapshot = db.scalar(
+            select(ReferenceCatalogSnapshot).where(
+                ReferenceCatalogSnapshot.provider_key == service.provider_key,
+                ReferenceCatalogSnapshot.is_current.is_(True),
+                ReferenceCatalogSnapshot.status == "applied",
+            )
+        )
+        if snapshot is None:
+            continue
+        try:
+            _load_current_service_evidence(
+                db,
+                snapshot=snapshot,
+                service=service,
+            )
+        except (
+            WMSDeliveryCapabilityError,
+            WMSDeliveryEvidenceUnavailableError,
+            WMSDeliveryLicenseDeniedError,
+        ):
+            continue
+        result[service.id] = required
+    return result
