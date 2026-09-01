@@ -144,7 +144,7 @@ describe("SidebarNavigation", () => {
 
   it("marks only the most specific rendered query shortcut as current", () => {
     mocks.pathname = "/ayuntamiento";
-    mocks.searchParams = new URLSearchParams("tab=facilities");
+    mocks.searchParams = new URLSearchParams("tab=administration");
     renderSidebar({
       ...USER_BASE,
       sidebar_shortcut_ids: ["municipal_facilities"],

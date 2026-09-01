@@ -56,7 +56,7 @@ describe("sidebar navigation catalog", () => {
       OPTIONAL_SIDEBAR_ITEMS.find(({ id }) => id === "municipal_roadmap"),
     ).toMatchObject({
       label: "Hoja de ruta",
-      href: "/ayuntamiento?tab=roadmap",
+      href: "/hoja-de-ruta",
       group: "Ayuntamiento",
     });
     expect(
@@ -181,7 +181,7 @@ describe("query-aware active sidebar item", () => {
     const items = [
       FIXED_SIDEBAR_ITEMS.find(({ id }) => id === "fixed_municipality")!,
       OPTIONAL_SIDEBAR_ITEMS.find(
-        ({ id }) => id === "municipal_ordinances",
+        ({ id }) => id === "municipal_facilities",
       )!,
     ];
 
@@ -189,9 +189,9 @@ describe("query-aware active sidebar item", () => {
       getActiveSidebarItemId(
         items,
         "/ayuntamiento",
-        new URLSearchParams("tab=ordinances"),
+        new URLSearchParams("tab=administration"),
       ),
-    ).toBe("municipal_ordinances");
+    ).toBe("municipal_facilities");
     expect(
       getActiveSidebarItemId(
         items,
