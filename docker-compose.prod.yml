@@ -61,6 +61,14 @@ services:
     restart: unless-stopped
     env_file:
       - .env.production
+    environment:
+      # Entrega de cartografía SIUR por proxy al WMS de IDECyL. Falla cerrada:
+      # sin este opt-in explícito el backend no sale a la red aunque exista
+      # catálogo y atestación (ADR-055). Producción no monta GeoServer, así que
+      # el espejo local no está disponible y ésta es la única vía de entrega.
+      # Activarla exige además una revisión humana de licencia firmada por
+      # servicio; sin ella la atestación es de revocación y no se sirve nada.
+      REFERENCE_REMOTE_PROXY_ENABLED: ${REFERENCE_REMOTE_PROXY_ENABLED:-false}
     # --proxy-headers con --forwarded-allow-ips fijado a la IP estática de Caddy:
     # sin ello el limitador de login metería a todos los clientes en el mismo
     # cubo, y con "*" cualquiera podría falsear X-Forwarded-For y esquivarlo.

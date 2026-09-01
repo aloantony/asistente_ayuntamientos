@@ -176,6 +176,76 @@ curl -s -o /dev/null -w '%{http_code}\n' -X POST https://www.miconcejo.es/api/au
 
 ---
 
+## 4 bis. Cartografía SIUR en el mapa municipal
+
+El mapa de `/mapa` sirve las capas de IDECyL **por proxy**: el navegador nunca
+habla con `idecyl.jcyl.es`, sólo con nuestra API, que pide la tesela y la cachea
+en Redis. Producción **no monta GeoServer**, así que el espejo local no está
+disponible y ésta es la única vía de entrega (ADR-055).
+
+Falla cerrada por diseño. Hacen falta las cuatro piezas, en este orden:
+
+1. **Catálogo promovido.** Sin una instantánea `applied` y vigente,
+   `/reference-layers/catalog` responde 503 y el mapa no lista ninguna capa.
+   `settings.json` de SIUR cambia con el tiempo, así que la promoción se revisa
+   cada vez y no se puede copiar la de desarrollo:
+
+   ```bash
+   docker compose --env-file .env.production -f docker-compose.prod.yml \
+     exec backend python -m app.reference_layers.siur_sync \
+     --settings /ruta/settings.json --wmc /ruta/wmc.xml
+   ```
+
+   El dry-run imprime conteos y hashes; para `--apply` hay que repetirlos con
+   las opciones `--approved-*`.
+
+2. **Revisión humana de licencia, por servicio.** Un documento
+   `siur-license-review-v1` firmado por una persona identificada. No se aprueba
+   automáticamente: sin él la atestación es de revocación y no se sirve nada.
+   El análisis del aviso legal de la Junta está en
+   `siur-mirror-authorization-review.md`.
+
+3. **Evidencia de entrega importada**, con los cinco hashes aprobados:
+
+   ```bash
+   docker compose --env-file .env.production -f docker-compose.prod.yml \
+     exec backend python -m app.reference_layers.siur_delivery_import \
+     --capabilities /ruta/GetCapabilities.xml \
+     --license-review /ruta/license-review.json
+   ```
+
+   El GetCapabilities se descarga **a mano** y se revisa antes; el importador
+   sólo lee ficheros locales y nunca acepta una URL. Pídelo en **1.3.0**: el
+   1.1.1 de GeoServer lleva DOCTYPE y el parser prohíbe DTD por defensa XXE.
+
+4. **El opt-in del operador**, en `.env.production`:
+
+   ```
+   REFERENCE_REMOTE_PROXY_ENABLED=true
+   ```
+
+   Es lo último que se activa, y basta con recrear el backend
+   (`up -d backend`), sin `down`.
+
+### Comprobación
+
+```bash
+curl -s -o /dev/null -w '%{http_code}\n' https://www.miconcejo.es/api/health
+```
+
+Con sesión iniciada, `/mapa` debe listar el árbol de capas y pintar las teselas.
+Si el árbol aparece pero las capas salen deshabilitadas, el bloqueo lo dice el
+propio catálogo: `remote_proxy_disabled` es el punto 4, `attestation_missing` el
+3, y `license_not_approved` el 2.
+
+### Lo que IDECyL no ofrece
+
+Sus servicios no anuncian `GetLegendGraphic` ni `application/json` en
+`GetFeatureInfo`, así que **leyendas e identificación no están disponibles**. Es
+una limitación del origen, no un fallo del despliegue. Las teselas sí funcionan.
+
+---
+
 ## 5. Copias de seguridad
 
 ```bash
