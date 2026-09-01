@@ -39,6 +39,7 @@ from app.town_hall.schemas import (
     MunicipalContentField,
     MunicipalContentItemRead,
     MunicipalContentRead,
+    MunicipalNavEpigraphRead,
     MunicipalNavItemRead,
     MunicipalNavSectionRead,
     MunicipalProfileRead,
@@ -74,14 +75,21 @@ def read_profile(profile: MunicipalProfile | None) -> MunicipalProfileRead:
 
 
 def build_nav(db: Session, organization_id: int) -> list[MunicipalNavSectionRead]:
-    """Árbol de navegación activo, ya ordenado por posición."""
+    """Árbol de navegación activo, ya ordenado por posición.
+
+    Tres niveles visibles —pestaña, epígrafe y apartado—, los mismos que el
+    diseño de referencia. Un hijo cuyo padre esté archivado no se muestra:
+    archivar la tarjeta se lleva consigo lo que cuelga de ella.
+    """
     blocks = list(
         db.scalars(
             select(MunicipalBlock)
             .where(
                 MunicipalBlock.organization_id == organization_id,
                 MunicipalBlock.status == "active",
-                MunicipalBlock.block_type.in_(("nav_section", "nav_item")),
+                MunicipalBlock.block_type.in_(
+                    ("nav_section", "epigraph", "nav_item")
+                ),
             )
             .order_by(MunicipalBlock.position, MunicipalBlock.id)
         )
@@ -94,17 +102,32 @@ def build_nav(db: Session, organization_id: int) -> list[MunicipalNavSectionRead
                 id=block.id,
                 title=block.title,
                 position=block.position,
-                items=[],
+                epigraphs=[],
             )
+
+    epigraphs: dict[int, MunicipalNavEpigraphRead] = {}
+    for block in blocks:
+        if block.block_type != "epigraph" or block.parent_id is None:
+            continue
+        section = sections.get(block.parent_id)
+        if section is None:
+            continue
+        epigraph = MunicipalNavEpigraphRead(
+            id=block.id,
+            title=block.title,
+            position=block.position,
+            items=[],
+        )
+        epigraphs[block.id] = epigraph
+        section.epigraphs.append(epigraph)
 
     for block in blocks:
         if block.block_type != "nav_item" or block.parent_id is None:
             continue
-        section = sections.get(block.parent_id)
-        if section is None:
-            # Elemento cuyo apartado está archivado: no se muestra.
+        epigraph = epigraphs.get(block.parent_id)
+        if epigraph is None:
             continue
-        section.items.append(
+        epigraph.items.append(
             MunicipalNavItemRead(
                 id=block.id,
                 title=block.title,
@@ -399,7 +422,7 @@ def resolve_parent(
     block_type: str,
     parent_id: int | None,
 ) -> int | None:
-    """Aplica la jerarquía epígrafe → apartado → elemento."""
+    """Aplica la jerarquía pestaña → epígrafe → apartado → elemento."""
     expected_type = BLOCK_PARENT_TYPES[block_type]
 
     if expected_type is None:

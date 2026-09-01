@@ -5,20 +5,23 @@ una fila de pestañas vacía: sabe que puede crear apartados, pero no cuáles. E
 diseño de referencia sí lo sabe, así que la estructura de partida se toma de él
 y no de una invención nuestra.
 
-Las pestañas y los apartados salen del proyecto exportado de Claude Design
-(`design/exports/Fuentelcesped - Pantalla Principal (standalone).html`): el
-orden por defecto de los epígrafes es su `infoDefault`, sus títulos son
-`infoDefTitles` y las pestañas internas de cada uno son su registro de
-`applyTabOv`. Ver `docs/diseno-ayuntamiento-prototipo.md` §8.
+Las pestañas, los epígrafes y los apartados salen del proyecto exportado de
+Claude Design (`design/exports/Fuentelcesped - Pantalla Principal
+(standalone).html`): la fila de pestañas es su `aySecTabs`, el orden por defecto
+de los epígrafes es su `infoDefault`, sus títulos son `infoDefTitles` y los
+apartados de cada uno son sus pestañas internas. Ver
+`docs/diseno-ayuntamiento-prototipo.md` §8.
 
-El diseño tiene un nivel más que el modelo: pestaña → epígrafe → pestaña interna
-→ contenido, mientras que aquí son pestaña → apartado → elemento. El nivel que
-se colapsa es el del epígrafe, porque cada pestaña interna suya trae un formato
-distinto —la demografía es una serie, el análisis de agua son ficheros, los
-teléfonos son contactos— y un apartado sólo tiene un formato. Así que el
-epígrafe con pestañas internas se convierte en pestaña, y sus pestañas internas
-en apartados; los epígrafes sin pestañas internas caen todos juntos en
-«Información del municipio».
+Los cuatro niveles del diseño —pestaña → epígrafe → pestaña interna → contenido—
+son ahora los cuatro del modelo: `nav_section` → `epigraph` → `nav_item` →
+`item` (ADR-054). ADR-053 los había colapsado en tres, repartiendo los epígrafes
+en pestañas hermanas; se revierte porque alejaba la pantalla del diseño, que es
+lo que este seed existe para reproducir.
+
+De las cuatro pestañas del diseño sólo se siembra **Información**: las otras
+tres —Administración, Personal y Mapa general— tienen módulos propios en la
+aplicación y sembrarlas como bloques vacíos bifurcaría el dominio, igual que
+pasaría con Normativa.
 
 **Normativa municipal queda fuera a propósito.** Es el único epígrafe del diseño
 que ya está construido en otro sitio: la biblioteca de ordenanzas con su búsqueda
@@ -39,47 +42,66 @@ from sqlalchemy.orm import Session
 
 from app.town_hall.models import MunicipalBlock
 
-# Cada pestaña con sus apartados. El formato de cada apartado es el que pide su
-# contenido en el diseño; el ayuntamiento puede cambiarlo después.
+# La pestaña «Información», con sus epígrafes y los apartados de cada uno. Los
+# epígrafes son `infoDefault` del proyecto exportado, en su orden, y sus títulos
+# `infoDefTitles`; los apartados son las pestañas internas de cada epígrafe. El
+# formato de cada apartado es el que pide su contenido en el diseño; el
+# ayuntamiento puede cambiarlo después.
 INITIAL_TOWN_HALL_STRUCTURE: tuple[dict, ...] = (
     {
         "key": "informacion",
-        "title": "Información del municipio",
-        "sections": (
-            ("estructura", "Estructura de Gobierno", "people"),
-            ("corporacion", "Corporación Municipal", "people"),
-            ("suministros", "Suministros", "series"),
-            ("organismos", "Organismos y empresas", "text"),
-        ),
-    },
-    {
-        "key": "datos",
-        "title": "Datos del municipio",
-        "sections": (
-            ("general", "Información general", "data"),
-            ("demografia", "Datos demográficos", "series"),
-            ("clima", "Registro climatológico", "series"),
-            ("agua", "Análisis de agua potable", "files"),
-            ("patrimonio", "Patrimonio", "data"),
-        ),
-    },
-    {
-        "key": "archivo",
-        "title": "Archivo municipal",
-        "sections": (
-            ("archivo", "Archivo", "files"),
-            ("fototeca", "Fototeca", "files"),
-            ("cronicas", "Crónicas", "text"),
-            ("himno", "Himno", "text"),
-        ),
-    },
-    {
-        "key": "telefonos",
-        "title": "Teléfonos de interés",
-        "sections": (
-            ("servicios", "Servicios e instituciones", "contacts"),
-            ("equipo", "Equipo de gobierno", "contacts"),
-            ("personal", "Personal municipal", "contacts"),
+        "title": "Información",
+        "epigraphs": (
+            {
+                "key": "estructura",
+                "title": "Estructura de Gobierno",
+                "sections": (
+                    ("corporacion", "Corporación Municipal", "people"),
+                    ("diputacion", "Diputación provincial", "people"),
+                    ("autonomica", "Administración autonómica", "people"),
+                    ("estado", "Administración del Estado", "people"),
+                ),
+            },
+            {
+                "key": "datos",
+                "title": "Datos del municipio",
+                "sections": (
+                    ("general", "Información general", "data"),
+                    ("demografia", "Datos demográficos", "series"),
+                    ("clima", "Registro climatológico", "series"),
+                    ("agua", "Análisis de agua potable", "files"),
+                    ("patrimonio", "Patrimonio", "data"),
+                ),
+            },
+            {
+                "key": "suministros",
+                "title": "Suministros",
+                "sections": (("suministros", "Suministros", "series"),),
+            },
+            {
+                "key": "archivo",
+                "title": "Archivo municipal",
+                "sections": (
+                    ("archivo", "Archivo", "files"),
+                    ("fototeca", "Fototeca", "files"),
+                    ("cronicas", "Crónicas", "text"),
+                    ("himno", "Himno", "text"),
+                ),
+            },
+            {
+                "key": "telefonos",
+                "title": "Teléfonos de interés",
+                "sections": (
+                    ("servicios", "Servicios e instituciones", "contacts"),
+                    ("equipo", "Equipo de gobierno", "contacts"),
+                    ("personal", "Personal municipal", "contacts"),
+                ),
+            },
+            {
+                "key": "organismos",
+                "title": "Organismos y empresas",
+                "sections": (("organismos", "Organismos y empresas", "text"),),
+            },
         ),
     },
 )
@@ -191,59 +213,68 @@ def ensure_initial_town_hall_structure(
         siblings = [block for block in blocks if block.parent_id == parent_id]
         return max((block.position for block in siblings), default=-1) + 1
 
+    def ensure(
+        *,
+        seed_key: str,
+        title: str,
+        block_type: str,
+        parent: MunicipalBlock | None,
+        layout: str | None = None,
+    ) -> MunicipalBlock:
+        """Devuelve el bloque, creándolo sólo si falta."""
+        parent_id = parent.id if parent is not None else None
+        existing = _find_block(
+            blocks,
+            seed_key=seed_key,
+            title=title,
+            block_type=block_type,
+            parent_id=parent_id,
+        )
+        if existing is not None:
+            return existing
+
+        block = MunicipalBlock(
+            organization_id=organization_id,
+            parent_id=parent_id,
+            block_type=block_type,
+            title=title,
+            position=next_position(parent_id),
+            created_by_id=created_by_id,
+            updated_by_id=created_by_id,
+        )
+        write_seed_data(block, seed_key, layout)
+        db.add(block)
+        db.flush()
+        blocks.append(block)
+        created.append(seed_key)
+        return block
+
     for tab in INITIAL_TOWN_HALL_STRUCTURE:
         tab_key = str(tab["key"])
-        tab_title = str(tab["title"])
-
-        section_block = _find_block(
-            blocks,
+        tab_block = ensure(
             seed_key=tab_key,
-            title=tab_title,
+            title=str(tab["title"]),
             block_type="nav_section",
-            parent_id=None,
+            parent=None,
         )
-        if section_block is None:
-            section_block = MunicipalBlock(
-                organization_id=organization_id,
-                parent_id=None,
-                block_type="nav_section",
-                title=tab_title,
-                position=next_position(None),
-                created_by_id=created_by_id,
-                updated_by_id=created_by_id,
-            )
-            write_seed_data(section_block, tab_key, None)
-            db.add(section_block)
-            db.flush()
-            blocks.append(section_block)
-            created.append(tab_key)
 
-        for item_key, item_title, layout in tab["sections"]:
-            full_key = f"{tab_key}/{item_key}"
-            existing = _find_block(
-                blocks,
-                seed_key=full_key,
-                title=item_title,
-                block_type="nav_item",
-                parent_id=section_block.id,
+        for epigraph in tab["epigraphs"]:
+            epigraph_key = f"{tab_key}/{epigraph['key']}"
+            epigraph_block = ensure(
+                seed_key=epigraph_key,
+                title=str(epigraph["title"]),
+                block_type="epigraph",
+                parent=tab_block,
             )
-            if existing is not None:
-                continue
 
-            item_block = MunicipalBlock(
-                organization_id=organization_id,
-                parent_id=section_block.id,
-                block_type="nav_item",
-                title=item_title,
-                position=next_position(section_block.id),
-                created_by_id=created_by_id,
-                updated_by_id=created_by_id,
-            )
-            write_seed_data(item_block, full_key, layout)
-            db.add(item_block)
-            db.flush()
-            blocks.append(item_block)
-            created.append(full_key)
+            for item_key, item_title, layout in epigraph["sections"]:
+                ensure(
+                    seed_key=f"{epigraph_key}/{item_key}",
+                    title=item_title,
+                    block_type="nav_item",
+                    parent=epigraph_block,
+                    layout=layout,
+                )
 
     if created:
         db.commit()

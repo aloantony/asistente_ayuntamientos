@@ -21,7 +21,7 @@ export function fetchSedeContent(organizationId: number, signal?: AbortSignal) {
 /** Las secciones son las mismas del menú superior, en el mismo orden. */
 export const SEDE_SECTIONS = [
   { key: "tablon", label: "Tablón de anuncios" },
-  { key: "tramites", label: "Trámites" },
+  { key: "tramites", label: "Trámites online" },
   { key: "tributos", label: "Tributos" },
   { key: "contratante", label: "Perfil de contratante" },
   { key: "transparencia", label: "Transparencia" },

@@ -16,6 +16,22 @@ def create_section(client, headers, title, organization_id=None):
     return response.json()
 
 
+def create_epigraph(client, headers, parent_id, title, organization_id=None):
+    params = {} if organization_id is None else {"organization_id": organization_id}
+    response = client.post(
+        "/town-hall/blocks",
+        params=params,
+        json={
+            "block_type": "epigraph",
+            "parent_id": parent_id,
+            "title": title,
+        },
+        headers=headers,
+    )
+    assert response.status_code == 201, response.text
+    return response.json()
+
+
 def create_item(client, headers, parent_id, title, organization_id=None):
     params = {} if organization_id is None else {"organization_id": organization_id}
     response = client.post(
@@ -161,9 +177,10 @@ def test_nav_tree_is_nested_and_ordered_by_position(
     headers = headers_for(user)
 
     first_section = create_section(client, headers, "Información")
+    first_section_epigraph = create_epigraph(client, headers, first_section["id"], "Información")
     second_section = create_section(client, headers, "Administración")
-    item_a = create_item(client, headers, first_section["id"], "Historia")
-    item_b = create_item(client, headers, first_section["id"], "Fiestas")
+    item_a = create_item(client, headers, first_section_epigraph["id"], "Historia")
+    item_b = create_item(client, headers, first_section_epigraph["id"], "Fiestas")
 
     assert first_section["position"] == 0
     assert second_section["position"] == 1
@@ -172,8 +189,11 @@ def test_nav_tree_is_nested_and_ordered_by_position(
 
     nav = client.get("/town-hall", headers=headers).json()["nav"]
     assert [section["title"] for section in nav] == ["Información", "Administración"]
-    assert [item["title"] for item in nav[0]["items"]] == ["Historia", "Fiestas"]
-    assert nav[1]["items"] == []
+    assert [item["title"] for item in nav[0]["epigraphs"][0]["items"]] == [
+        "Historia",
+        "Fiestas",
+    ]
+    assert nav[1]["epigraphs"] == []
 
 
 def test_reorder_moves_items_between_sections(
@@ -188,8 +208,10 @@ def test_reorder_moves_items_between_sections(
     headers = headers_for(user)
 
     first_section = create_section(client, headers, "Información")
+    first_section_epigraph = create_epigraph(client, headers, first_section["id"], "Información")
     second_section = create_section(client, headers, "Administración")
-    item = create_item(client, headers, first_section["id"], "Historia")
+    second_section_epigraph = create_epigraph(client, headers, second_section["id"], "Administración")
+    item = create_item(client, headers, first_section_epigraph["id"], "Historia")
 
     response = client.post(
         "/town-hall/blocks/reorder",
@@ -197,7 +219,11 @@ def test_reorder_moves_items_between_sections(
             "placements": [
                 {"id": second_section["id"], "position": 0},
                 {"id": first_section["id"], "position": 1},
-                {"id": item["id"], "parent_id": second_section["id"], "position": 0},
+                {
+                    "id": item["id"],
+                    "parent_id": second_section_epigraph["id"],
+                    "position": 0,
+                },
             ]
         },
         headers=headers,
@@ -206,8 +232,9 @@ def test_reorder_moves_items_between_sections(
     assert response.status_code == 200
     nav = client.get("/town-hall", headers=headers).json()["nav"]
     assert [section["title"] for section in nav] == ["Administración", "Información"]
-    assert [item["title"] for item in nav[0]["items"]] == ["Historia"]
-    assert nav[1]["items"] == []
+    assert [item["title"] for item in nav[0]["epigraphs"][0]["items"]] == ["Historia"]
+    # El epígrafe de origen se queda, vacío: mover un apartado no lo borra.
+    assert nav[1]["epigraphs"][0]["items"] == []
 
 
 def test_archiving_a_section_hides_its_items(
@@ -222,7 +249,8 @@ def test_archiving_a_section_hides_its_items(
     headers = headers_for(user)
 
     section = create_section(client, headers, "Información")
-    create_item(client, headers, section["id"], "Historia")
+    section_epigraph = create_epigraph(client, headers, section["id"], "Información")
+    create_item(client, headers, section_epigraph["id"], "Historia")
 
     response = client.patch(
         f"/town-hall/blocks/{section['id']}",
@@ -718,7 +746,8 @@ def test_content_items_hang_from_a_navigation_item(
     headers = headers_for(user)
 
     section = create_section(client, headers, "Información general")
-    apartado = create_item(client, headers, section["id"], "Historia")
+    section_epigraph = create_epigraph(client, headers, section["id"], "Información general")
+    apartado = create_item(client, headers, section_epigraph["id"], "Historia")
     first = create_content_item(client, headers, apartado["id"], "Orígenes")
     create_content_item(client, headers, apartado["id"], "Siglo XX")
 
@@ -754,7 +783,8 @@ def test_content_hierarchy_is_enforced(
     headers = headers_for(user)
 
     section = create_section(client, headers, "Información general")
-    apartado = create_item(client, headers, section["id"], "Historia")
+    section_epigraph = create_epigraph(client, headers, section["id"], "Información general")
+    apartado = create_item(client, headers, section_epigraph["id"], "Historia")
 
     # Un elemento no puede colgar del epígrafe, solo del apartado.
     on_section = client.post(
@@ -792,6 +822,7 @@ def test_only_content_items_carry_a_body(
     headers = headers_for(user)
 
     section = create_section(client, headers, "Información general")
+    section_epigraph = create_epigraph(client, headers, section["id"], "Información general")
 
     response = client.patch(
         f"/town-hall/blocks/{section['id']}",
@@ -815,7 +846,8 @@ def test_archiving_cascades_through_the_whole_branch(
     headers = headers_for(user)
 
     section = create_section(client, headers, "Información general")
-    apartado = create_item(client, headers, section["id"], "Historia")
+    section_epigraph = create_epigraph(client, headers, section["id"], "Información general")
+    apartado = create_item(client, headers, section_epigraph["id"], "Historia")
     create_content_item(client, headers, apartado["id"], "Orígenes")
 
     client.patch(
@@ -852,10 +884,11 @@ def test_content_is_isolated_between_organizations(
         ["town_hall.view", "town_hall.edit"],
     )
     foreign_section = create_section(client, headers_for(other_user), "Ajena")
+    foreign_section_epigraph = create_epigraph(client, headers_for(other_user), foreign_section["id"], "Ajena")
     foreign_item = create_item(
         client,
         headers_for(other_user),
-        foreign_section["id"],
+        foreign_section_epigraph["id"],
         "Historia",
     )
 
@@ -879,7 +912,8 @@ def test_sections_carry_a_layout(
     headers = headers_for(user)
 
     section = create_section(client, headers, "Teléfonos")
-    apartado = create_item(client, headers, section["id"], "Servicios")
+    section_epigraph = create_epigraph(client, headers, section["id"], "Teléfonos")
+    apartado = create_item(client, headers, section_epigraph["id"], "Servicios")
 
     default_layout = client.get(
         f"/town-hall/blocks/{apartado['id']}/content",
@@ -912,7 +946,8 @@ def test_layout_survives_a_rename(
     headers = headers_for(user)
 
     section = create_section(client, headers, "Teléfonos")
-    apartado = create_item(client, headers, section["id"], "Servicios")
+    section_epigraph = create_epigraph(client, headers, section["id"], "Teléfonos")
+    apartado = create_item(client, headers, section_epigraph["id"], "Servicios")
     client.patch(
         f"/town-hall/blocks/{apartado['id']}",
         json={"layout": "contacts"},
@@ -945,6 +980,7 @@ def test_only_sections_carry_a_layout(
     headers = headers_for(user)
 
     section = create_section(client, headers, "Teléfonos")
+    section_epigraph = create_epigraph(client, headers, section["id"], "Teléfonos")
 
     response = client.patch(
         f"/town-hall/blocks/{section['id']}",
@@ -971,7 +1007,8 @@ def test_unknown_layout_is_rejected_and_broken_data_falls_back(
     headers = headers_for(user)
 
     section = create_section(client, headers, "Teléfonos")
-    apartado = create_item(client, headers, section["id"], "Servicios")
+    section_epigraph = create_epigraph(client, headers, section["id"], "Teléfonos")
+    apartado = create_item(client, headers, section_epigraph["id"], "Servicios")
 
     rejected = client.patch(
         f"/town-hall/blocks/{apartado['id']}",
@@ -1004,7 +1041,8 @@ def test_people_sections_carry_free_fields(
     headers = headers_for(user)
 
     section = create_section(client, headers, "Corporación")
-    apartado = create_item(client, headers, section["id"], "Pleno")
+    section_epigraph = create_epigraph(client, headers, section["id"], "Corporación")
+    apartado = create_item(client, headers, section_epigraph["id"], "Pleno")
     client.patch(
         f"/town-hall/blocks/{apartado['id']}",
         json={"layout": "people"},
@@ -1047,7 +1085,8 @@ def test_fields_replace_wholesale_and_survive_a_rename(
     headers = headers_for(user)
 
     section = create_section(client, headers, "Corporación")
-    apartado = create_item(client, headers, section["id"], "Pleno")
+    section_epigraph = create_epigraph(client, headers, section["id"], "Corporación")
+    apartado = create_item(client, headers, section_epigraph["id"], "Pleno")
     persona = create_content_item(client, headers, apartado["id"], "Ana Ruiz")
     client.patch(
         f"/town-hall/blocks/{persona['id']}",
@@ -1087,7 +1126,8 @@ def test_only_content_items_carry_fields(
     headers = headers_for(user)
 
     section = create_section(client, headers, "Corporación")
-    apartado = create_item(client, headers, section["id"], "Pleno")
+    section_epigraph = create_epigraph(client, headers, section["id"], "Corporación")
+    apartado = create_item(client, headers, section_epigraph["id"], "Pleno")
 
     response = client.patch(
         f"/town-hall/blocks/{apartado['id']}",
@@ -1114,7 +1154,8 @@ def test_malformed_fields_are_dropped_not_served(
     headers = headers_for(user)
 
     section = create_section(client, headers, "Corporación")
-    apartado = create_item(client, headers, section["id"], "Pleno")
+    section_epigraph = create_epigraph(client, headers, section["id"], "Corporación")
+    apartado = create_item(client, headers, section_epigraph["id"], "Pleno")
     persona = create_content_item(client, headers, apartado["id"], "Ana Ruiz")
 
     # Un campo sin etiqueta, uno que no es objeto y uno correcto.
@@ -1147,7 +1188,8 @@ def test_too_many_fields_are_rejected(
     headers = headers_for(user)
 
     section = create_section(client, headers, "Corporación")
-    apartado = create_item(client, headers, section["id"], "Pleno")
+    section_epigraph = create_epigraph(client, headers, section["id"], "Corporación")
+    apartado = create_item(client, headers, section_epigraph["id"], "Pleno")
     persona = create_content_item(client, headers, apartado["id"], "Ana Ruiz")
 
     response = client.patch(
@@ -1168,7 +1210,8 @@ JPEG_BYTES = b"\xff\xd8\xff\xe0\x00\x10JFIF\x00\x01" + b"\x00" * 32
 
 def make_archive_section(client, headers):
     section = create_section(client, headers, "Archivo")
-    apartado = create_item(client, headers, section["id"], "Fototeca")
+    section_epigraph = create_epigraph(client, headers, section["id"], "Archivo")
+    apartado = create_item(client, headers, section_epigraph["id"], "Fototeca")
     client.patch(
         f"/town-hall/blocks/{apartado['id']}",
         json={"layout": "files"},
@@ -1351,7 +1394,8 @@ def test_every_declared_layout_is_accepted(
     headers = headers_for(user)
 
     section = create_section(client, headers, "Datos")
-    apartado = create_item(client, headers, section["id"], "General")
+    section_epigraph = create_epigraph(client, headers, section["id"], "Datos")
+    apartado = create_item(client, headers, section_epigraph["id"], "General")
 
     for layout in SECTION_LAYOUTS:
         applied = client.patch(
@@ -1379,7 +1423,8 @@ def test_series_points_round_trip(
     headers = headers_for(user)
 
     section = create_section(client, headers, "Datos")
-    demografia = create_item(client, headers, section["id"], "Demografía")
+    section_epigraph = create_epigraph(client, headers, section["id"], "Datos")
+    demografia = create_item(client, headers, section_epigraph["id"], "Demografía")
     client.patch(
         f"/town-hall/blocks/{demografia['id']}",
         json={"layout": "series"},
@@ -1427,7 +1472,8 @@ def test_only_content_items_carry_a_series(
     headers = headers_for(user)
 
     section = create_section(client, headers, "Datos")
-    demografia = create_item(client, headers, section["id"], "Demografía")
+    section_epigraph = create_epigraph(client, headers, section["id"], "Datos")
+    demografia = create_item(client, headers, section_epigraph["id"], "Demografía")
 
     response = client.patch(
         f"/town-hall/blocks/{demografia['id']}",
@@ -1454,7 +1500,8 @@ def test_malformed_points_are_dropped(
     headers = headers_for(user)
 
     section = create_section(client, headers, "Datos")
-    demografia = create_item(client, headers, section["id"], "Demografía")
+    section_epigraph = create_epigraph(client, headers, section["id"], "Datos")
+    demografia = create_item(client, headers, section_epigraph["id"], "Demografía")
     serie = create_content_item(client, headers, demografia["id"], "Población")
 
     stored = db.get(MunicipalBlock, serie["id"])
@@ -1484,7 +1531,8 @@ def test_too_many_points_are_rejected(
     headers = headers_for(user)
 
     section = create_section(client, headers, "Datos")
-    demografia = create_item(client, headers, section["id"], "Demografía")
+    section_epigraph = create_epigraph(client, headers, section["id"], "Datos")
+    demografia = create_item(client, headers, section_epigraph["id"], "Demografía")
     serie = create_content_item(client, headers, demografia["id"], "Población")
 
     response = client.patch(

@@ -49,9 +49,9 @@ function moveItem(
   targetItemId: number | null,
 ) {
   const source = nav.find((section) =>
-    section.items.some((item) => item.id === draggedId),
+    section.epigraphs.some((item) => item.id === draggedId),
   );
-  const moved = source?.items.find((item) => item.id === draggedId);
+  const moved = source?.epigraphs.find((item) => item.id === draggedId);
 
   if (source === undefined || moved === undefined) {
     return null;
@@ -62,19 +62,19 @@ function moveItem(
   }
 
   return nav.map((section) => {
-    const items = section.items.filter((item) => item.id !== draggedId);
+    const epigraphs = section.epigraphs.filter((item) => item.id !== draggedId);
 
     if (section.id !== targetSectionId) {
-      return { ...section, items };
+      return { ...section, epigraphs };
     }
 
     const index =
       targetItemId === null
-        ? items.length
-        : items.findIndex((item) => item.id === targetItemId);
+        ? epigraphs.length
+        : epigraphs.findIndex((item) => item.id === targetItemId);
 
-    items.splice(index === -1 ? items.length : index, 0, moved);
-    return { ...section, items };
+    epigraphs.splice(index === -1 ? epigraphs.length : index, 0, moved);
+    return { ...section, epigraphs };
   });
 }
 
@@ -349,7 +349,7 @@ export function TownHallNavEditor({
             </div>
 
             <div className="townhall-editor-items">
-              {section.items.map((item) => (
+              {section.epigraphs.map((item) => (
                 <div
                   className="townhall-editor-row"
                   key={item.id}

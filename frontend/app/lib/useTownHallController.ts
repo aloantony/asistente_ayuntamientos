@@ -46,11 +46,18 @@ export function toPlacements(nav: TownHallNavSection[]) {
 
   nav.forEach((section, sectionIndex) => {
     placements.push({ id: section.id, parent_id: null, position: sectionIndex });
-    section.items.forEach((item, itemIndex) => {
+    section.epigraphs.forEach((epigraph, epigraphIndex) => {
       placements.push({
-        id: item.id,
+        id: epigraph.id,
         parent_id: section.id,
-        position: itemIndex,
+        position: epigraphIndex,
+      });
+      epigraph.items.forEach((item, itemIndex) => {
+        placements.push({
+          id: item.id,
+          parent_id: epigraph.id,
+          position: itemIndex,
+        });
       });
     });
   });
@@ -125,12 +132,34 @@ export function useTownHallController({
     );
   }
 
-  function addItem(sectionId: number, title: string) {
+  function addEpigraph(sectionId: number, title: string) {
+    return runMutation(
+      async () => {
+        const epigraph = await createTownHallBlock(
+          { block_type: "epigraph", parent_id: sectionId, title },
+          organizationId,
+        );
+        // Un epígrafe sin apartados no enseñaría nada al desplegarlo, así que
+        // nace con el primero, como el sembrado (ADR-054).
+        await createTownHallBlock(
+          {
+            block_type: "nav_item",
+            parent_id: epigraph.id,
+            title: "Nuevo apartado",
+          },
+          organizationId,
+        );
+      },
+      "No se pudo crear el epígrafe.",
+    );
+  }
+
+  function addItem(epigraphId: number, title: string) {
     return runMutation(
       () =>
         createTownHallBlock({
           block_type: "nav_item",
-          parent_id: sectionId,
+          parent_id: epigraphId,
           title,
         }, organizationId),
       "No se pudo crear el elemento.",
@@ -356,6 +385,7 @@ export function useTownHallController({
     uploadShield,
     updateProfile,
     addSection,
+    addEpigraph,
     addItem,
     renameBlock,
     archiveBlock,

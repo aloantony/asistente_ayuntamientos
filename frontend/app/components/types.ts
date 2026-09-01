@@ -2330,8 +2330,13 @@ export type TownHallNavItem = {
   position: number;
 };
 
-export type TownHallNavSection = TownHallNavItem & {
+/** La tarjeta plegable del diseño: cuelga de una pestaña y agrupa apartados. */
+export type TownHallNavEpigraph = TownHallNavItem & {
   items: TownHallNavItem[];
+};
+
+export type TownHallNavSection = TownHallNavItem & {
+  epigraphs: TownHallNavEpigraph[];
 };
 
 export type TownHall = {
@@ -2348,7 +2353,7 @@ export type TownHallProfileUpdate = {
 };
 
 export type TownHallBlockCreate = {
-  block_type: "nav_section" | "nav_item" | "item";
+  block_type: "nav_section" | "epigraph" | "nav_item" | "item";
   parent_id?: number | null;
   title: string;
 };

@@ -49,7 +49,7 @@ export function Dashboard({
       <div className="panel-header">
         <div>
           <p className="eyebrow">Panel privado</p>
-          <h1>Dashboard</h1>
+          <h1>Mi cuenta</h1>
         </div>
         <button className="secondary-button" type="button" onClick={onLogout}>
           Cerrar sesión
