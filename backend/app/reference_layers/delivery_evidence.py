@@ -33,6 +33,7 @@ from app.reference_layers.wms_capabilities import (
     canonical_capabilities_sha256,
     parse_wms_capabilities,
 )
+from app.reference_layers.wms_proxy import siur_wms_endpoints_are_equivalent
 
 MAX_LICENSE_REVIEW_BYTES = 256 * 1024
 LICENSE_REVIEW_SCHEMA = "siur-license-review-v1"
@@ -894,10 +895,15 @@ def _attestation_issues(
     license_review: LicenseReviewEvidence,
 ) -> list[str]:
     issues: list[str] = []
-    if service.base_url != capabilities.get_map_endpoint:
+    if not siur_wms_endpoints_are_equivalent(
+        service.base_url,
+        capabilities.get_map_endpoint,
+    ):
         issues.append("GetMap endpoint does not match the current catalog")
-    if service.version != capabilities.version:
+    if service.version is not None and service.version != capabilities.version:
         issues.append("WMS version does not match the current catalog")
+    if capabilities.version not in {"1.1.1", "1.3.0"}:
+        issues.append("WMS version is not supported for delivery")
     if license_review.decision != "approved":
         issues.append("Human license review is not approved")
     if not license_review.allow_proxy:

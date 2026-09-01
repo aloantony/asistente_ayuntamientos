@@ -271,6 +271,29 @@ def validate_siur_wms_endpoint(value: str) -> SplitResult:
     return parsed
 
 
+def siur_wms_endpoints_are_equivalent(catalog_url: str, attested_url: str) -> bool:
+    """Report whether both URLs address the same GeoServer WMS servlet.
+
+    The SIUR catalog records the ``/wms`` form taken from ``settings.json``
+    while GeoServer advertises the ``/ows`` form in its own GetCapabilities.
+    Both are the same workspace endpoint, so binding an attestation to its
+    service must compare the workspace rather than the literal spelling.
+    """
+
+    try:
+        catalog = validate_siur_wms_endpoint(catalog_url)
+        attested = validate_siur_wms_endpoint(attested_url)
+    except UnsafeWMSEndpointError:
+        return False
+    return _siur_wms_workspace(catalog) == _siur_wms_workspace(attested)
+
+
+def _siur_wms_workspace(parsed: SplitResult) -> str:
+    # SIUR_WMS_PATH has already constrained this to /geoserver/<workspace>/ows
+    # or /geoserver/<workspace>/wms, with an optional trailing slash.
+    return parsed.path.strip("/").split("/")[1]
+
+
 def _map_parameters(
     *,
     version: str,

@@ -95,6 +95,34 @@ def test_capabilities_parser_supports_only_the_two_attested_versions(
     assert evidence.version == version
 
 
+def test_capabilities_parser_drops_the_geoserver_service_selector() -> None:
+    # Every real IDECyL workspace advertises its OnlineResource with the
+    # service already selected, so the prefix has to be tolerated and stripped.
+    # The fixture already ends every href with "?", so the selector replaces
+    # it. "&amp;" is how the ampersand reaches the XML; the parser sees "&".
+    document = make_capabilities_xml(
+        endpoint="https://idecyl.jcyl.es/geoserver/urbanismo/ows"
+    )
+    for selector in (b"?SERVICE=WMS&amp;", b"?service=wms", b"?"):
+        evidence = parse_wms_capabilities(
+            document.replace(b'/ows?"', b"/ows" + selector + b'"')
+        )
+        assert (
+            evidence.get_map_endpoint
+            == "https://idecyl.jcyl.es/geoserver/urbanismo/ows"
+        )
+
+    for rejected in (
+        b"?token=secret",
+        b"?SERVICE=WFS",
+        b"?SERVICE=WMS&amp;bbox=0",
+    ):
+        with pytest.raises(WMSCapabilitiesError):
+            parse_wms_capabilities(
+                document.replace(b'/ows?"', b"/ows" + rejected + b'"')
+            )
+
+
 def test_capabilities_parser_rejects_unsafe_xml_namespaces_and_endpoints() -> None:
     document = make_capabilities_xml()
     doctype = document.replace(

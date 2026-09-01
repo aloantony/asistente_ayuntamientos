@@ -52,6 +52,7 @@ from app.reference_layers.wms_proxy import (
     _validate_response_body,
     build_identify_request,
     build_tile_request,
+    siur_wms_endpoints_are_equivalent,
     tile_bbox,
     validate_siur_wms_endpoint,
 )
@@ -1788,6 +1789,32 @@ def test_siur_wms_allowlist_rejects_unsafe_endpoints(value) -> None:
     assert validate_siur_wms_endpoint(
         "https://idecyl.jcyl.es/geoserver/urbanismo/ows"
     ).hostname == "idecyl.jcyl.es"
+
+
+def test_siur_wms_endpoint_equivalence_follows_the_workspace() -> None:
+    # GeoServer serves one workspace through both /wms and /ows, and IDECyL
+    # advertises the /ows spelling while the SIUR catalog records /wms.
+    assert siur_wms_endpoints_are_equivalent(
+        "https://idecyl.jcyl.es/geoserver/urbanismo/wms",
+        "https://idecyl.jcyl.es/geoserver/urbanismo/ows",
+    )
+    assert siur_wms_endpoints_are_equivalent(
+        "https://idecyl.jcyl.es/geoserver/urbanismo/wms",
+        "https://idecyl.jcyl.es/geoserver/urbanismo/wms/",
+    )
+    assert not siur_wms_endpoints_are_equivalent(
+        "https://idecyl.jcyl.es/geoserver/urbanismo/wms",
+        "https://idecyl.jcyl.es/geoserver/limites/ows",
+    )
+    for unsafe in (
+        "https://evil.example/geoserver/urbanismo/ows",
+        "https://idecyl.jcyl.es/geonetwork/srv/spa/catalog.search",
+        "https://idecyl.jcyl.es/geoserver/urbanismo/ows?token=secret",
+    ):
+        assert not siur_wms_endpoints_are_equivalent(
+            "https://idecyl.jcyl.es/geoserver/urbanismo/wms",
+            unsafe,
+        )
 
 
 def test_dns_policy_rejects_private_and_mixed_answers() -> None:
