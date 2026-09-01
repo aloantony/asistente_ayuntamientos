@@ -8,6 +8,13 @@ from app.assistant import tools as assistant_tools
 from app.assistant.prompts import build_ordinance_coverage_block
 from app.core.config import settings
 from app.municipalities.models import Municipality
+from app.ordinances.embeddings import (
+    EmbeddingsUnavailableError,
+    _validate_external_embedding_vector,
+    embed_text,
+    embedding_vector_is_usable,
+    vector_similarity,
+)
 from app.ordinances.models import Ordinance, OrdinanceLegalChunk
 from app.ordinances import search as ordinance_search
 from app.ordinances.search import OrdinanceSearchOptions, search_ordinance_chunks
@@ -647,10 +654,12 @@ def test_assistant_ordinance_tool_accepts_manage_and_propagates_sensitive_flags(
     def fake_search(
         _db,
         *,
+        query_text,
         query_vector,
         embedding_model,
         options,
     ):
+        assert query_text == "ordenanza histórica pendiente"
         assert query_vector == "[1,0]"
         assert embedding_model == "test-model"
         captured_options.append(options)
@@ -763,9 +772,274 @@ def test_coverage_prompt_counts_the_complete_corpus(db):
         embedding=None,
         embedding_model=settings.embeddings_model,
     )
+    zero_vector_municipality = _municipality(
+        db,
+        name="Municipio con vector cero",
+        ine_code="99998",
+    )
+    zero_vector_ordinance = _ordinance(
+        db,
+        zero_vector_municipality,
+        title="Ordenanza con fragmento inválido",
+        topic="vías",
+    )
+    _chunk(
+        db,
+        zero_vector_ordinance,
+        index=0,
+        embedding="[0,0]",
+        embedding_model=settings.embeddings_model,
+    )
     db.flush()
 
     coverage = build_ordinance_coverage_block(db)
 
     assert "81 ordenanzas de 81 municipios" in coverage
+    assert "0 tienen revisión humana aprobatoria" in coverage
     assert "no es una lista parcial" in coverage
+
+
+def test_punctuation_and_invalid_vectors_never_become_searchable():
+    vector, model, status = embed_text(":., ; --")
+
+    assert vector is None
+    assert model == settings.embeddings_model
+    assert status == "disabled"
+    with pytest.raises(EmbeddingsUnavailableError):
+        _validate_external_embedding_vector([0.0, 0.0])
+    assert embedding_vector_is_usable("[1,0]", expected_dimensions=2) is True
+    assert embedding_vector_is_usable("[0,0]", expected_dimensions=2) is False
+    assert embedding_vector_is_usable("[1]", expected_dimensions=2) is False
+    assert embedding_vector_is_usable("[NaN,1]", expected_dimensions=2) is False
+    assert vector_similarity("[NaN,0]", "[1,0]") == 0
+    assert vector_similarity("[Infinity,0]", "[1,0]") == 0
+
+
+def test_pgvector_and_python_exclude_zero_negative_and_below_threshold(db):
+    db.execute(text("CREATE EXTENSION IF NOT EXISTS vector"))
+    municipality = _municipality(db, name="Umbral", ine_code="09501")
+    valid = _ordinance(
+        db,
+        municipality,
+        title="Ordenanza válida",
+        topic="otro tema",
+    )
+    below = _ordinance(
+        db,
+        municipality,
+        title="Ordenanza bajo umbral",
+        topic="tema preferido",
+    )
+    zero = _ordinance(
+        db,
+        municipality,
+        title="Ordenanza vector cero",
+        topic="tema preferido",
+    )
+    negative = _ordinance(
+        db,
+        municipality,
+        title="Ordenanza negativa",
+        topic="tema preferido",
+    )
+    wrong_dimensions = _ordinance(
+        db,
+        municipality,
+        title="Ordenanza de dimensión incompatible",
+        topic="tema preferido",
+    )
+    valid_chunk = _chunk(db, valid, index=0, embedding="[1,0]")
+    _chunk(db, below, index=0, embedding="[0.005,0.9999875]")
+    _chunk(db, zero, index=0, embedding="[0,0]")
+    _chunk(db, negative, index=0, embedding="[-1,0]")
+    _chunk(db, wrong_dimensions, index=0, embedding="[1,0,0]")
+    db.flush()
+    options = OrdinanceSearchOptions(topic="tema preferido", limit=10)
+
+    python_page = ordinance_search._search_with_python(
+        db,
+        "[1,0]",
+        "test-model",
+        options,
+    )
+    pgvector_page = ordinance_search._search_with_pgvector(
+        db,
+        "[1,0]",
+        "test-model",
+        options,
+    )
+
+    assert [result["chunk_id"] for result in python_page["results"]] == [
+        valid_chunk.id
+    ]
+    assert [result["chunk_id"] for result in pgvector_page["results"]] == [
+        valid_chunk.id
+    ]
+    assert all(
+        result["score"] < 1 + ordinance_search.TOPIC_PREFERENCE_BOOST
+        for result in pgvector_page["results"]
+    )
+
+
+def test_local_hash_search_requires_a_literal_query_term(db, monkeypatch):
+    _python_search(monkeypatch)
+    municipality = _municipality(db, name="Filtro local", ine_code="09502")
+    relevant = _ordinance(
+        db,
+        municipality,
+        title="Ordenanza de ruido",
+        topic="convivencia",
+    )
+    collision = _ordinance(
+        db,
+        municipality,
+        title="Ordenanza de aguas",
+        topic="abastecimiento",
+    )
+    relevant_chunk = _chunk(
+        db,
+        relevant,
+        index=0,
+        embedding="[1,0]",
+        embedding_model=settings.embeddings_model,
+    )
+    _chunk(
+        db,
+        collision,
+        index=0,
+        embedding="[1,0]",
+        embedding_model=settings.embeddings_model,
+    )
+    db.flush()
+
+    page = search_ordinance_chunks(
+        db,
+        query_text="ruido convivencia",
+        query_vector="[1,0]",
+        embedding_model=settings.embeddings_model,
+        options=OrdinanceSearchOptions(),
+    )
+
+    assert page["retrieval"]["mode"] == "lexical_hash"
+    assert page["retrieval"]["quality_warning"]
+    assert [result["chunk_id"] for result in page["results"]] == [
+        relevant_chunk.id
+    ]
+
+
+def test_read_ordinance_chunk_pages_and_reassembles_exact_text(
+    db,
+    make_user,
+    make_organization,
+    grant_permissions,
+):
+    municipality = _municipality(db, name="Texto íntegro", ine_code="09503")
+    ordinance = _ordinance(
+        db,
+        municipality,
+        title="Ordenanza extensa para lectura",
+        topic="texto completo",
+    )
+    chunk = _chunk(db, ordinance, index=0, embedding="[1,0]")
+    chunk.text = "Inicio|" + ("contenido jurídico;" * 400) + "|Final"
+    db.commit()
+    comparer = make_user()
+    grant_permissions(comparer, make_organization(), ["ordinances.compare"])
+
+    parts: list[str] = []
+    offset = 0
+    while True:
+        result = assistant_tools.execute_tool(
+            db,
+            comparer,
+            "read_ordinance_chunk",
+            {"chunk_id": chunk.id, "offset": offset, "max_chars": 3000},
+            allowed=frozenset({"read_ordinance_chunk"}),
+        )
+        assert result.ok is True, result.content
+        payload = json.loads(result.content)
+        parts.append(payload["text"])
+        assert payload["legal_review_status"] == "pending_review"
+        if not payload["has_more"]:
+            assert payload["next_offset"] is None
+            break
+        offset = payload["next_offset"]
+
+    assert "".join(parts) == chunk.text
+
+
+def test_read_ordinance_chunk_preserves_pending_and_inactive_gates(
+    db,
+    make_user,
+    make_organization,
+    grant_permissions,
+):
+    municipality = _municipality(db, name="Gates", ine_code="09504")
+    pending = _ordinance(
+        db,
+        municipality,
+        title="Ordenanza pendiente",
+        topic="prueba",
+        curation_status="pending_review",
+    )
+    pending_chunk = _chunk(
+        db,
+        pending,
+        index=0,
+        embedding="[1,0]",
+        review_status="pending_review",
+    )
+    inactive = _ordinance(
+        db,
+        municipality,
+        title="Ordenanza archivada",
+        topic="prueba",
+        status="archived",
+    )
+    inactive_chunk = _chunk(db, inactive, index=0, embedding="[1,0]")
+    db.commit()
+    comparer = make_user()
+    grant_permissions(comparer, make_organization(), ["ordinances.compare"])
+
+    pending_denied = assistant_tools.execute_tool(
+        db,
+        comparer,
+        "read_ordinance_chunk",
+        {"chunk_id": pending_chunk.id, "include_pending": True},
+        allowed=frozenset({"read_ordinance_chunk"}),
+    )
+    inactive_hidden = assistant_tools.execute_tool(
+        db,
+        comparer,
+        "read_ordinance_chunk",
+        {"chunk_id": inactive_chunk.id},
+        allowed=frozenset({"read_ordinance_chunk"}),
+    )
+    inactive_visible = assistant_tools.execute_tool(
+        db,
+        comparer,
+        "read_ordinance_chunk",
+        {"chunk_id": inactive_chunk.id, "include_inactive": True},
+        allowed=frozenset({"read_ordinance_chunk"}),
+    )
+
+    assert pending_denied.ok is False
+    assert "ordinances.review" in pending_denied.content
+    assert inactive_hidden.ok is False
+    assert "404" in inactive_hidden.content
+    assert inactive_visible.ok is True
+
+    reviewer = make_user()
+    grant_permissions(
+        reviewer,
+        make_organization(),
+        ["ordinances.compare", "ordinances.review"],
+    )
+    pending_visible = assistant_tools.execute_tool(
+        db,
+        reviewer,
+        "read_ordinance_chunk",
+        {"chunk_id": pending_chunk.id, "include_pending": True},
+        allowed=frozenset({"read_ordinance_chunk"}),
+    )
+    assert pending_visible.ok is True

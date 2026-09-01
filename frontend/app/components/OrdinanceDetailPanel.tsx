@@ -57,7 +57,7 @@ export function OrdinanceDetailPanel({
           <span aria-hidden="true" />
           <span aria-hidden="true" />
           <span aria-hidden="true" />
-          <p>Cargando ficha y fragmentos revisados…</p>
+          <p>Cargando ficha y fragmentos indexados…</p>
         </div>
       ) : null}
 
@@ -104,6 +104,14 @@ function renderOrdinanceDetailContent(detail: {
         </p>
       ) : null}
 
+      {ordinance.legal_review_status !== "human_approved" ? (
+        <p className={styles.legalWarning} role="status">
+          <ShieldAlert aria-hidden="true" />
+          Esta ficha tiene curación técnica, pero sigue pendiente de revisión
+          jurídica humana. Contrasta vigencia y contenido en la fuente enlazada.
+        </p>
+      ) : null}
+
       <dl className={styles.legalMetadata}>
         <div>
           <dt>Aprobación</dt>
@@ -129,7 +137,7 @@ function renderOrdinanceDetailContent(detail: {
 
       {ordinance.summary ? (
         <section className={styles.detailSection}>
-          <h3>Resumen revisado</h3>
+          <h3>Resumen técnico indexado</h3>
           <p>{ordinance.summary}</p>
         </section>
       ) : null}
@@ -165,8 +173,8 @@ function renderOrdinanceDetailContent(detail: {
       <section className={styles.detailSection}>
         <div className={styles.sectionHeadingRow}>
           <div>
-            <p className={styles.sectionEyebrow}>Corpus validado</p>
-            <h3>Fragmentos revisados</h3>
+            <p className={styles.sectionEyebrow}>Corpus técnico</p>
+            <h3>Fragmentos indexados</h3>
           </div>
           <span>{chunks.length}</span>
         </div>
@@ -193,8 +201,8 @@ function renderOrdinanceDetailContent(detail: {
           </div>
         ) : (
           <p className={styles.emptyCopy}>
-            Esta ficha aún no tiene fragmentos jurídicos aprobados para
-            consulta. No debe usarse como base documental del asistente.
+            Esta ficha aún no tiene fragmentos con curación técnica aprobada
+            para consulta. No debe usarse como base documental del asistente.
           </p>
         )}
       </section>

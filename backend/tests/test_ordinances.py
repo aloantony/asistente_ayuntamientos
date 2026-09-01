@@ -8,7 +8,7 @@ from sqlalchemy import insert, select
 from sqlalchemy.orm import Session
 
 from app.municipalities.models import Municipality
-from app.ordinances import import_service
+from app.ordinances import corpus_maintenance, import_service
 from app.ordinances.bop_burgos import (
     parse_bop_burgos_search_results,
     search_bop_burgos_announcements,
@@ -333,6 +333,9 @@ def test_manual_ordinance_defaults_to_pending_review_and_approval_requires_revie
 
     assert pending.status_code == 201
     assert pending.json()["curation_status"] == "pending_review"
+    assert pending.json()["legal_review_status"] == "pending_review"
+    assert pending.json()["legal_reviewed_by_id"] is None
+    assert pending.json()["legal_reviewed_at"] is None
     assert approved.status_code == 403
     assert approved.json()["detail"] == "Permission required: ordinances.review"
 
@@ -481,6 +484,9 @@ def test_ordinance_reader_cannot_see_document_metadata_from_another_tenant(
         document_id=document["id"],
         curation_status="approved",
     )
+    assert ordinance["legal_review_status"] == "human_approved"
+    assert ordinance["legal_reviewed_by_id"] == superuser.id
+    assert ordinance["legal_reviewed_at"] is not None
     reader = make_user()
     grant_permissions(reader, make_organization(), ["ordinances.view"])
 
@@ -740,6 +746,9 @@ def test_editing_approved_legal_text_rebuilds_chunks_and_requires_new_review(
 
     assert edited.status_code == 200, edited.text
     assert edited.json()["curation_status"] == "needs_changes"
+    assert edited.json()["legal_review_status"] == "pending_review"
+    assert edited.json()["legal_reviewed_by_id"] is None
+    assert edited.json()["legal_reviewed_at"] is None
     rebuilt_chunks = list(
         db.scalars(
             select(OrdinanceLegalChunk)
@@ -761,6 +770,9 @@ def test_editing_approved_legal_text_rebuilds_chunks_and_requires_new_review(
 
     assert reviewed.status_code == 200, reviewed.text
     assert reviewed.json()["curation_status"] == "approved"
+    assert reviewed.json()["legal_review_status"] == "human_approved"
+    assert reviewed.json()["legal_reviewed_by_id"] == reviewer.id
+    assert reviewed.json()["legal_reviewed_at"] is not None
     db.expire_all()
     assert {
         chunk.review_status
@@ -1262,6 +1274,9 @@ def test_import_job_run_creates_pending_ordinance_and_review_report(
     )
     assert approved.status_code == 200
     assert approved.json()["ordinance"]["curation_status"] == "approved"
+    assert approved.json()["ordinance"]["legal_review_status"] == "human_approved"
+    assert approved.json()["ordinance"]["legal_reviewed_by_id"] == user.id
+    assert approved.json()["ordinance"]["legal_reviewed_at"] is not None
 
     rerun_approved = client.post(
         f"/ordinances/import-jobs/{created.json()['id']}/run-inline",
@@ -1866,6 +1881,258 @@ def test_import_service_splits_every_chunk_to_the_configured_limit(monkeypatch):
     assert len(chunks) > 1
     assert "contenido-sin-espacios" * 4 in "".join(chunks).replace("\n", "")
     assert all(0 < len(chunk) <= 20 for chunk in chunks)
+
+
+def test_import_service_drops_punctuation_only_chunks(monkeypatch):
+    monkeypatch.setattr(import_service.settings, "ordinance_chunk_chars", 20)
+
+    chunks = import_service._split_chunks(":., ; --")
+
+    assert chunks == []
+
+
+def test_rebuild_accepts_280_chunks_without_losing_text(db, monkeypatch):
+    municipality = import_service.Municipality(
+        name=f"Municipio extenso {unique_suffix()}",
+        province="Burgos",
+        autonomous_community="Castilla y León",
+    )
+    db.add(municipality)
+    db.flush()
+    model = import_service.Ordinance(
+        municipality_id=municipality.id,
+        title="Ordenanza extensa",
+        topic="prueba de integridad",
+        ordinance_type="ordinance",
+        text_content="A" * 2800,
+    )
+    db.add(model)
+    db.flush()
+    monkeypatch.setattr(import_service.settings, "ordinance_chunk_chars", 10)
+    monkeypatch.setattr(import_service.settings, "ordinance_import_max_chunks", 500)
+
+    import_service.rebuild_ordinance_chunks(
+        db,
+        model,
+        generate_embeddings=False,
+    )
+    db.flush()
+    chunks = list(
+        db.scalars(
+            select(OrdinanceLegalChunk)
+            .where(OrdinanceLegalChunk.ordinance_id == model.id)
+            .order_by(OrdinanceLegalChunk.chunk_index)
+        )
+    )
+
+    assert len(chunks) == 280
+    assert "".join(chunk.text for chunk in chunks) == model.text_content
+
+
+def test_corpus_repair_requires_confirmed_plan_and_reopens_human_review(
+    client,
+    db,
+    superuser,
+    monkeypatch,
+):
+    municipality = create_municipality(client, headers_for(superuser))
+    ordinance = create_ordinance(
+        client,
+        headers_for(superuser),
+        municipality["id"],
+        curation_status="approved",
+        text_content=(
+            "Artículo 1. Primera regla incluida en el corpus.\n\n"
+            "Artículo 2. Regla final que debe seguir indexada."
+        ),
+    )
+    chunks = list(
+        db.scalars(
+            select(OrdinanceLegalChunk)
+            .where(OrdinanceLegalChunk.ordinance_id == ordinance["id"])
+            .order_by(OrdinanceLegalChunk.chunk_index)
+        )
+    )
+    assert len(chunks) == 2
+    db.delete(chunks[-1])
+    db.commit()
+    audit = corpus_maintenance.audit_ordinance_corpus(
+        db,
+        ordinance_ids=[ordinance["id"]],
+    )
+    assert audit["summary"]["chunk_mismatches"] == 1
+    monkeypatch.setattr(
+        corpus_maintenance,
+        "dispatch_ordinance_embeddings",
+        lambda _db, ordinance_id: {"ordinance_id": ordinance_id},
+    )
+
+    result = corpus_maintenance.repair_ordinance_chunks(
+        db,
+        ordinance_ids=[ordinance["id"]],
+        expected_plan_sha256=audit["plan_sha256"],
+    )
+
+    assert result["repaired_ordinance_ids"] == [ordinance["id"]]
+    assert result["embedding_dispatch"] == {
+        str(ordinance["id"]): {"ordinance_id": ordinance["id"]}
+    }
+    db.expire_all()
+    model = db.get(import_service.Ordinance, ordinance["id"])
+    assert model.curation_status == "needs_changes"
+    assert model.legal_review_status == "pending_review"
+    assert model.legal_reviewed_by_id is None
+    assert model.legal_reviewed_at is None
+    rebuilt = list(
+        db.scalars(
+            select(OrdinanceLegalChunk)
+            .where(OrdinanceLegalChunk.ordinance_id == ordinance["id"])
+            .order_by(OrdinanceLegalChunk.chunk_index)
+        )
+    )
+    assert [chunk.text for chunk in rebuilt] == import_service._split_chunks(
+        model.text_content
+    )
+    assert {chunk.review_status for chunk in rebuilt} == {"pending_review"}
+    second_audit = corpus_maintenance.audit_ordinance_corpus(
+        db,
+        ordinance_ids=[ordinance["id"]],
+    )
+    assert second_audit["summary"]["chunk_mismatches"] == 0
+
+
+def test_corpus_audit_reports_embedding_source_and_text_gaps(db):
+    municipality = Municipality(
+        name=f"Municipio auditable {unique_suffix()}",
+        province="Burgos",
+        autonomous_community="Castilla y León",
+    )
+    db.add(municipality)
+    db.flush()
+    text_content = "Artículo 1. Contenido auditable sin fuente enlazada."
+    invalid_embedding = import_service.Ordinance(
+        municipality_id=municipality.id,
+        title="Ordenanza con vector inválido",
+        topic="auditoría",
+        ordinance_type="ordinance",
+        text_content=text_content,
+    )
+    missing_text = import_service.Ordinance(
+        municipality_id=municipality.id,
+        title="Ordenanza sin texto",
+        topic="auditoría",
+        ordinance_type="ordinance",
+    )
+    db.add_all([invalid_embedding, missing_text])
+    db.flush()
+    chunk = OrdinanceLegalChunk(
+        ordinance_id=invalid_embedding.id,
+        chunk_index=0,
+        text=text_content,
+        review_status="pending_review",
+        embedding_model=import_service.settings.embeddings_model,
+        embedding="[0,0]",
+        embedding_status="ready",
+    )
+    db.add(chunk)
+    db.flush()
+
+    embedding_audit = corpus_maintenance.audit_ordinance_corpus(
+        db,
+        ordinance_ids=[invalid_embedding.id],
+    )
+    entry = embedding_audit["entries"][0]
+    assert entry["chunk_mismatch"] is False
+    assert entry["invalid_ready_embedding_chunk_ids"] == [chunk.id]
+    assert entry["missing_source_reference"] is True
+    assert len(entry["ordinance_record_sha256"]) == 64
+    assert len(entry["stored_chunk_structure_sha256"]) == 64
+    assert embedding_audit["import_failures"] is None
+    repair = corpus_maintenance.repair_ordinance_chunks(
+        db,
+        ordinance_ids=[invalid_embedding.id],
+        expected_plan_sha256=embedding_audit["plan_sha256"],
+    )
+    assert repair["repaired_ordinance_ids"] == []
+    assert repair["unresolved_embedding_issue_ordinance_ids"] == [
+        invalid_embedding.id
+    ]
+
+    replacement_text = "Artículo 1. Otro contenido coherente y auditable."
+    invalid_embedding.text_content = replacement_text
+    chunk.text = replacement_text
+    db.flush()
+    changed_audit = corpus_maintenance.audit_ordinance_corpus(
+        db,
+        ordinance_ids=[invalid_embedding.id],
+    )
+    assert changed_audit["entries"][0]["chunk_mismatch"] is False
+    assert changed_audit["plan_sha256"] != embedding_audit["plan_sha256"]
+
+    failed_job = import_service.OrdinanceImportJob(
+        title="Fallos auditables",
+        municipality_ids_json="[]",
+        official_source_ids_json="[]",
+        source_urls_json="[]",
+        review_criteria="Auditar fallos sin reintentarlos.",
+    )
+    retry_job = import_service.OrdinanceImportJob(
+        title="Reintento auditable",
+        municipality_ids_json="[]",
+        official_source_ids_json="[]",
+        source_urls_json="[]",
+        review_criteria="Auditar el intento posterior.",
+    )
+    db.add_all([failed_job, retry_job])
+    db.flush()
+    resolved_url = "https://bop.example.test/resuelta.pdf"
+    unresolved_url = "https://bop.example.test/pendiente.pdf"
+    db.add_all(
+        [
+            import_service.OrdinanceImportItem(
+                job_id=failed_job.id,
+                municipality_id=municipality.id,
+                source_url=resolved_url,
+                status="failed",
+                error_message="Fallo transitorio",
+            ),
+            import_service.OrdinanceImportItem(
+                job_id=failed_job.id,
+                municipality_id=municipality.id,
+                source_url=unresolved_url,
+                status="failed",
+                error_message="HTTP 404",
+            ),
+        ]
+    )
+    db.flush()
+    db.add(
+        import_service.OrdinanceImportItem(
+            job_id=retry_job.id,
+            municipality_id=municipality.id,
+            ordinance_id=invalid_embedding.id,
+            source_url=resolved_url,
+            status="pending_review",
+        )
+    )
+    db.flush()
+
+    complete_audit = corpus_maintenance.audit_ordinance_corpus(
+        db,
+        ordinance_ids=[invalid_embedding.id, missing_text.id],
+    )
+    assert complete_audit["summary"]["invalid_ready_embeddings"] == 1
+    assert complete_audit["summary"]["missing_source_references"] == 2
+    assert complete_audit["summary"]["missing_legal_text"] == 1
+
+    global_audit = corpus_maintenance.audit_ordinance_corpus(db)
+    failure_audit = global_audit["import_failures"]
+    assert failure_audit["failed_rows"] == 2
+    assert failure_audit["failed_distinct_urls"] == 2
+    assert failure_audit["resolved_distinct_urls"] == 1
+    assert failure_audit["unresolved_distinct_urls"] == 1
+    assert failure_audit["unresolved_sources"][0]["source_url"] == unresolved_url
+    assert len(failure_audit["import_failure_snapshot_sha256"]) == 64
 
 
 def test_rebuild_chunks_rejects_overflow_without_deleting_existing_chunks(

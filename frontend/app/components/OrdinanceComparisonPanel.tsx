@@ -1,4 +1,4 @@
-import { ExternalLink, Scale, X } from "lucide-react";
+import { ExternalLink, Scale, ShieldAlert, X } from "lucide-react";
 import {
   formatLegalDate,
   safeExternalUrl,
@@ -37,7 +37,8 @@ export function OrdinanceComparisonPanel({
           </h2>
           <p>
             Contrasta materias, fechas y estados. La ausencia de una fila no
-            demuestra que el municipio carezca de regulación.
+            demuestra que el municipio carezca de regulación. La curación
+            técnica no sustituye la revisión jurídica humana.
           </p>
         </div>
         <button aria-label="Cerrar comparación" onClick={onClose} type="button">
@@ -47,7 +48,7 @@ export function OrdinanceComparisonPanel({
 
       {isLoading ? (
         <p className={styles.comparisonState} role="status">
-          Preparando la comparación del corpus revisado…
+          Preparando la comparación del corpus técnico…
         </p>
       ) : null}
 
@@ -103,6 +104,15 @@ export function OrdinanceComparisonPanel({
                                     >
                                       {entry.title}
                                     </button>
+                                    {entry.legal_review_status !== "human_approved" ? (
+                                      <p
+                                        className={styles.legalWarning}
+                                        role="status"
+                                      >
+                                        <ShieldAlert aria-hidden="true" />
+                                        Pendiente de revisión jurídica humana.
+                                      </p>
+                                    ) : null}
                                     <dl>
                                       <div>
                                         <dt>Aprobación</dt>
@@ -134,7 +144,7 @@ export function OrdinanceComparisonPanel({
                             </div>
                           ) : (
                             <span className={styles.noComparisonEntry}>
-                              Sin registro aprobado en este corpus
+                              Sin registro con curación técnica en este corpus
                             </span>
                           )}
                         </td>
@@ -147,8 +157,8 @@ export function OrdinanceComparisonPanel({
           </div>
         ) : (
           <p className={styles.comparisonState}>
-            No hay ordenanzas aprobadas que coincidan con esta selección y sus
-            filtros actuales.
+            No hay ordenanzas con curación técnica aprobada que coincidan con
+            esta selección y sus filtros actuales.
           </p>
         )
       ) : null}

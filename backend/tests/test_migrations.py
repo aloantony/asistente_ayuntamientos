@@ -19,7 +19,7 @@ from sqlalchemy.engine.url import make_url
 
 BACKEND_ROOT = Path(__file__).resolve().parents[1]
 DEPLOYED_REVISION = "20260701_0020"
-HEAD_REVISION = "20260717_0029"
+HEAD_REVISION = "20260717_0030"
 LEGACY_GEOGRAPHY_REVISION = "20260716_0026"
 LEGACY_GEOGRAPHY_PATH = (
     BACKEND_ROOT
@@ -1116,15 +1116,17 @@ def test_ordinance_review_default_changes_without_reclassifying_existing_rows(
 
         run_alembic(migration_database_url, "upgrade", "head")
         with engine.begin() as connection:
-            assert connection.execute(
+            previous_row = connection.execute(
                 text(
                     """
-                    SELECT curation_status
+                    SELECT curation_status, legal_review_status
                     FROM ordinances
                     WHERE title = 'Ordenanza anterior a revisión segura'
                     """
                 )
-            ).scalar_one() == "approved"
+            ).one()
+            assert previous_row.curation_status == "approved"
+            assert previous_row.legal_review_status == "pending_review"
             new_status = connection.execute(
                 text(
                     """
@@ -1169,6 +1171,156 @@ def test_ordinance_review_default_changes_without_reclassifying_existing_rows(
 
         run_alembic(migration_database_url, "upgrade", "head")
         run_alembic(migration_database_url, "check")
+    finally:
+        engine.dispose()
+
+
+def test_ordinance_legal_review_migration_backfills_only_human_reports(
+    migration_database_url: str,
+) -> None:
+    run_alembic(migration_database_url, "upgrade", "20260717_0029")
+    engine = create_engine(migration_database_url)
+
+    try:
+        with engine.begin() as connection:
+            reviewer_id = connection.execute(
+                text(
+                    "INSERT INTO users (email, hashed_password, full_name) "
+                    "VALUES ('legal-review-migration@example.test', 'hash', "
+                    "'Legal reviewer') RETURNING id"
+                )
+            ).scalar_one()
+            municipality_id = connection.execute(
+                text(
+                    """
+                    INSERT INTO municipalities (
+                        name, province, autonomous_community
+                    ) VALUES (
+                        'Municipio revisión legal', 'Burgos', 'Castilla y León'
+                    ) RETURNING id
+                    """
+                )
+            ).scalar_one()
+            human_ordinance_id = connection.execute(
+                text(
+                    """
+                    INSERT INTO ordinances (
+                        municipality_id, title, topic, ordinance_type,
+                        curation_status
+                    ) VALUES (
+                        :municipality_id, 'Ordenanza revisada por humano',
+                        'migración', 'ordinance', 'approved'
+                    ) RETURNING id
+                    """
+                ),
+                {"municipality_id": municipality_id},
+            ).scalar_one()
+            agent_ordinance_id = connection.execute(
+                text(
+                    """
+                    INSERT INTO ordinances (
+                        municipality_id, title, topic, ordinance_type,
+                        curation_status
+                    ) VALUES (
+                        :municipality_id, 'Ordenanza revisada por agente',
+                        'migración', 'ordinance', 'approved'
+                    ) RETURNING id
+                    """
+                ),
+                {"municipality_id": municipality_id},
+            ).scalar_one()
+            connection.execute(
+                text(
+                    """
+                    INSERT INTO ordinance_review_reports (
+                        ordinance_id, status, proposed_decision,
+                        confidence_score, checklist_json, reviewed_by_agent,
+                        reviewed_by_id, reviewed_at
+                    ) VALUES (
+                        :ordinance_id, 'human_approved', 'approve', 1.0, '[]',
+                        false, :reviewer_id, now()
+                    )
+                    """
+                ),
+                {
+                    "ordinance_id": human_ordinance_id,
+                    "reviewer_id": reviewer_id,
+                },
+            )
+            connection.execute(
+                text(
+                    """
+                    INSERT INTO ordinance_review_reports (
+                        ordinance_id, status, proposed_decision,
+                        confidence_score, checklist_json, reviewed_by_agent
+                    ) VALUES (
+                        :ordinance_id, 'agent_reviewed', 'approve', 0.9, '[]',
+                        true
+                    )
+                    """
+                ),
+                {"ordinance_id": agent_ordinance_id},
+            )
+
+        run_alembic(migration_database_url, "upgrade", "head")
+        run_alembic(migration_database_url, "check")
+        with engine.begin() as connection:
+            rows = {
+                row.id: row
+                for row in connection.execute(
+                    text(
+                        """
+                        SELECT id, legal_review_status, legal_reviewed_by_id,
+                               legal_reviewed_at
+                        FROM ordinances
+                        WHERE id IN (:human_id, :agent_id)
+                        """
+                    ),
+                    {
+                        "human_id": human_ordinance_id,
+                        "agent_id": agent_ordinance_id,
+                    },
+                )
+            }
+            assert rows[human_ordinance_id].legal_review_status == "human_approved"
+            assert rows[human_ordinance_id].legal_reviewed_by_id == reviewer_id
+            assert rows[human_ordinance_id].legal_reviewed_at is not None
+            assert rows[agent_ordinance_id].legal_review_status == "pending_review"
+            assert rows[agent_ordinance_id].legal_reviewed_by_id is None
+            assert rows[agent_ordinance_id].legal_reviewed_at is None
+
+        blocked_downgrade = run_alembic(
+            migration_database_url,
+            "downgrade",
+            "20260717_0029",
+            check=False,
+        )
+        assert blocked_downgrade.returncode != 0
+        assert "while human legal-review audit data exists" in (
+            blocked_downgrade.stderr
+        )
+        assert "legal_review_status" in {
+            column["name"] for column in inspect(engine).get_columns("ordinances")
+        }
+
+        with engine.begin() as connection:
+            connection.execute(
+                text(
+                    """
+                    UPDATE ordinances
+                    SET legal_review_status = 'pending_review',
+                        legal_reviewed_by_id = NULL,
+                        legal_reviewed_at = NULL
+                    """
+                )
+            )
+        run_alembic(migration_database_url, "downgrade", "20260717_0029")
+        column_names = {
+            column["name"] for column in inspect(engine).get_columns("ordinances")
+        }
+        assert "legal_review_status" not in column_names
+        assert "legal_reviewed_by_id" not in column_names
+        assert "legal_reviewed_at" not in column_names
     finally:
         engine.dispose()
 

@@ -135,19 +135,17 @@ def embed_text(text: str) -> tuple[str | None, str, str]:
     OpenAI-compatible embeddings endpoint through configuration.
     """
     clean_text = text.strip()
-    if settings.embeddings_runtime == "disabled" or not clean_text:
+    if settings.embeddings_runtime == "disabled" or not has_searchable_text(
+        clean_text
+    ):
         return None, settings.embeddings_model, "disabled"
     if settings.embeddings_runtime == "openai_compatible":
-        return (
-            _format_vector(_embed_openai_compatible(clean_text)),
-            settings.embeddings_model,
-            "ready",
-        )
-    return (
-        _format_vector(_embed_local_hash(clean_text, settings.embeddings_dimensions)),
-        settings.embeddings_model,
-        "ready",
-    )
+        vector = _embed_openai_compatible(clean_text)
+    else:
+        vector = _embed_local_hash(clean_text, settings.embeddings_dimensions)
+    if not _vector_has_signal(vector):
+        return None, settings.embeddings_model, "disabled"
+    return _format_vector(vector), settings.embeddings_model, "ready"
 
 
 def embed_text_supervised(
@@ -163,6 +161,8 @@ def embed_text_supervised(
     """
 
     clean_text = text.strip()
+    if not has_searchable_text(clean_text):
+        return None, settings.embeddings_model, "disabled"
     provider_deadline_epoch = None
     if provider_deadline_at is not None:
         provider_deadline_epoch = _resolve_provider_deadline_epoch(
@@ -192,6 +192,7 @@ def embed_text_supervised(
         config,
         provider_deadline_epoch=provider_deadline_epoch,
     )
+    _require_configured_dimensions(vector)
     return _format_vector(vector), config.model, "ready"
 
 
@@ -574,6 +575,8 @@ def _validate_external_embedding_vector(value: object) -> list[float]:
         if not math.isfinite(number):
             raise EmbeddingsUnavailableError("Embeddings response is invalid")
         vector.append(number)
+    if not _vector_has_signal(vector):
+        raise EmbeddingsUnavailableError("Embeddings response is invalid")
     return vector
 
 
@@ -663,12 +666,18 @@ def vector_similarity(first: str | None, second: str | None) -> float:
     second_vector = _parse_vector(second)
     if not first_vector or not second_vector or len(first_vector) != len(second_vector):
         return 0.0
-    dot = sum(a * b for a, b in zip(first_vector, second_vector))
-    first_norm = math.sqrt(sum(value * value for value in first_vector))
-    second_norm = math.sqrt(sum(value * value for value in second_vector))
-    if first_norm == 0 or second_norm == 0:
+    dot = math.fsum(a * b for a, b in zip(first_vector, second_vector))
+    first_squared_norm = math.fsum(value * value for value in first_vector)
+    second_squared_norm = math.fsum(value * value for value in second_vector)
+    if not all(
+        math.isfinite(value)
+        for value in (dot, first_squared_norm, second_squared_norm)
+    ):
         return 0.0
-    return dot / (first_norm * second_norm)
+    if first_squared_norm <= 0 or second_squared_norm <= 0:
+        return 0.0
+    similarity = dot / math.sqrt(first_squared_norm * second_squared_norm)
+    return similarity if math.isfinite(similarity) else 0.0
 
 
 def _embed_openai_compatible(text: str) -> list[float]:
@@ -700,11 +709,9 @@ def _embed_openai_compatible(text: str) -> list[float]:
         embedding = data["data"][0]["embedding"]
     except (KeyError, IndexError, TypeError) as error:
         raise EmbeddingsUnavailableError("Embeddings response is invalid") from error
-    if not isinstance(embedding, list) or not all(
-        isinstance(value, (int, float)) for value in embedding
-    ):
-        raise EmbeddingsUnavailableError("Embeddings response is invalid")
-    return [float(value) for value in embedding]
+    vector = _validate_external_embedding_vector(embedding)
+    _require_configured_dimensions(vector)
+    return vector
 
 
 def _embed_local_hash(text: str, dimensions: int) -> list[float]:
@@ -725,7 +732,39 @@ def _embed_local_hash(text: str, dimensions: int) -> list[float]:
 
 
 def _format_vector(vector: list[float]) -> str:
-    return "[" + ",".join(f"{value:.6f}" for value in vector) + "]"
+    return "[" + ",".join(format(value, ".9g") for value in vector) + "]"
+
+
+def has_searchable_text(text: str) -> bool:
+    """Return whether text contains information that can produce an embedding."""
+
+    return any(character.isalnum() for character in text)
+
+
+def embedding_vector_is_usable(
+    value: str | None,
+    *,
+    expected_dimensions: int | None = None,
+) -> bool:
+    """Validate a stored vector before treating it as a retrieval candidate."""
+
+    vector = _parse_vector(value)
+    if expected_dimensions is not None and len(vector) != expected_dimensions:
+        return False
+    return _vector_has_signal(vector)
+
+
+def _vector_has_signal(vector: list[float]) -> bool:
+    return bool(vector) and all(math.isfinite(value) for value in vector) and any(
+        value != 0 for value in vector
+    )
+
+
+def _require_configured_dimensions(vector: list[float]) -> None:
+    if len(vector) != settings.embeddings_dimensions:
+        raise EmbeddingsUnavailableError(
+            "Embeddings response has an unexpected dimension"
+        )
 
 
 def _parse_vector(value: str | None) -> list[float]:
@@ -739,7 +778,10 @@ def _parse_vector(value: str | None) -> list[float]:
         return []
     vector: list[float] = []
     for item in parsed:
-        if not isinstance(item, (int, float)):
+        if isinstance(item, bool) or not isinstance(item, (int, float)):
             return []
-        vector.append(float(item))
+        number = float(item)
+        if not math.isfinite(number):
+            return []
+        vector.append(number)
     return vector

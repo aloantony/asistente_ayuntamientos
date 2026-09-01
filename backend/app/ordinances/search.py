@@ -1,15 +1,18 @@
-"""Complete, pageable retrieval over approved ordinance chunks."""
+"""Complete, pageable retrieval over technically curated ordinance chunks."""
 
 from collections.abc import Hashable
 from dataclasses import dataclass
-from datetime import date
+from datetime import date, datetime
+import math
+import re
 from typing import Literal
 
 from sqlalchemy import select, text
 from sqlalchemy.orm import Session, selectinload
 
+from app.core.config import settings
 from app.municipalities.models import Municipality
-from app.ordinances.embeddings import vector_similarity
+from app.ordinances.embeddings import has_searchable_text, vector_similarity
 from app.ordinances.models import Ordinance, OrdinanceLegalChunk
 
 OrdinanceResultScope = Literal["fragments", "ordinances", "municipalities"]
@@ -21,8 +24,36 @@ _PGVECTOR_SESSION_KEY = "ordinance_search_pgvector_available"
 _SQL_TOPIC_LITERAL_MATCH = (
     "(STRPOS(LOWER(COALESCE(o.topic, '')), LOWER(:topic_literal)) > 0 "
     "OR STRPOS(LOWER(COALESCE(o.subtopic, '')), LOWER(:topic_literal)) > 0 "
-    "OR STRPOS(LOWER(COALESCE(o.title, '')), LOWER(:topic_literal)) > 0)"
+    "OR STRPOS(LOWER(COALESCE(o.title, '')), LOWER(:topic_literal)) > 0 "
+    "OR STRPOS(LOWER(COALESCE(c.heading, '')), LOWER(:topic_literal)) > 0 "
+    "OR STRPOS(LOWER(COALESCE(c.text, '')), LOWER(:topic_literal)) > 0)"
 )
+_LOCAL_HASH_QUERY_TERM_RE = re.compile(r"[^\W_]+", re.UNICODE)
+_LOCAL_HASH_STOPWORDS = {
+    "al",
+    "con",
+    "de",
+    "del",
+    "el",
+    "en",
+    "la",
+    "las",
+    "los",
+    "municipal",
+    "ordenanza",
+    "para",
+    "por",
+    "que",
+    "se",
+    "sobre",
+    "una",
+    "uno",
+    "unos",
+    "unas",
+    "un",
+    "y",
+}
+MAX_LOCAL_HASH_QUERY_TERMS = 12
 
 
 @dataclass(frozen=True)
@@ -44,6 +75,7 @@ class OrdinanceSearchOptions:
 def search_ordinance_chunks(
     db: Session,
     *,
+    query_text: str = "",
     query_vector: str,
     embedding_model: str,
     options: OrdinanceSearchOptions,
@@ -56,12 +88,38 @@ def search_ordinance_chunks(
     """
 
     _validate_options(options)
-    coverage = _population_coverage(db, embedding_model, options)
-    if _pgvector_available(db):
-        page = _search_with_pgvector(db, query_vector, embedding_model, options)
+    local_hash_search = _is_local_hash_search(embedding_model)
+    lexical_terms = (
+        _local_hash_query_terms(query_text) if local_hash_search else ()
+    )
+    pgvector_available = _pgvector_available(db)
+    coverage = _population_coverage(
+        db,
+        embedding_model,
+        options,
+        query_vector=query_vector if pgvector_available else None,
+        lexical_terms=lexical_terms,
+    )
+    if local_hash_search and not lexical_terms:
+        page = {"total_matches": 0, "results": []}
+        search_backend = "pgvector" if pgvector_available else "python"
+    elif pgvector_available:
+        page = _search_with_pgvector(
+            db,
+            query_vector,
+            embedding_model,
+            options,
+            lexical_terms=lexical_terms,
+        )
         search_backend = "pgvector"
     else:
-        page = _search_with_python(db, query_vector, embedding_model, options)
+        page = _search_with_python(
+            db,
+            query_vector,
+            embedding_model,
+            options,
+            lexical_terms=lexical_terms,
+        )
         search_backend = "python"
 
     total_matches = page["total_matches"]
@@ -83,6 +141,18 @@ def search_ordinance_chunks(
         ),
         "corpus_scan_complete": True,
         "search_backend": search_backend,
+        "retrieval": {
+            "mode": "lexical_hash" if local_hash_search else "semantic",
+            "model": embedding_model,
+            "minimum_similarity": settings.ordinance_search_min_similarity,
+            "quality_warning": (
+                "El runtime local_hash es una ayuda léxica de desarrollo, no un "
+                "modelo semántico de producción; contrasta siempre el texto y la "
+                "fuente devueltos."
+                if local_hash_search
+                else None
+            ),
+        },
         "topic_filter_mode": (
             "strict"
             if options.topic and options.strict_topic
@@ -162,11 +232,14 @@ def _base_where(
     options: OrdinanceSearchOptions,
     *,
     include_population: bool,
+    lexical_terms: tuple[str, ...] = (),
 ) -> tuple[list[str], dict[str, object]]:
     clauses = [
         "c.embedding_status = 'ready'",
         "c.embedding IS NOT NULL",
+        "c.embedding ~ '[1-9]'",
         "c.embedding_model = :embedding_model",
+        "c.text ~ '[[:alnum:]]'",
     ]
     params: dict[str, object] = {"embedding_model": embedding_model}
     if options.include_pending:
@@ -198,6 +271,24 @@ def _base_where(
         params["topic_literal"] = options.topic
         if options.strict_topic:
             clauses.append(_SQL_TOPIC_LITERAL_MATCH)
+    if lexical_terms:
+        lexical_matches: list[str] = []
+        for index, term in enumerate(lexical_terms):
+            parameter = f"lexical_term_{index}"
+            params[parameter] = term
+            lexical_matches.append(
+                "(STRPOS(LOWER(COALESCE(c.text, '')), :"
+                f"{parameter}) > 0 OR "
+                "STRPOS(LOWER(COALESCE(c.heading, '')), :"
+                f"{parameter}) > 0 OR "
+                "STRPOS(LOWER(COALESCE(o.title, '')), :"
+                f"{parameter}) > 0 OR "
+                "STRPOS(LOWER(COALESCE(o.topic, '')), :"
+                f"{parameter}) > 0 OR "
+                "STRPOS(LOWER(COALESCE(o.subtopic, '')), :"
+                f"{parameter}) > 0)"
+            )
+        clauses.append(f"({' OR '.join(lexical_matches)})")
     if include_population:
         if options.population_gte is not None:
             clauses.append("m.population >= :population_gte")
@@ -212,12 +303,22 @@ def _population_coverage(
     db: Session,
     embedding_model: str,
     options: OrdinanceSearchOptions,
+    *,
+    query_vector: str | None = None,
+    lexical_terms: tuple[str, ...] = (),
 ) -> dict[str, int]:
     clauses, params = _base_where(
         embedding_model,
         options,
         include_population=False,
+        lexical_terms=lexical_terms,
     )
+    if query_vector is not None:
+        clauses.append(
+            "vector_dims(c.embedding::vector) = "
+            "vector_dims(CAST(:coverage_query_vector AS vector))"
+        )
+        params["coverage_query_vector"] = query_vector
     statement = text(
         f"""
         SELECT
@@ -242,11 +343,14 @@ def _search_with_pgvector(
     query_vector: str,
     embedding_model: str,
     options: OrdinanceSearchOptions,
+    *,
+    lexical_terms: tuple[str, ...] = (),
 ) -> dict:
     clauses, params = _base_where(
         embedding_model,
         options,
         include_population=True,
+        lexical_terms=lexical_terms,
     )
     params.update(
         {
@@ -254,6 +358,9 @@ def _search_with_pgvector(
             "limit": options.limit,
             "offset": options.offset,
             "topic_boost": TOPIC_PREFERENCE_BOOST,
+            "max_cosine_distance": (
+                1 - settings.ordinance_search_min_similarity
+            ),
         }
     )
     topic_boost = "0.0"
@@ -269,7 +376,7 @@ def _search_with_pgvector(
     }[options.result_scope]
     statement = text(
         f"""
-        WITH scored AS (
+        WITH distances AS (
             SELECT
                 c.id AS chunk_id,
                 c.ordinance_id,
@@ -278,17 +385,25 @@ def _search_with_pgvector(
                     NULLIF(m.ine_code, ''),
                     lower(m.name) || '|' || lower(m.province)
                 ) AS municipality_scope_key,
-                1 - (c.embedding::vector <=> CAST(:query_vector AS vector))
-                    AS similarity,
-                1 - (c.embedding::vector <=> CAST(:query_vector AS vector))
-                    + {topic_boost} AS score
+                CASE
+                    WHEN vector_dims(c.embedding::vector)
+                        = vector_dims(CAST(:query_vector AS vector))
+                    THEN c.embedding::vector <=> CAST(:query_vector AS vector)
+                    ELSE NULL
+                END AS cosine_distance,
+                {topic_boost} AS topic_boost
             FROM ordinance_legal_chunks c
             JOIN ordinances o ON o.id = c.ordinance_id
             JOIN municipalities m ON m.id = o.municipality_id
             WHERE {" AND ".join(clauses)}
         ),
         relevant AS (
-            SELECT * FROM scored WHERE similarity > 0
+            SELECT
+                distances.*,
+                1 - cosine_distance AS similarity,
+                1 - cosine_distance + topic_boost AS score
+            FROM distances
+            WHERE cosine_distance < :max_cosine_distance
         ),
         ranked AS (
             SELECT
@@ -314,6 +429,8 @@ def _search_with_pgvector(
             o.topic,
             o.status,
             o.curation_status,
+            o.legal_review_status,
+            o.legal_reviewed_at,
             o.approval_date,
             o.publication_date,
             o.effective_date,
@@ -353,6 +470,8 @@ def _search_with_python(
     query_vector: str,
     embedding_model: str,
     options: OrdinanceSearchOptions,
+    *,
+    lexical_terms: tuple[str, ...] = (),
 ) -> dict:
     query = (
         select(OrdinanceLegalChunk)
@@ -390,9 +509,16 @@ def _search_with_python(
     if options.province:
         query = query.where(Municipality.province.ilike(options.province))
     chunks = list(db.scalars(query))
+    chunks = [chunk for chunk in chunks if has_searchable_text(chunk.text)]
     if options.topic and options.strict_topic:
         chunks = [
             chunk for chunk in chunks if _python_topic_matches(chunk, options.topic)
+        ]
+    if lexical_terms:
+        chunks = [
+            chunk
+            for chunk in chunks
+            if _python_lexical_terms_match(chunk, lexical_terms)
         ]
     population_filtered = [
         chunk for chunk in chunks if _population_matches(chunk, options)
@@ -400,7 +526,10 @@ def _search_with_python(
     scored: list[tuple[float, OrdinanceLegalChunk]] = []
     for chunk in population_filtered:
         similarity = vector_similarity(query_vector, chunk.embedding)
-        if similarity <= 0:
+        if (
+            not math.isfinite(similarity)
+            or similarity <= settings.ordinance_search_min_similarity
+        ):
             continue
         score = similarity + _python_topic_boost(chunk, options)
         scored.append((score, chunk))
@@ -451,8 +580,53 @@ def _python_topic_boost(
 def _python_topic_matches(chunk: OrdinanceLegalChunk, topic: str) -> bool:
     topic_literal = topic.casefold()
     ordinance = chunk.ordinance
-    values = (ordinance.topic, ordinance.subtopic, ordinance.title)
+    values = (
+        ordinance.topic,
+        ordinance.subtopic,
+        ordinance.title,
+        chunk.heading,
+        chunk.text,
+    )
     return any(topic_literal in (value or "").casefold() for value in values)
+
+
+def _python_lexical_terms_match(
+    chunk: OrdinanceLegalChunk,
+    lexical_terms: tuple[str, ...],
+) -> bool:
+    ordinance = chunk.ordinance
+    haystack = "\n".join(
+        value or ""
+        for value in (
+            chunk.text,
+            chunk.heading,
+            ordinance.title,
+            ordinance.topic,
+            ordinance.subtopic,
+        )
+    ).casefold()
+    return any(term in haystack for term in lexical_terms)
+
+
+def _is_local_hash_search(embedding_model: str) -> bool:
+    return (
+        settings.embeddings_runtime == "local_hash"
+        and embedding_model == settings.embeddings_model
+    )
+
+
+def _local_hash_query_terms(query_text: str) -> tuple[str, ...]:
+    terms: list[str] = []
+    for raw_term in _LOCAL_HASH_QUERY_TERM_RE.findall(query_text.casefold()):
+        if raw_term in _LOCAL_HASH_STOPWORDS:
+            continue
+        if len(raw_term) < 3 and not raw_term.isdigit():
+            continue
+        if raw_term not in terms:
+            terms.append(raw_term)
+        if len(terms) == MAX_LOCAL_HASH_QUERY_TERMS:
+            break
+    return tuple(terms)
 
 
 def _scope_id(
@@ -484,6 +658,8 @@ def _serialize_chunk(score: float, chunk: OrdinanceLegalChunk) -> dict:
         topic=ordinance.topic,
         status=ordinance.status,
         curation_status=ordinance.curation_status,
+        legal_review_status=ordinance.legal_review_status,
+        legal_reviewed_at=ordinance.legal_reviewed_at,
         approval_date=ordinance.approval_date,
         publication_date=ordinance.publication_date,
         effective_date=ordinance.effective_date,
@@ -509,6 +685,8 @@ def _serialize_mapping(row) -> dict:
         topic=row["topic"],
         status=row["status"],
         curation_status=row["curation_status"],
+        legal_review_status=row["legal_review_status"],
+        legal_reviewed_at=row["legal_reviewed_at"],
         approval_date=row["approval_date"],
         publication_date=row["publication_date"],
         effective_date=row["effective_date"],
@@ -534,6 +712,8 @@ def _serialize_result(
     topic: str,
     status: str,
     curation_status: str,
+    legal_review_status: str,
+    legal_reviewed_at: datetime | None,
     approval_date: date | None,
     publication_date: date | None,
     effective_date: date | None,
@@ -557,6 +737,8 @@ def _serialize_result(
         "topic": topic,
         "status": status,
         "curation_status": curation_status,
+        "legal_review_status": legal_review_status,
+        "legal_reviewed_at": legal_reviewed_at,
         "approval_date": approval_date,
         "publication_date": publication_date,
         "effective_date": effective_date,
@@ -570,6 +752,8 @@ def _serialize_result(
             else chunk_text
         ),
         "text_truncated": text_truncated,
+        "text_char_count": len(chunk_text),
+        "next_text_offset": MAX_RESULT_TEXT_CHARS if text_truncated else None,
         "source_url": source_url,
         "score": round(score, 4),
     }

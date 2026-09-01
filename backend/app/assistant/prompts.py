@@ -85,6 +85,9 @@ Supervisión y confirmaciones:
 
 Ordenanzas y corpus:
 - Las ordenanzas se responden desde el corpus interno aprobado cuando exista cobertura. Usa `semantic_search_ordinances` para preguntas de contenido normativo.
+- `curation_status=approved` acredita curación técnica, no necesariamente revisión jurídica humana. Comprueba `legal_review_status` en cada resultado: si no es `human_approved`, presenta la información como referencia pendiente de validación y no afirmes vigencia ni validez jurídica.
+- Si un resultado trae `text_truncated=true` y la respuesta depende de condiciones, excepciones, plazos o importes, usa `read_ordinance_chunk` y continúa con `next_offset` hasta `has_more=false`.
+- Si `retrieval.mode=lexical_hash`, la búsqueda es una ayuda léxica de desarrollo y no una recuperación semántica fiable: verifica literalmente el pasaje y evita afirmar exhaustividad temática.
 - Si el usuario pregunta si hay cobertura o disponibilidad general de ordenanzas, puedes responder con el bloque de cobertura incluido en este prompt sin buscar.
 - En comparativas amplias entre municipios usa `result_scope="municipalities"` y `limit=20`. La herramienta busca en todo el corpus y devuelve `total_matches`, `returned`, `has_more` y `next_offset`: distingue siempre el total de coincidencias de la página recibida.
 - Si el usuario pide todas las referencias, una búsqueda exhaustiva o cuestiona que haya pocas, continúa con `offset=next_offset` mientras `has_more` sea verdadero y quede presupuesto de herramientas. Si no completas todas las páginas, di expresamente que presentas una selección y cuántas coincidencias quedan; nunca afirmes que una página es el conjunto completo.
@@ -209,10 +212,13 @@ def build_approved_memory_block(
 
 
 def build_ordinance_coverage_block(db: Session) -> str:
-    ordinance_count, municipality_count = db.execute(
+    ordinance_count, municipality_count, human_reviewed_count = db.execute(
         select(
             func.count(distinct(Ordinance.id)),
             func.count(distinct(Ordinance.municipality_id)),
+            func.count(distinct(Ordinance.id)).filter(
+                Ordinance.legal_review_status == "human_approved"
+            ),
         )
         .join(OrdinanceLegalChunk)
         .where(
@@ -221,7 +227,9 @@ def build_ordinance_coverage_block(db: Session) -> str:
             OrdinanceLegalChunk.review_status == "approved",
             OrdinanceLegalChunk.embedding_status == "ready",
             OrdinanceLegalChunk.embedding.is_not(None),
+            OrdinanceLegalChunk.embedding.op("~")(r"[1-9]"),
             OrdinanceLegalChunk.embedding_model == settings.embeddings_model,
+            OrdinanceLegalChunk.text.op("~")(r"[[:alnum:]]"),
         )
     ).one()
     if not ordinance_count:
@@ -231,8 +239,11 @@ def build_ordinance_coverage_block(db: Session) -> str:
         )
 
     return (
-        "COBERTURA DE ORDENANZAS RECUPERABLES Y APROBADAS:\n"
+        "COBERTURA DE ORDENANZAS RECUPERABLES Y CURADAS TÉCNICAMENTE:\n"
         f"- {ordinance_count} ordenanzas de {municipality_count} municipios.\n"
+        f"- {human_reviewed_count} tienen revisión humana aprobatoria registrada; "
+        f"{ordinance_count - human_reviewed_count} siguen pendientes de validación "
+        "jurídica humana y solo deben usarse como referencia contrastable.\n"
         "- Se excluyen por defecto las derogadas, sustituidas y archivadas. "
         "Los estados de vigencia desconocida o derogación parcial deben "
         "advertirse expresamente en la respuesta.\n"

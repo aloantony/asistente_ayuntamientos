@@ -28,6 +28,11 @@ OrdinanceCurationStatus = Literal[
     "needs_changes",
     "rejected",
 ]
+OrdinanceLegalReviewStatus = Literal[
+    "pending_review",
+    "human_approved",
+    "human_rejected",
+]
 OfficialLegalSourceType = Literal["boe", "bop", "autonomic", "municipal", "other"]
 OfficialLegalSourceStatus = Literal["active", "archived"]
 OrdinanceImportJobStatus = Literal[
@@ -107,6 +112,9 @@ class OrdinanceBaseRead(BaseModel):
     confidence_score: float | None
     notes: str | None
     legal_review_notes: str | None
+    legal_review_status: OrdinanceLegalReviewStatus
+    legal_reviewed_by_id: int | None
+    legal_reviewed_at: datetime | None
     created_by_id: int | None
     updated_by_id: int | None
     municipality: MunicipalitySummary
@@ -362,6 +370,8 @@ class OrdinanceComparisonEntry(BaseModel):
     subtopic: str | None
     status: OrdinanceStatus
     curation_status: OrdinanceCurationStatus
+    legal_review_status: OrdinanceLegalReviewStatus
+    legal_reviewed_at: datetime | None
     approval_date: date | None
     publication_date: date | None
     effective_date: date | None
@@ -401,6 +411,8 @@ class OrdinanceSemanticSearchResult(BaseModel):
     topic: str
     status: OrdinanceStatus
     curation_status: OrdinanceCurationStatus
+    legal_review_status: OrdinanceLegalReviewStatus
+    legal_reviewed_at: datetime | None
     approval_date: date | None
     publication_date: date | None
     effective_date: date | None
@@ -410,6 +422,8 @@ class OrdinanceSemanticSearchResult(BaseModel):
     source_locator: str | None
     text: str
     text_truncated: bool
+    text_char_count: int
+    next_text_offset: int | None
     source_url: str | None
     score: float
 
@@ -429,6 +443,13 @@ class OrdinanceLegalStatusFilterRead(BaseModel):
     excluded_statuses: list[OrdinanceStatus]
 
 
+class OrdinanceRetrievalRead(BaseModel):
+    mode: Literal["semantic", "lexical_hash"]
+    model: str
+    minimum_similarity: float
+    quality_warning: str | None
+
+
 class OrdinanceSearchRead(BaseModel):
     query: str
     result_scope: Literal["fragments", "ordinances", "municipalities"]
@@ -440,6 +461,7 @@ class OrdinanceSearchRead(BaseModel):
     next_offset: int | None
     corpus_scan_complete: bool
     search_backend: Literal["pgvector", "python"]
+    retrieval: OrdinanceRetrievalRead
     topic_filter_mode: Literal["none", "preference", "strict"]
     legal_status_filter: OrdinanceLegalStatusFilterRead
     population_filter: OrdinancePopulationFilterRead

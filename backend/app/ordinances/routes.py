@@ -189,6 +189,8 @@ def create_ordinance(
         created_by_id=current_user.id,
         updated_by_id=current_user.id,
     )
+    if ordinance.curation_status in {"approved", "rejected"}:
+        stamp_human_legal_review(ordinance, current_user.id)
     db.add(ordinance)
     db.flush()
     if ordinance.text_content:
@@ -542,6 +544,15 @@ def review_import_item(
             chunk.review_status = "rejected"
         report_status = "human_rejected"
 
+    if payload.decision in {"approve", "reject"}:
+        stamp_human_legal_review(
+            item.ordinance,
+            current_user.id,
+            reviewed_at=now,
+        )
+    else:
+        reset_ordinance_legal_review(item.ordinance)
+
     report.status = report_status
     report.reviewed_by_agent = False
     report.reviewed_by_id = current_user.id
@@ -618,6 +629,8 @@ def compare_ordinances(
                 "subtopic": ordinance.subtopic,
                 "status": ordinance.status,
                 "curation_status": ordinance.curation_status,
+                "legal_review_status": ordinance.legal_review_status,
+                "legal_reviewed_at": ordinance.legal_reviewed_at,
                 "approval_date": ordinance.approval_date,
                 "publication_date": ordinance.publication_date,
                 "effective_date": ordinance.effective_date,
@@ -668,6 +681,7 @@ def semantic_search_ordinances(
         return []
     page = search_ordinance_chunks(
         db,
+        query_text=q,
         query_vector=query_vector,
         embedding_model=embedding_model,
         options=OrdinanceSearchOptions(
@@ -736,6 +750,7 @@ def search_ordinances(
 
     page = search_ordinance_chunks(
         db,
+        query_text=query_text,
         query_vector=query_vector,
         embedding_model=embedding_model,
         options=OrdinanceSearchOptions(
@@ -965,6 +980,13 @@ def update_ordinance(
         }[ordinance.curation_status]
         for chunk in ordinance.legal_chunks:
             chunk.review_status = chunk_review_status
+    if "curation_status" in updates:
+        if ordinance.curation_status in {"approved", "rejected"}:
+            stamp_human_legal_review(ordinance, current_user.id)
+        else:
+            reset_ordinance_legal_review(ordinance)
+    elif sensitive_content_changed:
+        reset_ordinance_legal_review(ordinance)
     if sensitive_content_changed and import_item is not None:
         import_item.status = "pending_review"
         if text_changed:
@@ -1089,6 +1111,27 @@ def reject_null_required_fields(updates: dict[str, object]) -> None:
             status_code=http_status.HTTP_422_UNPROCESSABLE_ENTITY,
             detail="Required ordinance fields cannot be null",
         )
+
+
+def stamp_human_legal_review(
+    ordinance: Ordinance,
+    reviewer_id: int,
+    *,
+    reviewed_at: datetime | None = None,
+) -> None:
+    ordinance.legal_review_status = (
+        "human_approved"
+        if ordinance.curation_status == "approved"
+        else "human_rejected"
+    )
+    ordinance.legal_reviewed_by_id = reviewer_id
+    ordinance.legal_reviewed_at = reviewed_at or datetime.now(UTC)
+
+
+def reset_ordinance_legal_review(ordinance: Ordinance) -> None:
+    ordinance.legal_review_status = "pending_review"
+    ordinance.legal_reviewed_by_id = None
+    ordinance.legal_reviewed_at = None
 
 
 def validate_import_job_payload(

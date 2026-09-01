@@ -129,7 +129,10 @@ Limitaciones:
 - Algunos anuncios futuros pueden requerir OCR o revisión manual si los PDFs no tienen texto extraíble.
 - Algunos anuncios contienen varias ordenanzas/reglamentos en un único PDF; para una experiencia jurídica más fina conviene separar subordenanzas o mejorar el modelo de vigencia.
 - Las entidades supramunicipales quedan fuera hasta decisión de producto.
-- El ranking semántico local (`local_hash`) funciona para varias consultas temáticas, pero no siempre prioriza bien documentos de un municipio si no hay filtro estructurado.
+- Esta instantánea histórica usó `local_hash`; desde 2026-07-17 se clasifica
+  expresamente como ayuda léxica de desarrollo, no como ranking semántico ni
+  como prueba de cobertura temática. Producción requiere un proveedor semántico
+  aprobado y filtros estructurados cuando el usuario menciona municipio/materia.
 
 ## Siguiente lote recomendado
 

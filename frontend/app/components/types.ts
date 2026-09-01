@@ -41,6 +41,11 @@ export type OrdinanceCurationStatus =
   | "needs_changes"
   | "rejected";
 
+export type OrdinanceLegalReviewStatus =
+  | "pending_review"
+  | "human_approved"
+  | "human_rejected";
+
 export type OfficialLegalSourceType =
   | "boe"
   | "bop"
@@ -190,6 +195,9 @@ export type Ordinance = {
   text_content?: string | null;
   notes: string | null;
   legal_review_notes: string | null;
+  legal_review_status: OrdinanceLegalReviewStatus;
+  legal_reviewed_by_id: number | null;
+  legal_reviewed_at: string | null;
   created_by_id: number | null;
   updated_by_id: number | null;
   municipality: MunicipalitySummary;
@@ -739,6 +747,8 @@ export type OrdinanceComparisonEntry = {
   subtopic: string | null;
   status: OrdinanceStatus;
   curation_status: OrdinanceCurationStatus;
+  legal_review_status: OrdinanceLegalReviewStatus;
+  legal_reviewed_at: string | null;
   approval_date: string | null;
   publication_date: string | null;
   effective_date: string | null;
@@ -783,6 +793,8 @@ export type OrdinanceSemanticSearchResult = {
   topic: string;
   status: OrdinanceStatus;
   curation_status: OrdinanceCurationStatus;
+  legal_review_status: OrdinanceLegalReviewStatus;
+  legal_reviewed_at: string | null;
   approval_date: string | null;
   publication_date: string | null;
   effective_date: string | null;
@@ -792,6 +804,8 @@ export type OrdinanceSemanticSearchResult = {
   source_locator: string | null;
   text: string;
   text_truncated: boolean;
+  text_char_count: number;
+  next_text_offset: number | null;
   source_url: string | null;
   score: number;
 };
@@ -822,6 +836,12 @@ export type OrdinanceSearchPage = {
   next_offset: number | null;
   corpus_scan_complete: boolean;
   search_backend: "pgvector" | "python";
+  retrieval: {
+    mode: "semantic" | "lexical_hash";
+    model: string;
+    minimum_similarity: number;
+    quality_warning: string | null;
+  };
   topic_filter_mode: "none" | "preference" | "strict";
   legal_status_filter: OrdinanceLegalStatusFilter;
   population_filter: OrdinancePopulationFilter;

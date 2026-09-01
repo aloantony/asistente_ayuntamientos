@@ -56,6 +56,34 @@ class Ordinance(TimestampMixin, Base):
             "curation_status in ('approved', 'pending_review', 'needs_changes', 'rejected')",
             name="ck_ordinances_curation_status",
         ),
+        CheckConstraint(
+            """
+            legal_review_status in (
+                'pending_review',
+                'human_approved',
+                'human_rejected'
+            )
+            """,
+            name="ck_ordinances_legal_review_status",
+        ),
+        CheckConstraint(
+            """
+            (
+                legal_review_status = 'pending_review'
+                and legal_reviewed_by_id is null
+                and legal_reviewed_at is null
+            ) or (
+                legal_review_status = 'human_approved'
+                and curation_status = 'approved'
+                and legal_reviewed_at is not null
+            ) or (
+                legal_review_status = 'human_rejected'
+                and curation_status = 'rejected'
+                and legal_reviewed_at is not null
+            )
+            """,
+            name="ck_ordinances_legal_review_audit",
+        ),
     )
 
     id: Mapped[int] = mapped_column(primary_key=True)
@@ -118,6 +146,22 @@ class Ordinance(TimestampMixin, Base):
     text_content: Mapped[str | None] = mapped_column(Text, nullable=True)
     notes: Mapped[str | None] = mapped_column(Text, nullable=True)
     legal_review_notes: Mapped[str | None] = mapped_column(Text, nullable=True)
+    legal_review_status: Mapped[str] = mapped_column(
+        String(30),
+        index=True,
+        default="pending_review",
+        server_default="pending_review",
+        nullable=False,
+    )
+    legal_reviewed_by_id: Mapped[int | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL"),
+        index=True,
+        nullable=True,
+    )
+    legal_reviewed_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
     created_by_id: Mapped[int | None] = mapped_column(
         ForeignKey("users.id", ondelete="SET NULL"),
         index=True,
@@ -142,6 +186,10 @@ class Ordinance(TimestampMixin, Base):
     updated_by: Mapped["User | None"] = relationship(
         "User",
         foreign_keys=[updated_by_id],
+    )
+    legal_reviewed_by: Mapped["User | None"] = relationship(
+        "User",
+        foreign_keys=[legal_reviewed_by_id],
     )
     legal_chunks: Mapped[list["OrdinanceLegalChunk"]] = relationship(
         "OrdinanceLegalChunk",

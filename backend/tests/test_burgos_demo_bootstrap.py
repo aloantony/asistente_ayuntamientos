@@ -58,6 +58,11 @@ def test_bootstrap_burgos_demo_ordinances_imports_and_approves_real_source_metad
     ordinances = db.query(Ordinance).all()
     assert len(ordinances) == len(DEMO_ORDINANCE_SOURCES)
     assert {ordinance.curation_status for ordinance in ordinances} == {"approved"}
+    assert {ordinance.legal_review_status for ordinance in ordinances} == {
+        "pending_review"
+    }
+    assert all(ordinance.legal_reviewed_by_id is None for ordinance in ordinances)
+    assert all(ordinance.legal_reviewed_at is None for ordinance in ordinances)
     assert {ordinance.status for ordinance in ordinances} == {"active"}
     assert all(ordinance.source_url for ordinance in ordinances)
     assert all("validación jurídica humana" in ordinance.legal_review_notes for ordinance in ordinances)

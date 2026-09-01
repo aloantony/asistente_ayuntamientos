@@ -174,7 +174,7 @@ def tool_result_for_activity(tool_name: str, content: str) -> str:
             )
     limit = (
         MAX_ORDINANCE_TOOL_RESULT_CHARS
-        if tool_name == "semantic_search_ordinances"
+        if tool_name in {"semantic_search_ordinances", "read_ordinance_chunk"}
         else MAX_TOOL_RESULT_CHARS
     )
     return content[:limit]

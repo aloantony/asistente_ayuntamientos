@@ -13,7 +13,7 @@ import uuid
 from collections.abc import Callable
 from copy import deepcopy
 from dataclasses import dataclass, field, replace
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from typing import Literal
 from urllib.parse import quote
 
@@ -58,7 +58,12 @@ from app.organizations.access import (
     get_user_organization_ids,
 )
 from app.ordinances.embeddings import embed_text_supervised
-from app.ordinances.search import OrdinanceSearchOptions, search_ordinance_chunks
+from app.ordinances.models import Ordinance, OrdinanceLegalChunk
+from app.ordinances.search import (
+    DEFINITIVELY_INACTIVE_STATUSES,
+    OrdinanceSearchOptions,
+    search_ordinance_chunks,
+)
 from app.projects.access import select_visible_projects
 from app.projects.models import Project
 from app.rbac.permissions import has_permission
@@ -111,6 +116,8 @@ DEFAULT_ORDINANCE_RESULTS = 10
 MAX_ORDINANCE_RESULTS = 20
 MAX_ORDINANCE_OFFSET = 2_147_483_647
 MAX_ORDINANCE_TOOL_RESULT_CHARS = 12_000
+DEFAULT_ORDINANCE_CHUNK_READ_CHARS = 3000
+MAX_ORDINANCE_CHUNK_READ_CHARS = 3000
 MAX_TRANSVERSAL_TITLE_CHARS = 255
 MAX_TRANSVERSAL_TEXT_CHARS = 2000
 MAX_ADMIN_FEEDBACK_DESCRIPTION_CHARS = 4000
@@ -488,6 +495,52 @@ _TOOL_DEFINITIONS: list[dict] = [
                 },
             },
             "required": ["query"],
+        },
+    },
+    {
+        "name": "read_ordinance_chunk",
+        "description": (
+            "Lee de forma paginada el texto íntegro de un fragmento devuelto por "
+            "semantic_search_ordinances. Úsala cuando text_truncated sea true o "
+            "cuando una respuesta dependa de condiciones, excepciones o importes "
+            "que puedan quedar fuera del extracto. Continúa con next_offset hasta "
+            "has_more=false y conserva la misma cita y fuente."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "chunk_id": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "description": "Identificador exacto devuelto por la búsqueda",
+                },
+                "offset": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": MAX_ORDINANCE_OFFSET,
+                    "description": "Posición de carácter desde la que continuar",
+                },
+                "max_chars": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": MAX_ORDINANCE_CHUNK_READ_CHARS,
+                    "description": "Caracteres a devolver, máximo 3000",
+                },
+                "include_pending": {
+                    "type": "boolean",
+                    "description": (
+                        "Permite leer un chunk pendiente ya localizado; exige "
+                        "permiso ordinances.review"
+                    ),
+                },
+                "include_inactive": {
+                    "type": "boolean",
+                    "description": (
+                        "Permite leer normativa derogada, sustituida o archivada"
+                    ),
+                },
+            },
+            "required": ["chunk_id"],
         },
     },
     {
@@ -1076,6 +1129,13 @@ def execute_tool(
             content = _serialize_web_search_payload(result)
         elif name == "semantic_search_ordinances":
             content = _serialize_ordinance_search_payload(result)
+        elif name == "read_ordinance_chunk":
+            content = json.dumps(
+                result,
+                ensure_ascii=False,
+                separators=(",", ":"),
+                default=_json_date_default,
+            )
         else:
             content = json.dumps(result, ensure_ascii=False)
         if spec.requires_confirmation:
@@ -1442,6 +1502,7 @@ def _serialize_ordinance_search_payload(payload: dict) -> str:
             candidate,
             ensure_ascii=False,
             separators=(",", ":"),
+            default=_json_date_default,
         )
         if len(serialized) >= MAX_ORDINANCE_TOOL_RESULT_CHARS:
             break
@@ -1457,10 +1518,21 @@ def _serialize_ordinance_search_payload(payload: dict) -> str:
         "next_offset": next_offset if next_offset < total_matches else None,
         "results": selected,
     }
-    serialized = json.dumps(compact, ensure_ascii=False, separators=(",", ":"))
+    serialized = json.dumps(
+        compact,
+        ensure_ascii=False,
+        separators=(",", ":"),
+        default=_json_date_default,
+    )
     if len(serialized) >= MAX_ORDINANCE_TOOL_RESULT_CHARS:
         raise ValueError("ordinance search metadata exceeds the action result limit")
     return serialized
+
+
+def _json_date_default(value: object) -> str:
+    if isinstance(value, (date, datetime)):
+        return value.isoformat()
+    raise TypeError(f"Object of type {type(value).__name__} is not JSON serializable")
 
 
 def _compact_web_search_payload(
@@ -1584,6 +1656,7 @@ def _semantic_search_ordinances(
     topic = str(tool_input.get("topic") or "").strip()
     search_page = search_ordinance_chunks(
         db,
+        query_text=query_text,
         query_vector=query_vector,
         embedding_model=embedding_model,
         options=OrdinanceSearchOptions(
@@ -1609,6 +1682,118 @@ def _semantic_search_ordinances(
         "province": province or None,
         "topic": topic or None,
         **search_page,
+    }
+
+
+def _read_ordinance_chunk(
+    db: Session,
+    current_user: User,
+    tool_input: dict,
+    _context: ToolContext,
+) -> dict:
+    if not _has_ordinance_tool_permission(db, current_user, "ordinances.compare"):
+        raise HTTPException(
+            status_code=403,
+            detail="Permission required: ordinances.compare",
+        )
+    include_pending = _optional_boolean(tool_input, "include_pending")
+    include_inactive = _optional_boolean(tool_input, "include_inactive")
+    if include_pending and not _has_ordinance_tool_permission(
+        db,
+        current_user,
+        "ordinances.review",
+    ):
+        raise HTTPException(
+            status_code=403,
+            detail="Permission required: ordinances.review",
+        )
+
+    raw_chunk_id = tool_input.get("chunk_id")
+    if isinstance(raw_chunk_id, bool):
+        raise ValueError("chunk_id debe ser un entero positivo")
+    chunk_id = int(raw_chunk_id)
+    if chunk_id < 1:
+        raise ValueError("chunk_id debe ser un entero positivo")
+    raw_offset = tool_input.get("offset", 0)
+    if isinstance(raw_offset, bool):
+        raise ValueError("offset debe ser un entero mayor o igual que 0")
+    offset = int(raw_offset)
+    if not 0 <= offset <= MAX_ORDINANCE_OFFSET:
+        raise ValueError(
+            f"offset debe estar entre 0 y {MAX_ORDINANCE_OFFSET}"
+        )
+    raw_max_chars = tool_input.get(
+        "max_chars",
+        DEFAULT_ORDINANCE_CHUNK_READ_CHARS,
+    )
+    if isinstance(raw_max_chars, bool):
+        raise ValueError("max_chars debe ser un entero positivo")
+    max_chars = int(raw_max_chars)
+    if not 1 <= max_chars <= MAX_ORDINANCE_CHUNK_READ_CHARS:
+        raise ValueError(
+            "max_chars debe estar entre 1 y "
+            f"{MAX_ORDINANCE_CHUNK_READ_CHARS}"
+        )
+
+    query = (
+        select(OrdinanceLegalChunk)
+        .join(OrdinanceLegalChunk.ordinance)
+        .options(
+            selectinload(OrdinanceLegalChunk.ordinance).selectinload(
+                Ordinance.municipality
+            )
+        )
+        .where(OrdinanceLegalChunk.id == chunk_id)
+    )
+    if include_pending:
+        query = query.where(
+            Ordinance.curation_status != "rejected",
+            OrdinanceLegalChunk.review_status != "rejected",
+        )
+    else:
+        query = query.where(
+            Ordinance.curation_status == "approved",
+            OrdinanceLegalChunk.review_status == "approved",
+        )
+    if not include_inactive:
+        query = query.where(
+            Ordinance.status.not_in(DEFINITIVELY_INACTIVE_STATUSES)
+        )
+    chunk = db.scalar(query)
+    if chunk is None:
+        raise HTTPException(status_code=404, detail="Ordinance chunk not found")
+
+    ordinance = chunk.ordinance
+    municipality = ordinance.municipality
+    text_char_count = len(chunk.text)
+    end_offset = min(offset + max_chars, text_char_count)
+    text_slice = chunk.text[offset:end_offset]
+    has_more = end_offset < text_char_count
+    return {
+        "chunk_id": chunk.id,
+        "ordinance_id": ordinance.id,
+        "title": ordinance.title,
+        "municipality_id": ordinance.municipality_id,
+        "municipality_name": municipality.name,
+        "province": municipality.province,
+        "topic": ordinance.topic,
+        "status": ordinance.status,
+        "curation_status": ordinance.curation_status,
+        "legal_review_status": ordinance.legal_review_status,
+        "legal_reviewed_at": ordinance.legal_reviewed_at,
+        "legal_review_notes": (ordinance.legal_review_notes or "")[:1000] or None,
+        "chunk_index": chunk.chunk_index,
+        "heading": chunk.heading,
+        "citation": chunk.citation,
+        "source_locator": chunk.source_locator,
+        "source_url": chunk.source_url or ordinance.source_url,
+        "offset": offset,
+        "end_offset": end_offset,
+        "text_char_count": text_char_count,
+        "returned_chars": len(text_slice),
+        "has_more": has_more,
+        "next_offset": end_offset if has_more else None,
+        "text": text_slice,
     }
 
 
@@ -2484,6 +2669,7 @@ _EXECUTORS = {
     "web_search": _web_search,
     "read_web_page": _read_web_page,
     "semantic_search_ordinances": _semantic_search_ordinances,
+    "read_ordinance_chunk": _read_ordinance_chunk,
     "list_requirements": _list_requirements,
     "get_requirement": _get_requirement,
     "create_requirement": _create_requirement,
@@ -2538,6 +2724,14 @@ _TOOL_METADATA: dict[str, dict] = {
     },
     "semantic_search_ordinances": {
         "label": "Buscar ordenanzas",
+        "read_only": True,
+        "domain": "ordinances",
+        "side_effect": "none",
+        "approval_policy": "never",
+        "required_permission": "ordinances.compare",
+    },
+    "read_ordinance_chunk": {
+        "label": "Leer fragmento de ordenanza",
         "read_only": True,
         "domain": "ordinances",
         "side_effect": "none",

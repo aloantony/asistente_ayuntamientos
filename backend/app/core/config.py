@@ -93,8 +93,9 @@ class Settings(BaseSettings):
     assistant_realtime_vad_silence_duration_ms: int = 500
     ordinance_import_max_fetch_bytes: int = 15 * 1024 * 1024
     ordinance_import_search_limit: int = 5
-    ordinance_import_max_chunks: int = 200
+    ordinance_import_max_chunks: int = 500
     ordinance_chunk_chars: int = 1400
+    ordinance_search_min_similarity: float = 0.01
     embeddings_runtime: str = "local_hash"
     embeddings_base_url: str | None = None
     embeddings_api_key: str | None = None
@@ -427,6 +428,16 @@ class Settings(BaseSettings):
             )
         return normalized
 
+    @field_validator("ordinance_search_min_similarity")
+    @classmethod
+    def validate_ordinance_search_min_similarity(cls, value: float) -> float:
+        if not isfinite(value) or not 0 <= value < 1:
+            raise ValueError(
+                "ordinance_search_min_similarity must be finite and between "
+                "0 (inclusive) and 1 (exclusive)"
+            )
+        return value
+
     @field_validator("embeddings_timeout_seconds")
     @classmethod
     def validate_embeddings_timeout(cls, value: float) -> float:
@@ -435,6 +446,13 @@ class Settings(BaseSettings):
                 "embeddings_timeout_seconds must be finite and between "
                 "0.1 and 120 seconds"
             )
+        return value
+
+    @field_validator("embeddings_dimensions")
+    @classmethod
+    def validate_embeddings_dimensions(cls, value: int) -> int:
+        if not 1 <= value <= 16_384:
+            raise ValueError("embeddings_dimensions must be between 1 and 16384")
         return value
 
     @field_validator("embeddings_max_concurrent_workers")

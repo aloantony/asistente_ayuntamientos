@@ -27,7 +27,11 @@ from app.ordinances.bop_burgos import (
     BOP_BURGOS_DOMAIN,
     search_bop_burgos_announcements,
 )
-from app.ordinances.embeddings import EmbeddingsUnavailableError, embed_text
+from app.ordinances.embeddings import (
+    EmbeddingsUnavailableError,
+    embed_text,
+    has_searchable_text,
+)
 from app.ordinances.models import (
     OfficialLegalSource,
     Ordinance,
@@ -1081,8 +1085,10 @@ def _estimate_confidence(
 def _split_chunks(text: str) -> list[str]:
     article_chunks = _split_article_chunks(text)
     if article_chunks:
-        return article_chunks
-    return _split_oversized_chunk(text)
+        return [chunk for chunk in article_chunks if has_searchable_text(chunk)]
+    return [
+        chunk for chunk in _split_oversized_chunk(text) if has_searchable_text(chunk)
+    ]
 
 
 def _split_article_chunks(text: str) -> list[str]:
@@ -1101,7 +1107,7 @@ def _split_article_chunks(text: str) -> list[str]:
         chunk = text[starts[index] : starts[index + 1]].strip()
         if index == 0 and preamble:
             chunk = f"{preamble}\n\n{chunk}"
-        if chunk:
+        if has_searchable_text(chunk):
             chunks.extend(_split_oversized_chunk(chunk))
     return chunks
 
@@ -1126,7 +1132,7 @@ def _split_oversized_chunk(text: str) -> list[str]:
                 for index in range(0, len(paragraph), limit)
             ]
         )
-        if piece.strip()
+        if has_searchable_text(piece)
     ]
     chunks: list[str] = []
     current = ""
@@ -1135,11 +1141,13 @@ def _split_oversized_chunk(text: str) -> list[str]:
             current = f"{current}\n\n{piece}".strip()
             continue
         if current:
-            chunks.append(current)
+            if has_searchable_text(current):
+                chunks.append(current)
         current = piece
-    if current:
+    if has_searchable_text(current):
         chunks.append(current)
-    return chunks or ([text[:limit]] if text else [])
+    fallback = text[:limit]
+    return chunks or ([fallback] if has_searchable_text(fallback) else [])
 
 
 def _chunk_heading(text: str) -> str | None:
