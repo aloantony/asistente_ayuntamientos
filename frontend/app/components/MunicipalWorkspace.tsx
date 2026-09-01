@@ -1174,11 +1174,7 @@ function MunicipalWorkspaceContent() {
           />
         ) : activeTab === "summary" ? (
           <InformacionMunicipio
-            assets={assets}
-            canViewAssets={canViewAssets}
-            canViewMaintenance={canViewMaintenance}
             canViewOrdinances={canViewOrdinances}
-            errors={resourceErrors}
             governmentSection={
               <EstructuraGobierno
                 canView={canViewGovernment}
@@ -1187,8 +1183,6 @@ function MunicipalWorkspaceContent() {
                 onRetry={retryWorkspace}
               />
             }
-            maintenance={maintenance}
-            municipality={municipality}
             administrationSection={
               <>
                 <Administracion
