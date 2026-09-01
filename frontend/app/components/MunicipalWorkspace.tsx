@@ -5,7 +5,6 @@ import {
   Building2,
   CircleAlert,
   ClipboardList,
-  CloudSun,
   Landmark,
   Map as MapIcon,
   RefreshCw,
@@ -21,7 +20,6 @@ import {
   useEffect,
   useRef,
   useState,
-  type DragEvent,
   type KeyboardEvent,
 } from "react";
 import { fetchMunicipality } from "../lib/fetchers";
@@ -42,7 +40,6 @@ import {
 } from "../lib/permissions";
 import { canEditTownHall, useSession } from "../lib/session";
 import styles from "./MunicipalWorkspace.module.css";
-import { townHallShieldUrl } from "../lib/api";
 import { useTownHallController } from "../lib/useTownHallController";
 import { TownHallContentPanel } from "./TownHallContentPanel";
 import { TownHallEpigraphCard } from "./TownHallEpigraphCard";
@@ -83,7 +80,6 @@ import {
   EMPTY_RESOURCE_ERRORS,
   ORDINANCE_MANAGEMENT_PERMISSIONS,
   ResourceState,
-  getInitials,
   getMunicipalContexts,
 } from "./ayuntamiento/shared";
 import type { ResourceErrors, WorkspaceTab } from "./ayuntamiento/types";
@@ -346,7 +342,6 @@ function MunicipalWorkspaceContent() {
   const requestSequenceRef = useRef(0);
   const tabButtonRefs = useRef<Array<HTMLButtonElement | null>>([]);
   const [isMenuEditorOpen, setIsMenuEditorOpen] = useState(false);
-  const [isShieldTargeted, setIsShieldTargeted] = useState(false);
   // Tarjetas de epígrafe desplegadas y epígrafe que se está arrastrando. Es
   // estado de presentación, no de selección: la URL sigue llevando la pestaña.
   const [openEpigraphIds, setOpenEpigraphIds] = useState<number[]>([]);
@@ -849,9 +844,6 @@ function MunicipalWorkspaceContent() {
   const isPaused = selectedContext.organization.status === "paused";
   const townHall = townHallController.townHall;
   const canEditMenu = canEditTownHall(user);
-  const municipalityLabel =
-    townHall?.profile.display_name?.trim() || selectedContext.municipality.name;
-
   // Las pestañas del editor se añaden tras las áreas fijas, de modo que la
   // tira siga siendo una sola navegación (ADR-052).
   const workspaceTabs: TabDefinition[] = [
@@ -937,16 +929,6 @@ function MunicipalWorkspaceContent() {
     selectWorkspaceTab("summary");
   }
 
-  function handleShieldDrop(event: DragEvent<HTMLSpanElement>) {
-    event.preventDefault();
-    setIsShieldTargeted(false);
-
-    const file = event.dataTransfer.files?.[0];
-    if (canEditMenu && file && file.type.startsWith("image/")) {
-      void townHallController.uploadShield(file);
-    }
-  }
-
   function toggleEpigraph(blockId: number) {
     setOpenEpigraphIds((current) =>
       current.includes(blockId)
@@ -993,95 +975,26 @@ function MunicipalWorkspaceContent() {
 
   return (
     <section className={styles.workspace}>
-      <header className={styles.masthead}>
-        <div className={styles.identity}>
-          {/* El escudo sustituye a las iniciales cuando se ha subido uno; se
-              reemplaza soltando una imagen encima (ADR-034). */}
-          <span
-            aria-hidden="true"
-            className={`${styles.municipalityMark}${
-              isShieldTargeted ? ` ${styles.municipalityMarkTargeted}` : ""
-            }`}
-            onDragLeave={() => setIsShieldTargeted(false)}
-            onDragOver={(event) => {
-              if (!canEditMenu) {
-                return;
-              }
-              event.preventDefault();
-              setIsShieldTargeted(true);
-            }}
-            onDrop={handleShieldDrop}
-            title={
-              canEditMenu
-                ? "Arrastra una imagen para cambiar el escudo"
-                : undefined
-            }
+      {/* El diseño no tiene banda de espacio municipal: el escudo, el nombre y
+          la temperatura viven en la barra superior. Aquí sólo queda el
+          selector, y sólo cuando hay más de una organización que elegir. */}
+      {contexts.length > 1 ? (
+        <div className={styles.contextPicker}>
+          <label htmlFor="municipal-organization">Organización</label>
+          <select
+            id="municipal-organization"
+            onChange={(event) => changeOrganization(Number(event.target.value))}
+            value={selectedContext.organization.id}
           >
-            {townHall?.profile.has_shield ? (
-              <img
-                alt=""
-                src={townHallShieldUrl(townHallController.shieldVersion)}
-              />
-            ) : (
-              getInitials(municipalityLabel)
-            )}
-          </span>
-          <div>
-            <p>Espacio municipal</p>
-            <h1>{municipalityLabel}</h1>
-            <span>
-              {selectedContext.municipality.province} ·{" "}
-              {selectedContext.municipality.autonomous_community}
-            </span>
-          </div>
+            {contexts.map(({ organization: item, municipality: summary }) => (
+              <option key={item.id} value={item.id}>
+                {item.name} · {summary.name}
+                {item.status === "paused" ? " (pausada)" : ""}
+              </option>
+            ))}
+          </select>
         </div>
-
-        <div className={styles.contextPanel}>
-          <span>Organización activa</span>
-          {contexts.length > 1 ? (
-            <select
-              aria-label="Organización y municipio"
-              onChange={(event) =>
-                changeOrganization(Number(event.target.value))
-              }
-              value={selectedContext.organization.id}
-            >
-              {contexts.map(({ organization: item, municipality: summary }) => (
-                <option key={item.id} value={item.id}>
-                  {item.name} · {summary.name}
-                  {item.status === "paused" ? " (pausada)" : ""}
-                </option>
-              ))}
-            </select>
-          ) : (
-            <strong>{selectedContext.organization.name}</strong>
-          )}
-          <small>
-            {isPaused ? "Modo de consulta · organización pausada" : "Datos en producción"}
-          </small>
-          {townHall?.profile.weather_enabled ? (
-            <span
-              className={styles.weatherBlock}
-              title={
-                townHallController.weather
-                  ? `Temperatura de hoy en ${townHallController.weather.location}`
-                  : "Temperatura no disponible ahora mismo"
-              }
-            >
-              <CloudSun aria-hidden="true" size={18} strokeWidth={1.6} />
-              {/* Si el proveedor no responde se muestra un guion, nunca una
-                  cifra inventada (ADR-034). */}
-              <strong>
-                {townHallController.weather
-                  ? `${Math.round(
-                      townHallController.weather.temperature_celsius,
-                    )}°C`
-                  : "—"}
-              </strong>
-            </span>
-          ) : null}
-        </div>
-      </header>
+      ) : null}
 
       {isPaused ? (
         <p className={styles.warning} role="status">

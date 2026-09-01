@@ -30,6 +30,12 @@
   color: var(--text-faint);
 }
 
+/* Realce mientras se arrastra una imagen encima para sustituir el escudo. */
+.crestTargeted {
+  outline: 2px dashed var(--accent);
+  outline-offset: 4px;
+}
+
 .crest img {
   display: block;
   width: 100%;
