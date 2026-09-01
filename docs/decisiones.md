@@ -979,3 +979,40 @@ sigue archivado. Hay tests para los tres casos.
 La marca convive con `write_layout` de las rutas: ambos conservan lo que ya
 hubiera en `data_json`, de modo que cambiar el formato de un apartado sembrado no
 borra su clave ni al revés.
+
+## ADR-054: El Ayuntamiento recupera el cuarto nivel del diseño (2026-09-01)
+
+ADR-053 colapsó el nivel del epígrafe: el diseño tiene pestaña → epígrafe →
+pestaña interna → contenido y el modelo tenía pestaña → apartado → elemento, así
+que cada epígrafe con pestañas internas se convirtió en pestaña hermana. La
+consecuencia se vio al comparar capturas del export completo con la aplicación:
+donde el diseño enseña **una** pestaña «Información» con seis tarjetas plegables,
+la aplicación enseñaba **cuatro** pestañas hermanas. Anthony pidió ceñirse al
+diseño, así que se revierte el colapso.
+
+**El modelo pasa a cuatro niveles**: `nav_section` (pestaña) → `epigraph`
+(la tarjeta plegable) → `nav_item` (su pestaña interna, el apartado) → `item`
+(el contenido). No hace falta tocar la restricción de la tabla: el check de
+`block_type` ya admitía `epigraph` desde ADR-034. La migración
+`20260901_0043` da a cada pestaña existente un epígrafe que hereda su título y
+adopta sus apartados, y el `downgrade` los devuelve a la pestaña y renumera.
+
+**El formato sigue siendo del apartado, no del epígrafe.** Era la razón técnica
+del colapso y sigue en pie: la demografía es una serie, el análisis de agua son
+ficheros y los teléfonos son contactos. Con el nivel recuperado deja de ser un
+problema, porque el epígrafe ya no tiene que elegir uno: cada una de sus pestañas
+internas trae el suyo. La tarjeta enseña el apartado abierto y la fila de
+pestañas internas aparece sólo cuando hay más de uno.
+
+**Sólo se siembra la pestaña «Información».** El diseño tiene cuatro
+—Información, Administración, Personal y Mapa general— pero las otras tres ya
+tienen módulos propios en la aplicación, y sembrarlas como bloques vacíos
+bifurcaría el dominio: el mismo motivo por el que ADR-053 dejó fuera Normativa.
+Quedan una pestaña, seis epígrafes y dieciocho apartados, en el orden de
+`infoDefault`.
+
+La fila de pestañas del Ayuntamiento sigue llevando las áreas fijas de ADR-052
+por delante de las configurables. Reducirla a las cuatro del diseño es una
+decisión aparte, todavía sin tomar: obliga a redirigir los enlaces `?tab=` que
+hay repartidos por el producto y a decidir dónde va la ficha de identidad
+municipal, que el diseño no contempla.

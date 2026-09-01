@@ -20,7 +20,7 @@ from sqlalchemy.engine.url import make_url
 
 BACKEND_ROOT = Path(__file__).resolve().parents[1]
 DEPLOYED_REVISION = "20260701_0020"
-HEAD_REVISION = "20260806_0042"
+HEAD_REVISION = "20260901_0043"
 LEGACY_GEOGRAPHY_REVISION = "20260716_0026"
 LEGACY_GEOGRAPHY_PATH = (
     BACKEND_ROOT
@@ -8276,5 +8276,104 @@ def test_sidebar_shortcuts_upgrade_preserves_users_and_guards_downgrade(
             assert connection.execute(
                 text("SELECT version_num FROM alembic_version")
             ).scalar_one() == HEAD_REVISION
+    finally:
+        engine.dispose()
+
+
+def test_town_hall_items_move_under_an_epigraph_and_back(
+    migration_database_url: str,
+) -> None:
+    """ADR-054: la pestaña gana un epígrafe que adopta sus apartados."""
+    run_alembic(migration_database_url, "upgrade", "20260806_0042")
+    engine = create_engine(migration_database_url)
+
+    try:
+        with engine.begin() as connection:
+            organization_id = connection.execute(
+                text(
+                    "INSERT INTO organizations (name) "
+                    "VALUES ('town-hall-epigraph-org') RETURNING id"
+                )
+            ).scalar_one()
+            section_id = connection.execute(
+                text(
+                    "INSERT INTO municipal_blocks "
+                    "(organization_id, block_type, title, position) "
+                    "VALUES (:organization_id, 'nav_section', 'Información', 0) "
+                    "RETURNING id"
+                ),
+                {"organization_id": organization_id},
+            ).scalar_one()
+            for position, title in enumerate(("Historia", "Fiestas")):
+                connection.execute(
+                    text(
+                        "INSERT INTO municipal_blocks "
+                        "(organization_id, parent_id, block_type, title, position) "
+                        "VALUES (:organization_id, :parent_id, 'nav_item', "
+                        ":title, :position)"
+                    ),
+                    {
+                        "organization_id": organization_id,
+                        "parent_id": section_id,
+                        "title": title,
+                        "position": position,
+                    },
+                )
+            # Una pestaña sin apartados no debe recibir epígrafe.
+            connection.execute(
+                text(
+                    "INSERT INTO municipal_blocks "
+                    "(organization_id, block_type, title, position) "
+                    "VALUES (:organization_id, 'nav_section', 'Vacía', 1)"
+                ),
+                {"organization_id": organization_id},
+            )
+
+        run_alembic(migration_database_url, "upgrade", "head")
+        run_alembic(migration_database_url, "check")
+
+        with engine.connect() as connection:
+            epigraphs = connection.execute(
+                text(
+                    "SELECT id, parent_id, title FROM municipal_blocks "
+                    "WHERE organization_id = :organization_id "
+                    "AND block_type = 'epigraph'"
+                ),
+                {"organization_id": organization_id},
+            ).all()
+            assert len(epigraphs) == 1
+            epigraph_id, epigraph_parent, epigraph_title = epigraphs[0]
+            assert epigraph_parent == section_id
+            assert epigraph_title == "Información"
+
+            assert connection.execute(
+                text(
+                    "SELECT count(*) FROM municipal_blocks "
+                    "WHERE block_type = 'nav_item' AND parent_id = :parent_id"
+                ),
+                {"parent_id": epigraph_id},
+            ).scalar_one() == 2
+
+        run_alembic(migration_database_url, "downgrade", "20260806_0042")
+
+        with engine.connect() as connection:
+            assert connection.execute(
+                text(
+                    "SELECT count(*) FROM municipal_blocks "
+                    "WHERE block_type = 'epigraph'"
+                )
+            ).scalar_one() == 0
+            titles = connection.execute(
+                text(
+                    "SELECT title FROM municipal_blocks "
+                    "WHERE block_type = 'nav_item' AND parent_id = :parent_id "
+                    "ORDER BY position"
+                ),
+                {"parent_id": section_id},
+            ).scalars().all()
+            assert titles == ["Historia", "Fiestas"]
+
+        run_alembic(migration_database_url, "upgrade", "head")
+        run_alembic(migration_database_url, "check")
     finally:
         engine.dispose()

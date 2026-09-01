@@ -2,10 +2,12 @@ from typing import Literal, get_args
 
 from pydantic import BaseModel, ConfigDict, Field
 
-# Tres niveles: el epígrafe es la entrada de la píldora (`nav_section`), el
-# apartado cuelga de él (`nav_item`) y el elemento lleva el contenido (`item`).
-# `epigraph` y `section` siguen reservados para más adelante.
-CreatableBlockType = Literal["nav_section", "nav_item", "item"]
+# Cuatro niveles, los mismos que el diseño de referencia: la pestaña
+# (`nav_section`) es la entrada de la fila, el epígrafe (`epigraph`) es la
+# tarjeta plegable que cuelga de ella, el apartado (`nav_item`) es la pestaña
+# interna del epígrafe y el elemento (`item`) lleva el contenido.
+# `section` sigue reservado para más adelante. Ver ADR-054.
+CreatableBlockType = Literal["nav_section", "epigraph", "nav_item", "item"]
 BlockStatus = Literal["active", "archived"]
 
 # Cómo se presenta el contenido de un apartado. `text` es la prosa por defecto;
@@ -34,7 +36,8 @@ MAX_ITEM_FIELDS = 20
 # Qué puede colgar de qué. El elemento es hoja: no admite hijos.
 BLOCK_PARENT_TYPES: dict[str, str | None] = {
     "nav_section": None,
-    "nav_item": "nav_section",
+    "epigraph": "nav_section",
+    "nav_item": "epigraph",
     "item": "nav_item",
 }
 
@@ -65,11 +68,20 @@ class MunicipalNavItemRead(BaseModel):
     position: int
 
 
-class MunicipalNavSectionRead(BaseModel):
+class MunicipalNavEpigraphRead(BaseModel):
+    """La tarjeta plegable del diseño: título, y dentro sus apartados."""
+
     id: int
     title: str
     position: int
     items: list[MunicipalNavItemRead] = []
+
+
+class MunicipalNavSectionRead(BaseModel):
+    id: int
+    title: str
+    position: int
+    epigraphs: list[MunicipalNavEpigraphRead] = []
 
 
 class TownHallRead(BaseModel):

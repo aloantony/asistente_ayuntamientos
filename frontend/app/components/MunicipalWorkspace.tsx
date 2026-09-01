@@ -145,7 +145,7 @@ function findTabForBlock(townHall: TownHall | null, tab: ActiveTab) {
     if (section.id === blockId) {
       return { sectionId: section.id, epigraphId: null as number | null };
     }
-    if (section.items.some((candidate) => candidate.id === blockId)) {
+    if (section.epigraphs.some((candidate) => candidate.id === blockId)) {
       return { sectionId: section.id, epigraphId: blockId };
     }
   }
@@ -166,19 +166,19 @@ function moveEpigraph(
   }
 
   const section = nav.find((candidate) => candidate.id === sectionId);
-  const from = section?.items.findIndex((item) => item.id === draggedId) ?? -1;
-  const to = section?.items.findIndex((item) => item.id === targetId) ?? -1;
+  const from = section?.epigraphs.findIndex((item) => item.id === draggedId) ?? -1;
+  const to = section?.epigraphs.findIndex((item) => item.id === targetId) ?? -1;
 
   if (section === undefined || from === -1 || to === -1) {
     return null;
   }
 
-  const items = [...section.items];
-  const [moved] = items.splice(from, 1);
-  items.splice(to, 0, moved);
+  const epigraphs = [...section.epigraphs];
+  const [moved] = epigraphs.splice(from, 1);
+  epigraphs.splice(to, 0, moved);
 
   return nav.map((candidate) =>
-    candidate.id === sectionId ? { ...candidate, items } : candidate,
+    candidate.id === sectionId ? { ...candidate, epigraphs } : candidate,
   );
 }
 
@@ -350,6 +350,11 @@ function MunicipalWorkspaceContent() {
   // Tarjetas de epígrafe desplegadas y epígrafe que se está arrastrando. Es
   // estado de presentación, no de selección: la URL sigue llevando la pestaña.
   const [openEpigraphIds, setOpenEpigraphIds] = useState<number[]>([]);
+  // Qué apartado enseña cada epígrafe. Sin entrada, el primero: abrir una
+  // tarjeta tiene que enseñar algo (ADR-054).
+  const [openApartadoIds, setOpenApartadoIds] = useState<Record<number, number>>(
+    {},
+  );
   const [draggedEpigraphId, setDraggedEpigraphId] = useState<number | null>(
     null,
   );
@@ -762,7 +767,9 @@ function MunicipalWorkspaceContent() {
   const navSignature = (townHallController.townHall?.nav ?? [])
     .map(
       (section) =>
-        `${section.id}:${section.items.map((item) => item.id).join("-")}`,
+        `${section.id}:${section.epigraphs
+          .map((epigraph) => `${epigraph.id}.${epigraph.items.map((item) => item.id).join("+")}`)
+          .join("-")}`,
     )
     .join("|");
 
@@ -801,7 +808,7 @@ function MunicipalWorkspaceContent() {
     const section = currentTownHall?.nav.find(
       ({ id }) => id === placement.sectionId,
     );
-    const first = section?.items[0]?.id;
+    const first = section?.epigraphs[0]?.id;
     setOpenEpigraphIds(first === undefined ? [] : [first]);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeTab, navSignature]);
@@ -809,16 +816,25 @@ function MunicipalWorkspaceContent() {
   // Cada tarjeta desplegada trae su propio contenido; las plegadas no piden
   // nada. Un fallo deja la tarjeta sin contenido y con su botón de reintento,
   // así que no se vuelve a pedir solo.
-  const openEpigraphKey = openEpigraphIds.join(",");
+  const activeSectionForContent = (townHallController.townHall?.nav ?? []).find(
+    (section) => `block-${section.id}` === activeTab,
+  );
+  const openApartadoIdList = (activeSectionForContent?.epigraphs ?? [])
+    .filter((epigraph) => openEpigraphIds.includes(epigraph.id))
+    .map(
+      (epigraph) => openApartadoIds[epigraph.id] ?? epigraph.items[0]?.id,
+    )
+    .filter((id): id is number => id !== undefined);
+  const openApartadoKey = openApartadoIdList.join(",");
 
   useEffect(() => {
-    for (const blockId of openEpigraphIds) {
+    for (const blockId of openApartadoIdList) {
       if (townHallController.contents[blockId] === undefined) {
         void townHallController.loadContent(blockId);
       }
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [openEpigraphKey]);
+  }, [openApartadoKey]);
 
   if (!user) {
     return null;
@@ -963,8 +979,8 @@ function MunicipalWorkspaceContent() {
       return;
     }
 
-    const index = activeSection.items.findIndex(({ id }) => id === blockId);
-    const target = activeSection.items[index + offset];
+    const index = activeSection.epigraphs.findIndex(({ id }) => id === blockId);
+    const target = activeSection.epigraphs[index + offset];
 
     if (target !== undefined) {
       reorderEpigraph(blockId, target.id);
@@ -1256,7 +1272,7 @@ function MunicipalWorkspaceContent() {
           />
         ) : activeSection !== null ? (
           <div className={styles.tabContent}>
-            {activeSection.items.length === 0 ? (
+            {activeSection.epigraphs.length === 0 ? (
               <section className={`panel ${styles.pageState}`}>
                 <Landmark aria-hidden="true" size={28} strokeWidth={1.6} />
                 <p className="eyebrow">{activeSection.title}</p>
@@ -1271,38 +1287,83 @@ function MunicipalWorkspaceContent() {
               // Epígrafes apilados en tarjetas, como el prototipo: una por
               // epígrafe, plegables y reordenables por arrastre.
               <article className="townhall-epigraph-stack">
-                {activeSection.items.map((item, index) => {
-                  const content = townHallController.contents[item.id];
+                {activeSection.epigraphs.map((epigraph, index) => {
+                  // El contenido vive en el apartado —la pestaña interna del
+                  // diseño—, no en el epígrafe: la tarjeta enseña el abierto.
+                  const apartado =
+                    epigraph.items.find(
+                      ({ id }) => id === openApartadoIds[epigraph.id],
+                    ) ?? epigraph.items[0];
+                  const item = apartado ?? epigraph;
+                  const content =
+                    apartado === undefined
+                      ? undefined
+                      : townHallController.contents[apartado.id];
                   const isLoadingEpigraph =
-                    townHallController.loadingContentIds.includes(item.id);
+                    apartado !== undefined &&
+                    townHallController.loadingContentIds.includes(apartado.id);
 
                   return (
                     <TownHallEpigraphCard
                       canEdit={canEditMenu}
-                      canMoveDown={index < activeSection.items.length - 1}
+                      canMoveDown={index < activeSection.epigraphs.length - 1}
                       canMoveUp={index > 0}
-                      isOpen={openEpigraphIds.includes(item.id)}
+                      isOpen={openEpigraphIds.includes(epigraph.id)}
                       isSaving={townHallController.isSavingTownHall}
-                      key={item.id}
+                      key={epigraph.id}
                       onDelete={() =>
-                        void townHallController.archiveBlock(item.id)
+                        void townHallController.archiveBlock(epigraph.id)
                       }
-                      onDragStart={() => setDraggedEpigraphId(item.id)}
+                      onDragStart={() => setDraggedEpigraphId(epigraph.id)}
                       onDrop={() => {
                         if (draggedEpigraphId !== null) {
-                          reorderEpigraph(draggedEpigraphId, item.id);
+                          reorderEpigraph(draggedEpigraphId, epigraph.id);
                           setDraggedEpigraphId(null);
                         }
                       }}
-                      onMoveDown={() => moveEpigraphBy(item.id, 1)}
-                      onMoveUp={() => moveEpigraphBy(item.id, -1)}
+                      onMoveDown={() => moveEpigraphBy(epigraph.id, 1)}
+                      onMoveUp={() => moveEpigraphBy(epigraph.id, -1)}
                       onRename={(title) =>
-                        void townHallController.renameBlock(item.id, title)
+                        void townHallController.renameBlock(epigraph.id, title)
                       }
-                      onToggle={() => toggleEpigraph(item.id)}
-                      title={item.title}
+                      onToggle={() => toggleEpigraph(epigraph.id)}
+                      title={epigraph.title}
                     >
-                      {content !== undefined ? (
+                      {epigraph.items.length > 1 ? (
+                        // Las pestañas internas del epígrafe, como el diseño.
+                        <div
+                          aria-label={`Apartados de ${epigraph.title}`}
+                          className="townhall-epigraph-tabs"
+                          role="tablist"
+                        >
+                          {epigraph.items.map((apartadoTab) => (
+                            <button
+                              aria-selected={apartadoTab.id === item.id}
+                              className={
+                                apartadoTab.id === item.id
+                                  ? "townhall-epigraph-tab is-active"
+                                  : "townhall-epigraph-tab"
+                              }
+                              key={apartadoTab.id}
+                              onClick={() =>
+                                setOpenApartadoIds((current) => ({
+                                  ...current,
+                                  [epigraph.id]: apartadoTab.id,
+                                }))
+                              }
+                              role="tab"
+                              type="button"
+                            >
+                              {apartadoTab.title}
+                            </button>
+                          ))}
+                        </div>
+                      ) : null}
+                      {apartado === undefined ? (
+                        <p className="townhall-epigraph-state">
+                          Este epígrafe todavía no tiene apartados.
+                        </p>
+                      ) : content !== undefined ? (
                         <TownHallContentPanel
                           canEdit={canEditMenu}
                           content={content}
@@ -1420,7 +1481,7 @@ function MunicipalWorkspaceContent() {
           fallbackName={selectedContext.municipality.name}
           isSaving={townHallController.isSavingTownHall}
           onAddItem={(sectionId) =>
-            void townHallController.addItem(sectionId, "Nuevo epígrafe")
+            void townHallController.addEpigraph(sectionId, "Nuevo epígrafe")
           }
           onAddSection={() => void townHallController.addSection("Nueva pestaña")}
           onArchiveBlock={(blockId) =>

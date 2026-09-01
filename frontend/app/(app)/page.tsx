@@ -354,7 +354,10 @@ export default function HomePage() {
         href: "/proyectos",
         icon: "projects",
         value: projects ? projects.length : null,
-        hint: activeProjects !== null ? `${activeProjects} activos` : undefined,
+        hint:
+          activeProjects !== null
+            ? `${activeProjects} ${activeProjects === 1 ? "activo" : "activos"}`
+            : undefined,
       });
     }
     if (canSeeRequirements) {

@@ -156,7 +156,7 @@ export default function CuentaPage() {
   }
 
   return (
-    <div className="workspace">
+    <div className="workspace workspace--narrow">
       <Dashboard
         user={user}
         currentPassword={currentPassword}

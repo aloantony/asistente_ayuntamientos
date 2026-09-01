@@ -20,6 +20,9 @@ PRODUCTION_BASE = {
     "database_url": "postgresql+psycopg://app:s3cret@db:5432/app",
     "allowed_hosts": "anacleto.example",
     "assistant_runtime": "anthropic",
+    # El .env de desarrollo lo deja en el marcador `dev-bootstrap-token`, que la
+    # guarda rechaza: en producción se deja sin poner salvo bootstrap en curso.
+    "bootstrap_admin_token": None,
 }
 
 
@@ -61,6 +64,12 @@ def test_production_refuses_insecure_cors_origins(origins):
 def test_production_refuses_a_wildcard_host():
     with pytest.raises(ValidationError):
         production_settings(allowed_hosts="*")
+
+
+def test_production_refuses_the_bootstrap_placeholder():
+    """El token de bootstrap crea el primer superusuario: no puede ser el de dev."""
+    with pytest.raises(ValidationError):
+        production_settings(bootstrap_admin_token="dev-bootstrap-token")
 
 
 def test_development_keeps_the_relaxed_defaults():

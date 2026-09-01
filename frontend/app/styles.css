@@ -150,6 +150,12 @@ a {
   width: 100%;
 }
 
+/* Mi cuenta es una ficha de lectura, no un panel de trabajo: en el diseño de
+ * referencia se queda en la columna estrecha en vez de cruzar la pantalla. */
+.workspace--narrow .panel {
+  width: min(100%, 720px);
+}
+
 .panel-header {
   display: flex;
   align-items: flex-start;
@@ -7430,6 +7436,43 @@ html.dark .dashboard-ask input {
   margin: 0;
   color: var(--text-muted);
   font-size: 13.5px;
+}
+
+/* Pestañas internas del epígrafe: la fila que el diseño pone bajo el título
+ * cuando la tarjeta tiene más de un apartado (píldora oscura en la activa). */
+.townhall-epigraph-tabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  padding-bottom: 4px;
+  border-bottom: 1px solid var(--border);
+}
+
+.townhall-epigraph-tab {
+  padding: 7px 14px;
+  border: 0;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--text-secondary);
+  font: inherit;
+  font-size: 13.5px;
+  font-weight: 500;
+  cursor: pointer;
+}
+
+.townhall-epigraph-tab:hover {
+  background: var(--fill);
+  color: var(--text);
+}
+
+.townhall-epigraph-tab.is-active {
+  background: var(--text);
+  color: var(--bg);
+}
+
+.townhall-epigraph-tab:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
 }
 
 /* ---------------------------------------------------------------------------
