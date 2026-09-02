@@ -20,7 +20,7 @@ from sqlalchemy.engine.url import make_url
 
 BACKEND_ROOT = Path(__file__).resolve().parents[1]
 DEPLOYED_REVISION = "20260701_0020"
-HEAD_REVISION = "20260901_0043"
+HEAD_REVISION = "20260903_0044"
 LEGACY_GEOGRAPHY_REVISION = "20260716_0026"
 LEGACY_GEOGRAPHY_PATH = (
     BACKEND_ROOT
@@ -8375,5 +8375,144 @@ def test_town_hall_items_move_under_an_epigraph_and_back(
 
         run_alembic(migration_database_url, "upgrade", "head")
         run_alembic(migration_database_url, "check")
+    finally:
+        engine.dispose()
+
+
+def test_legacy_town_hall_tabs_fold_into_one_and_unfold(
+    migration_database_url: str,
+) -> None:
+    """ADR-056: las pestañas sobrantes del seed viejo se pliegan en «informacion».
+
+    Se comprueban las tres cosas que importan: que los epígrafes acaban en la
+    pestaña que recoge, que una pestaña hecha a mano no se toca, y que la vuelta
+    atrás los devuelve a su sitio aunque se hayan renombrado por el camino.
+    """
+    run_alembic(migration_database_url, "upgrade", "20260901_0043")
+    engine = create_engine(migration_database_url)
+
+    def nueva_pestaña(connection, organization_id, title, position, seed):
+        return connection.execute(
+            text(
+                "INSERT INTO municipal_blocks "
+                "(organization_id, block_type, title, position, data_json) "
+                "VALUES (:organization_id, 'nav_section', :title, :position, "
+                ":data_json) RETURNING id"
+            ),
+            {
+                "organization_id": organization_id,
+                "title": title,
+                "position": position,
+                "data_json": json.dumps({"seed": seed}) if seed else None,
+            },
+        ).scalar_one()
+
+    def nuevo_epigrafe(connection, organization_id, parent_id, title):
+        return connection.execute(
+            text(
+                "INSERT INTO municipal_blocks "
+                "(organization_id, parent_id, block_type, title, position) "
+                "VALUES (:organization_id, :parent_id, 'epigraph', :title, 0) "
+                "RETURNING id"
+            ),
+            {
+                "organization_id": organization_id,
+                "parent_id": parent_id,
+                "title": title,
+            },
+        ).scalar_one()
+
+    try:
+        with engine.begin() as connection:
+            organization_id = connection.execute(
+                text(
+                    "INSERT INTO organizations (name) "
+                    "VALUES ('town-hall-merge-org') RETURNING id"
+                )
+            ).scalar_one()
+            keeper = nueva_pestaña(
+                connection, organization_id, "Información del municipio", 0, "informacion"
+            )
+            keeper_epigraph = nuevo_epigrafe(
+                connection, organization_id, keeper, "Información del municipio"
+            )
+            datos = nueva_pestaña(
+                connection, organization_id, "Datos del municipio", 1, "datos"
+            )
+            datos_epigraph = nuevo_epigrafe(
+                connection, organization_id, datos, "Datos del municipio"
+            )
+            # Una pestaña que el ayuntamiento creó a mano: sin marca del seed.
+            propia = nueva_pestaña(connection, organization_id, "Turismo", 2, None)
+            propia_epigraph = nuevo_epigrafe(
+                connection, organization_id, propia, "Playas"
+            )
+
+        run_alembic(migration_database_url, "upgrade", "head")
+        run_alembic(migration_database_url, "check")
+
+        with engine.connect() as connection:
+            activas = connection.execute(
+                text(
+                    "SELECT id, title FROM municipal_blocks "
+                    "WHERE organization_id = :organization_id "
+                    "AND block_type = 'nav_section' AND status = 'active' "
+                    "ORDER BY position"
+                ),
+                {"organization_id": organization_id},
+            ).all()
+            assert [row.id for row in activas] == [keeper, propia]
+
+            padres = dict(
+                connection.execute(
+                    text(
+                        "SELECT id, parent_id FROM municipal_blocks "
+                        "WHERE organization_id = :organization_id "
+                        "AND block_type = 'epigraph'"
+                    ),
+                    {"organization_id": organization_id},
+                ).all()
+            )
+            assert padres[keeper_epigraph] == keeper
+            assert padres[datos_epigraph] == keeper
+            # La pestaña hecha a mano conserva el suyo.
+            assert padres[propia_epigraph] == propia
+
+        # Renombrar la tarjeta no puede romper la vuelta atrás: la marca no
+        # viaja en el título.
+        with engine.begin() as connection:
+            connection.execute(
+                text(
+                    "UPDATE municipal_blocks SET title = 'Padrón' WHERE id = :id"
+                ),
+                {"id": datos_epigraph},
+            )
+
+        run_alembic(migration_database_url, "downgrade", "20260901_0043")
+
+        with engine.connect() as connection:
+            padres = dict(
+                connection.execute(
+                    text(
+                        "SELECT id, parent_id FROM municipal_blocks "
+                        "WHERE organization_id = :organization_id "
+                        "AND block_type = 'epigraph'"
+                    ),
+                    {"organization_id": organization_id},
+                ).all()
+            )
+            assert padres[datos_epigraph] == datos
+            assert padres[keeper_epigraph] == keeper
+            estado = connection.execute(
+                text("SELECT status FROM municipal_blocks WHERE id = :id"),
+                {"id": datos},
+            ).scalar_one()
+            assert estado == "active"
+            # La marca se retira al volver: no queda rastro en `data_json`.
+            marca = connection.execute(
+                text("SELECT data_json FROM municipal_blocks WHERE id = :id"),
+                {"id": datos_epigraph},
+            ).scalar_one()
+            assert marca is None or "merged_from" not in marca
     finally:
         engine.dispose()
