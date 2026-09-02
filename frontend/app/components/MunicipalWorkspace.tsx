@@ -1088,14 +1088,6 @@ function MunicipalWorkspaceContent() {
         {activeTab === "summary" && !isLoading && !error && municipality && organization ? (
           <InformacionMunicipio
             canViewOrdinances={canViewOrdinances}
-            governmentSection={
-              <EstructuraGobierno
-                canView={canViewGovernment}
-                error={resourceErrors.government}
-                members={government}
-                onRetry={retryWorkspace}
-              />
-            }
             seriesSection={
               <SeriesMunicipio
                 climate={climate}
@@ -1288,7 +1280,18 @@ function MunicipalWorkspaceContent() {
                           ))}
                         </div>
                       ) : null}
-                      {apartado === undefined ? (
+                      {epigraph.module === "government" ? (
+                        // La corporación ya tiene módulo propio: la tarjeta lo
+                        // enseña en vez del contenido genérico, para no contar
+                        // lo mismo dos veces en la misma pestaña.
+                        <EstructuraGobierno
+                          canView={canViewGovernment}
+                          embedded
+                          error={resourceErrors.government}
+                          members={government}
+                          onRetry={retryWorkspace}
+                        />
+                      ) : apartado === undefined ? (
                         <p className="townhall-epigraph-state">
                           Este epígrafe todavía no tiene apartados.
                         </p>

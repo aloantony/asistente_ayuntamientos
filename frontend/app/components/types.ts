@@ -2332,6 +2332,8 @@ export type TownHallNavItem = {
 
 /** La tarjeta plegable del diseño: cuelga de una pestaña y agrupa apartados. */
 export type TownHallNavEpigraph = TownHallNavItem & {
+  /** Módulo propio que pinta la tarjeta, si el producto ya tiene uno. */
+  module?: string | null;
   items: TownHallNavItem[];
 };
 
