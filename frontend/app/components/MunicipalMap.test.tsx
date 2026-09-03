@@ -8,10 +8,28 @@ import {
 } from "../lib/referenceLayers";
 import { MunicipalMap } from "./MunicipalMap";
 
-const leafletHarness = vi.hoisted(() => ({
-  maps: [] as unknown[],
-  tileLayers: [] as unknown[],
-}));
+const leafletHarness = vi.hoisted(
+  () =>
+    ({
+      maps: [],
+      tileLayers: [],
+    }) as {
+      maps: {
+        emit: (eventName: string, event: unknown) => void;
+        fittedBounds: { points: unknown } | null;
+        maxZoom: number;
+      }[];
+      tileLayers: {
+        emit: (eventName: string) => void;
+        initialUrl: string;
+        opacity: number | null;
+        options: Record<string, unknown>;
+        setUrlHistory: string[];
+        url: string;
+        zIndex: number | null;
+      }[];
+    },
+);
 
 vi.mock("leaflet", () => {
   type EventHandler = (event: unknown) => void;
@@ -88,9 +106,9 @@ vi.mock("leaflet", () => {
         ?.forEach((handler) => handler(event));
     }
 
-    fittedBounds: unknown = null;
+    fittedBounds: { points: unknown } | null = null;
 
-    fitBounds(bounds: unknown) {
+    fitBounds(bounds: { points: unknown }) {
       this.fittedBounds = bounds;
       return this;
     }
@@ -239,12 +257,15 @@ vi.mock("leaflet", () => {
 
 type FakeMapHandle = {
   emit: (eventName: string, event: unknown) => void;
+  fittedBounds: { points: unknown } | null;
+  maxZoom: number;
 };
 
 type FakeTileLayerHandle = {
   emit: (eventName: string) => void;
   initialUrl: string;
   opacity: number | null;
+  options: Record<string, unknown>;
   setUrlHistory: string[];
   url: string;
   zIndex: number | null;
@@ -503,9 +524,7 @@ describe("MunicipalMap SIUR tile runtime", () => {
     await waitFor(() =>
       expect(leafletHarness.maps[0].fittedBounds).not.toBeNull(),
     );
-    expect(
-      (leafletHarness.maps[0].fittedBounds as { points: unknown }).points,
-    ).toEqual([
+    expect(leafletHarness.maps[0].fittedBounds?.points).toEqual([
       [bounds.south, bounds.west],
       [bounds.north, bounds.east],
     ]);
