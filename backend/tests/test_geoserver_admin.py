@@ -381,7 +381,11 @@ def disk_quota_xml(
     cleanup_units: str = "SECONDS",
     max_concurrent_cleanups: str | int = 2,
     policy: str = "LRU",
+    layer_quotas: str = "<layerQuotas/>",
+    quota_store: str = "HSQL",
 ) -> bytes:
+    # GeoServer echoes back the whole configuration gwc-config-init installs,
+    # so layerQuotas and quotaStore are always present in a real response.
     return (
         '<?xml version="1.0" encoding="UTF-8"?>'
         "<org.geowebcache.diskquota.DiskQuotaConfig>"
@@ -392,6 +396,8 @@ def disk_quota_xml(
         f"<globalExpirationPolicyName>{policy}</globalExpirationPolicyName>"
         "<globalQuota><id>0</id>"
         f"<bytes>{quota_bytes}</bytes></globalQuota>"
+        f"{layer_quotas}"
+        f"<quotaStore>{quota_store}</quotaStore>"
         "</org.geowebcache.diskquota.DiskQuotaConfig>"
     ).encode()
 
@@ -1062,6 +1068,18 @@ def test_geowebcache_disk_quota_xml_is_strict() -> None:
             b"<units>GiB</units></globalQuota>",
         ),
         b"<!DOCTYPE x [<!ENTITY unsafe 'x'>]>" + disk_quota_xml(),
+        # A per-layer quota would silently override the single global ceiling.
+        disk_quota_xml(
+            layer_quotas=(
+                "<layerQuotas><LayerQuota><layer>x</layer>"
+                "</LayerQuota></layerQuotas>"
+            )
+        ),
+        # DummyQuotaStore accounts for nothing, so the quota stops being real.
+        disk_quota_xml(quota_store="Dummy"),
+        # The two trailing elements are part of the contract, not optional.
+        disk_quota_xml().replace(b"<quotaStore>HSQL</quotaStore>", b""),
+        disk_quota_xml().replace(b"<layerQuotas/>", b""),
     ]:
         client, _ = make_client([xml_response(payload)])
         with pytest.raises(GeoServerAdminResponseError):
