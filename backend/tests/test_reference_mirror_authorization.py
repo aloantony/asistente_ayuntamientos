@@ -1219,3 +1219,67 @@ def test_serving_and_effective_attribution_follow_current_review(db) -> None:
         db,
         services=[service],
     )[service.id] is None
+
+
+def test_prefetched_chains_decide_exactly_as_the_per_source_lookup(db) -> None:
+    # El catálogo pide la autorización de cientos de fuentes de una vez. La
+    # precarga sólo ahorra viajes a la base de datos: la decisión, y su motivo
+    # de bloqueo, tienen que ser los mismos que uno a uno.
+    _, _, _, authorized = _seed_source(db)
+    authorize_mirror_source(
+        db,
+        authorized,
+        allowed_origins=[
+            "https://data.example.test",
+            "https://metadata.example.test",
+        ],
+    )
+    _, _, _, unauthorized = _seed_source(
+        db,
+        provider_key="mirror-authorization-prefetch-test",
+    )
+    sources = [authorized, unauthorized]
+
+    chains = mirror_authorization.prefetch_source_authorization_chains(
+        db,
+        sources=sources,
+    )
+
+    assert set(chains) == {authorized.id, unauthorized.id}
+    assert len(chains[authorized.id]) == 1
+    assert chains[unauthorized.id] == ()
+    for source in sources:
+        assert mirror_authorization.source_authorization_blocker(
+            db,
+            source=source,
+            chains=chains,
+        ) == mirror_authorization.source_authorization_blocker(
+            db,
+            source=source,
+        )
+    assert (
+        mirror_authorization.source_authorization_blocker(
+            db,
+            source=unauthorized,
+            chains=chains,
+        )
+        == "mirror_authorization_missing"
+    )
+    assert (
+        mirror_authorization.source_authorization_blocker(
+            db,
+            source=authorized,
+            chains=chains,
+        )
+        is None
+    )
+
+
+def test_prefetching_no_sources_asks_nothing(db) -> None:
+    assert (
+        mirror_authorization.prefetch_source_authorization_chains(
+            db,
+            sources=[],
+        )
+        == {}
+    )

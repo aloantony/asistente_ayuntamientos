@@ -8382,7 +8382,7 @@ def test_town_hall_items_move_under_an_epigraph_and_back(
 def test_legacy_town_hall_tabs_fold_into_one_and_unfold(
     migration_database_url: str,
 ) -> None:
-    """ADR-056: las pestañas sobrantes del seed viejo se pliegan en «informacion».
+    """ADR-059: las pestañas sobrantes del seed viejo se pliegan en «informacion».
 
     Se comprueban las tres cosas que importan: que los epígrafes acaban en la
     pestaña que recoge, que una pestaña hecha a mano no se toca, y que la vuelta

@@ -3,6 +3,11 @@
 import { CircleAlert, Layers, MapPin, RefreshCw, ShieldCheck } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import { fetchAllGeoMapItems } from "../../lib/geo";
+import {
+  defaultLocalBaseMapSelection,
+  fetchReferenceCatalog,
+  type SiurMapLayer,
+} from "../../lib/referenceLayers";
 import { MunicipalMap } from "../MunicipalMap";
 import workspaceStyles from "../MunicipalWorkspace.module.css";
 import type { GeoMapItem } from "../types";
@@ -75,6 +80,8 @@ export function MapaGeneral({
   const [error, setError] = useState("");
   const [isLoading, setIsLoading] = useState(false);
   const [loadAttempt, setLoadAttempt] = useState(0);
+  const [baseMapLayers, setBaseMapLayers] = useState<SiurMapLayer[]>([]);
+  const [baseLayerId, setBaseLayerId] = useState<number | null>(null);
 
   useEffect(() => {
     if (!canViewMap) {
@@ -107,6 +114,38 @@ export function MapaGeneral({
       .finally(() => {
         if (!controller.signal.aborted) {
           setIsLoading(false);
+        }
+      });
+
+    return () => controller.abort();
+  }, [organizationId, canViewMap, loadAttempt]);
+
+  // El fondo del mapa lo sirve el espejo cartográfico, igual que en `/mapa`.
+  // Esta pantalla no elige mapa base ni lo recuerda: le basta con el que el
+  // catálogo trae por omisión. Si el catálogo no está disponible, el mapa se
+  // queda sin fondo pero los elementos municipales se siguen viendo, así que el
+  // fallo no tumba la pantalla; sólo se anuncia debajo.
+  useEffect(() => {
+    if (!canViewMap) {
+      setBaseMapLayers([]);
+      setBaseLayerId(null);
+      return;
+    }
+
+    const controller = new AbortController();
+    fetchReferenceCatalog(organizationId, "", controller.signal)
+      .then((catalog) => {
+        if (controller.signal.aborted) {
+          return;
+        }
+        const selection = defaultLocalBaseMapSelection(catalog);
+        setBaseMapLayers(selection.layers);
+        setBaseLayerId(selection.baseLayerId);
+      })
+      .catch(() => {
+        if (!controller.signal.aborted) {
+          setBaseMapLayers([]);
+          setBaseLayerId(null);
         }
       });
 
@@ -266,6 +305,8 @@ export function MapaGeneral({
             <MunicipalMap
               items={visibleItems}
               markerColors={markerColors}
+              siurLayers={baseMapLayers}
+              baseLayerId={baseLayerId}
               onSelectItem={(item) => setSelectedId(itemKey(item))}
               selectedItemId={selectedId}
             />
@@ -275,6 +316,11 @@ export function MapaGeneral({
                 ? " (filtrados)"
                 : ""}
             </p>
+            {baseLayerId === null ? (
+              <p className={styles.counter}>
+                Sin fondo cartográfico disponible
+              </p>
+            ) : null}
           </div>
         </div>
       )}

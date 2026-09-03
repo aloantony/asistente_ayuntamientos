@@ -1076,7 +1076,93 @@ en lugar de tumbar el documento: la capa conserva el estilo predeterminado que
 `settings.json` ya deriva y la sonda simplemente deja de confirmar un
 predeterminado ahí. No se adivina, y el resto del WMC sigue comprobándose.
 
-## ADR-056: La fila de pestañas del Ayuntamiento la forman los apartados (2026-09-03)
+## ADR-057: El espejo cartográfico se acota al municipio servido (2026-09-03)
+
+Los perfiles de cobertura del espejo local fijaban la envolvente de Castilla y
+León entera con zoom nativo 16. Al medirlo contra el servicio real del IGN por
+primera vez, ese alcance resultó ser 1.308.502 teselas, **28,0 GB y 20.627
+peticiones** para una sola capa de fondo: casi seis horas de tráfico contra un
+servicio público, repetidas en cada refresco, para servir a un municipio de
+Burgos. Y no cabía: la caché revisada del despliegue son 32 GiB con una cuota de
+24, así que la pirámide regional no llegaba a poder almacenarse.
+
+**El perfil pasa a ser municipal**: el municipio servido más un anillo de
+vecinos, unos 30 × 31 km, con zoom nativo 17. Son **24.509 teselas, unos 400 MB
+y 438 peticiones**, y llega **un nivel de zoom más cerca** que el perfil
+regional: el ayuntamiento ve sus parcelas en lugar de una región borrosa. Cuesta
+la setentava parte y da más detalle.
+
+Las cifras no son estimaciones. Salen de descargar supertiles reales de
+`wms-inspire/ign-base` replicando las peticiones que emite `tile_seed`, y de
+medir tamaño y latencia por nivel de zoom: 16,7 KB por tesela en z16 frente a
+55,8 KB en z14, y entre 3,4 y 9,4 segundos por petición según el nivel. Una
+estimación anterior basada en teselas WMTS dio 20 GB y se quedó corta, porque el
+WMTS del IGN sirve PNG pre-renderizados mucho más ligeros que los que devuelve
+su WMS al vuelo. Medir el camino que el código recorre de verdad, y no uno
+parecido, fue lo que cambió la decisión.
+
+**El sobre vale para todo lo que se adquiere de SIUR**, no sólo teselas: las
+láminas de inundación de MITECO se descargaban por API de features con el mismo
+`bbox` regional y ahora se acotan igual. La desproporción era la misma.
+
+**La sustitución de ortofotos históricas conserva su perfil regional.** Su
+evidencia de equivalencia está comprometida en el repositorio y verificada byte
+a byte, de modo que su perfil operativo no puede moverse sin regenerar ese
+fichero y su hash. Es una funcionalidad distinta de los fondos que este
+despliegue replica, así que se le da su propia constante de límites y se deja
+intacta.
+
+**Servir un segundo municipio exige revisar un segundo perfil.** No se deriva el
+sobre de los datos del municipio en tiempo de ejecución a propósito: la
+cobertura entra en la definición de cada fuente y en su hash, y una cobertura
+que cambia sola invalidaría en silencio las autorizaciones de espejo que
+dependen de ella.
+
+## ADR-058: El catálogo verifica la instantánea una vez por lectura, no una por capa (2026-09-03)
+
+**Contexto.** El mapa de producción aparecía vacío con dos mensajes:
+«Cargando catálogo verificado…» en el árbol de capas y «Fondo cartográfico local
+pendiente de sincronización» sobre el lienzo. No era un fallo de entrega: la capa
+de fondo estaba sembrada, autorizada y servía teselas en todos los niveles de
+zoom. Era el catálogo, que **tardaba unos ocho segundos y medio** en responder.
+Durante ese rato la pantalla es exactamente la de un mapa roto.
+
+Medido con perfilador contra la base de datos de producción, el coste estaba en
+dos sitios, y ninguno era el que parecía:
+
+1. `_current_layer_blocker` llamaba, **por cada una de las 228 capas**, a
+   `stored_catalog_snapshot_is_valid` y a `catalog_snapshot_contains_active_layer`.
+   Las dos revalidan la instantánea entera: 460 serializaciones y hashes del
+   mismo documento inmutable, 2,2 s sólo en `json.dumps`.
+2. La disponibilidad local pedía la cadena de autorización **una consulta por
+   fuente**: 536 viajes a la base de datos.
+
+**Decisión.**
+
+1. **`CatalogSnapshotDeliveryView`**: la instantánea se valida **una vez por
+   lectura de catálogo** y se indexan de una pasada las `source_key` que quedaron
+   entregables. Cada capa consulta ese índice. La instantánea es inmutable y no
+   puede cambiar mientras se la lee, así que la respuesta no puede diferir entre
+   una capa y la siguiente. **La verificación no se debilita: se deja de repetir.**
+2. **`prefetch_source_authorization_chains`**: las cadenas de autorización de
+   todas las fuentes se cargan en una consulta y se le pasan al mismo
+   `require_current_source_authorization` de siempre. Cambia de dónde salen las
+   filas, no qué se comprueba con ellas.
+3. **Los caminos de una sola capa se quedan como estaban.** La vista y la
+   precarga son parámetros opcionales que sólo usa el camino masivo del catálogo,
+   de modo que la entrega de una tesela concreta sigue revalidando por su cuenta.
+
+**Resultado**, medido contra producción: la proyección pasa de **8,4 s a 0,29 s**
+y de 552 consultas a 26, con salida idéntica —las mismas capas entregables, los
+mismos motivos de bloqueo y la misma atribución proyectada.
+
+**Consecuencias.** Una prueba fija el invariante que hace legítimo el atajo: la
+vista tiene que responder lo mismo que la comprobación por capa para todas las
+capas de una instantánea, y fallar cerrada cuando la instantánea está corrupta.
+Si alguna vez la validación pasa a depender de algo que cambie dentro de una
+misma petición, esa prueba es la que se romperá, y con razón.
+
+## ADR-059: La fila de pestañas del Ayuntamiento la forman los apartados (2026-09-03)
 
 **Contexto.** El diseño abre el Ayuntamiento con cuatro pestañas —Información,
 Administración, Personal y Mapa general— y el asa que precede a la fila ofrece

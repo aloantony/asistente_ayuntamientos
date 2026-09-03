@@ -12,13 +12,16 @@ from sqlalchemy import and_, func, select
 from sqlalchemy.orm import Session
 
 from app.reference_layers.mirror_lifecycle import (
+    CatalogSnapshotDeliveryView,
     catalog_snapshot_contains_active_layer,
+    catalog_snapshot_delivery_view,
     delivery_state_matches_promotion_head,
     stored_catalog_snapshot_is_valid,
     stored_source_definition_is_valid,
     sync_run_source_definition_is_valid,
 )
 from app.reference_layers.mirror_authorization import (
+    prefetch_source_authorization_chains,
     source_authorization_blocker,
     version_authorization_blocker,
 )
@@ -311,10 +314,14 @@ def catalog_local_delivery_availability(
                 )
             return result
     strategy_matrix_configured = bool(strategy_rows)
+    # Validate the snapshot once for the whole catalog instead of once per
+    # layer: it is immutable and the answer cannot differ between them.
+    snapshot_view = catalog_snapshot_delivery_view(current_snapshot)
     layer_blockers = {
         layer.id: _current_layer_blocker(
             layer,
             current_snapshot,
+            snapshot_view,
         )
         for layer in layers
         if layer.node_type == "layer"
@@ -359,6 +366,17 @@ def catalog_local_delivery_availability(
         )
     ):
         sources_by_layer.setdefault(source.layer_id, []).append(source)
+    # One prefetch for the whole catalog instead of one query per source: the
+    # loop below asks about every enabled source of every unpromoted layer.
+    authorization_chains = prefetch_source_authorization_chains(
+        db,
+        sources=[
+            source
+            for sources in sources_by_layer.values()
+            for source in sources
+            if source.enabled
+        ],
+    )
     active_ids = [
         state.active_version_id
         for state in states.values()
@@ -496,6 +514,7 @@ def catalog_local_delivery_availability(
                     source_authorization_blocker(
                         db,
                         source=source,
+                        chains=authorization_chains,
                     )
                     for source in enabled_sources
                 ]
@@ -785,7 +804,10 @@ def _load_current_layer_context(
 def _current_layer_blocker(
     layer: ReferenceLayer,
     snapshot: ReferenceCatalogSnapshot | None,
+    view: CatalogSnapshotDeliveryView | None = None,
 ) -> str | None:
+    """``view`` answers for a whole catalog what the two calls answer per layer."""
+
     if (
         snapshot is None
         or layer.provider_key != snapshot.provider_key
@@ -794,11 +816,13 @@ def _current_layer_blocker(
         or layer.status not in {"active", "degraded"}
     ):
         return "local_disabled"
-    if (
-        not snapshot.is_current
-        or not stored_catalog_snapshot_is_valid(snapshot)
-        or not catalog_snapshot_contains_active_layer(snapshot, layer)
-    ):
+    if view is None:
+        frozen = stored_catalog_snapshot_is_valid(
+            snapshot
+        ) and catalog_snapshot_contains_active_layer(snapshot, layer)
+    else:
+        frozen = view.is_valid and view.contains_active_layer(layer)
+    if not snapshot.is_current or not frozen:
         return "local_version_invalid"
     return None
 

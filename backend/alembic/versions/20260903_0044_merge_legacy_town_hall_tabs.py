@@ -10,7 +10,7 @@ epígrafes pasan a colgar de ella y la pestaña vacía se archiva. Sólo se toca
 las que conservan su marca del seed; una pestaña creada a mano no la lleva y se
 queda donde está. Cada epígrafe movido anota de dónde viene, de modo que la
 vuelta atrás no depende de los títulos, que el ayuntamiento puede haber
-cambiado. Ver ADR-056.
+cambiado. Ver ADR-059.
 
 Revision ID: 20260903_0044
 Revises: 20260901_0043
