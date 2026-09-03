@@ -31,6 +31,7 @@ from app.reference_layers.source_discovery import (
     reviewed_local_style_recipes,
 )
 from app.reference_layers.mirror_coverage import (
+    SIUR_ORTHO_TILE_BOUNDS,
     SIUR_TILE_BOUNDS,
     SIUR_TILE_MAX_COUNT,
     SIUR_TILE_MAX_ZOOM,
@@ -731,7 +732,12 @@ def test_miteco_flood_layers_use_exact_official_ogc_api_collections(
     assert selected.remote_name == collection
     assert selected.sync_strategy == "paged_snapshot"
     assert selected.config["page_size"] == 2_000
-    assert selected.config["bbox"] == [-7.6, 39.9, -1.3, 43.4]
+    assert selected.config["bbox"] == [
+        SIUR_TILE_BOUNDS["west"],
+        SIUR_TILE_BOUNDS["south"],
+        SIUR_TILE_BOUNDS["east"],
+        SIUR_TILE_BOUNDS["north"],
+    ]
     assert selected.config["bbox_crs"] == (
         "http://www.opengis.net/def/crs/OGC/1.3/CRS84"
     )
@@ -1247,7 +1253,7 @@ def test_itacyl_ortho_builds_exact_or_visible_degraded_source(
     assert candidate.endpoint_url == "https://www.ign.es/wms/pnoa-historico"
     assert candidate.remote_name == selected_layer
     assert candidate.config["format"] == "image/jpeg"
-    assert candidate.config["bounds"] == SIUR_TILE_BOUNDS
+    assert candidate.config["bounds"] == SIUR_ORTHO_TILE_BOUNDS
     assert candidate.config["min_zoom"] == 0
     assert candidate.config["max_zoom"] == 15
     assert candidate.config["wms_supertile_size"] == 8

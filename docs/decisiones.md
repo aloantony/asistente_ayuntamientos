@@ -1075,3 +1075,45 @@ antigua no casa. Ahora una selección ambigua **no selecciona nada** en esa capa
 en lugar de tumbar el documento: la capa conserva el estilo predeterminado que
 `settings.json` ya deriva y la sonda simplemente deja de confirmar un
 predeterminado ahí. No se adivina, y el resto del WMC sigue comprobándose.
+
+## ADR-057: El espejo cartográfico se acota al municipio servido (2026-09-03)
+
+Los perfiles de cobertura del espejo local fijaban la envolvente de Castilla y
+León entera con zoom nativo 16. Al medirlo contra el servicio real del IGN por
+primera vez, ese alcance resultó ser 1.308.502 teselas, **28,0 GB y 20.627
+peticiones** para una sola capa de fondo: casi seis horas de tráfico contra un
+servicio público, repetidas en cada refresco, para servir a un municipio de
+Burgos. Y no cabía: la caché revisada del despliegue son 32 GiB con una cuota de
+24, así que la pirámide regional no llegaba a poder almacenarse.
+
+**El perfil pasa a ser municipal**: el municipio servido más un anillo de
+vecinos, unos 30 × 31 km, con zoom nativo 17. Son **24.509 teselas, unos 400 MB
+y 438 peticiones**, y llega **un nivel de zoom más cerca** que el perfil
+regional: el ayuntamiento ve sus parcelas en lugar de una región borrosa. Cuesta
+la setentava parte y da más detalle.
+
+Las cifras no son estimaciones. Salen de descargar supertiles reales de
+`wms-inspire/ign-base` replicando las peticiones que emite `tile_seed`, y de
+medir tamaño y latencia por nivel de zoom: 16,7 KB por tesela en z16 frente a
+55,8 KB en z14, y entre 3,4 y 9,4 segundos por petición según el nivel. Una
+estimación anterior basada en teselas WMTS dio 20 GB y se quedó corta, porque el
+WMTS del IGN sirve PNG pre-renderizados mucho más ligeros que los que devuelve
+su WMS al vuelo. Medir el camino que el código recorre de verdad, y no uno
+parecido, fue lo que cambió la decisión.
+
+**El sobre vale para todo lo que se adquiere de SIUR**, no sólo teselas: las
+láminas de inundación de MITECO se descargaban por API de features con el mismo
+`bbox` regional y ahora se acotan igual. La desproporción era la misma.
+
+**La sustitución de ortofotos históricas conserva su perfil regional.** Su
+evidencia de equivalencia está comprometida en el repositorio y verificada byte
+a byte, de modo que su perfil operativo no puede moverse sin regenerar ese
+fichero y su hash. Es una funcionalidad distinta de los fondos que este
+despliegue replica, así que se le da su propia constante de límites y se deja
+intacta.
+
+**Servir un segundo municipio exige revisar un segundo perfil.** No se deriva el
+sobre de los datos del municipio en tiempo de ejecución a propósito: la
+cobertura entra en la definición de cada fuente y en su hash, y una cobertura
+que cambia sola invalidaría en silencio las autorizaciones de espejo que
+dependen de ella.

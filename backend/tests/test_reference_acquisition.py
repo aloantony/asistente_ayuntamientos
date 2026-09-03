@@ -14,6 +14,8 @@ from xml.etree import ElementTree
 import zipfile
 
 import pytest
+
+from app.reference_layers.mirror_coverage import SIUR_TILE_PROFILE
 from sqlalchemy import func, select
 
 import app.reference_layers.acquisition as acquisition_module
@@ -5414,7 +5416,7 @@ def test_wms_supertile_opt_in_requires_and_preserves_reviewed_siur_profile(
 ):
     reviewed_config = {
         **TILE_CONFIG,
-        "coverage_profile": "siur-castilla-y-leon-native-z16-v1",
+        "coverage_profile": SIUR_TILE_PROFILE,
         "wms_supertile_size": 8,
     }
     result = ReferenceAcquisitionPipeline(
