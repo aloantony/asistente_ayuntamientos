@@ -254,6 +254,11 @@ services:
   gwc-bootstrap:
     build:
       context: ./backend
+    # Reads the cache like the gateway does, so it needs the same shared group.
+    # Without it the image default (uid 10001, gid 999) cannot enter the 0750
+    # "tmp" directory the FileBlobStore creates as 999:2000, and the inventory
+    # reports the resulting PermissionError as "cache changed during inventory".
+    user: "65534:${REFERENCE_STORAGE_GID:-2000}"
     environment:
       <<: *gwc-admin-environment
       # Private loopback in the shared namespace; never published on the host.
