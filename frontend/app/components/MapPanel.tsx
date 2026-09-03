@@ -112,6 +112,7 @@ type LayeredGeoMapItem = GeoMapItem & {
 const MAP_PREFERENCES_KEY = "municipal-map-preferences-v1";
 const SIUR_PREFERENCES_PREFIX = "siur-map-preferences-v1";
 const SIUR_CATALOG_REFRESH_INTERVAL_MS = 15_000;
+const SIUR_TILE_ERROR_REFRESH_INTERVAL_MS = 30_000;
 const MUNICIPAL_CAPITAL_ZOOM = 14;
 const MAP_LAYER_COLORS: Record<GeoEntityType, string> = {
   requirement: "#c0603a",
@@ -494,6 +495,7 @@ function MapPanelContent({ user }: MapPanelProps) {
   const [siurPreferences, setSiurPreferences] =
     useState<SiurMapPreferences | null>(null);
   const [siurCatalogError, setSiurCatalogError] = useState("");
+  const lastTileErrorRefreshRef = useRef(0);
   const [siurRenderError, setSiurRenderError] = useState<{
     layerId: number;
     message: string;
@@ -994,6 +996,7 @@ function MapPanelContent({ user }: MapPanelProps) {
           layerPanelOpen?: boolean;
           stateLayerEnabled?: boolean;
           visibleStatuses?: Record<string, boolean>;
+          baseLayerChoice?: unknown;
           baseLayerId?: unknown;
           baseLayer?: unknown;
         };
@@ -1048,6 +1051,7 @@ function MapPanelContent({ user }: MapPanelProps) {
           baseLayerPreference,
           baseLayerId,
           baseLayerResolved,
+          localBaseMapLayers.length > 0,
         );
       window.localStorage.setItem(
         MAP_PREFERENCES_KEY,
@@ -1067,6 +1071,7 @@ function MapPanelContent({ user }: MapPanelProps) {
     baseLayerId,
     baseLayerPreference,
     baseLayerResolved,
+    localBaseMapLayers,
     layerOrder,
     layerPanelOpen,
     preferencesReady,
@@ -1377,12 +1382,30 @@ function MapPanelContent({ user }: MapPanelProps) {
     [getStoredToken],
   );
 
+  // Una tesela que falta no es una capa rota: el espejo cubre un sobre finito y
+  // salirse de él devuelve 404 por diseño. Refrescar el catálogo entero en cada
+  // fallo convertía un paseo por el borde en decenas de recargas encadenadas que
+  // ahogaban al backend justo mientras el ayuntamiento movía el mapa. Se refresca
+  // como mucho una vez cada SIUR_TILE_ERROR_REFRESH_INTERVAL_MS, que es tiempo de
+  // sobra para enterarse de que una versión local ha cambiado.
   const handleSiurTileError = useCallback(
     (layerId: number, layerTitle: string) => {
-      setSiurRenderError({
-        layerId,
-        message: `No se pudo renderizar «${layerTitle}». Se está comprobando su versión local.`,
-      });
+      setSiurRenderError((current) =>
+        current?.layerId === layerId
+          ? current
+          : {
+              layerId,
+              message: `No se pudo renderizar «${layerTitle}». Se está comprobando su versión local.`,
+            },
+      );
+      const now = Date.now();
+      if (
+        now - lastTileErrorRefreshRef.current <
+        SIUR_TILE_ERROR_REFRESH_INTERVAL_MS
+      ) {
+        return;
+      }
+      lastTileErrorRefreshRef.current = now;
       siurCatalogRefreshRef.current?.();
     },
     [],

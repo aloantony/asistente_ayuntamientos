@@ -304,7 +304,43 @@ describe("local base map selection", () => {
     ).toEqual({ baseLayer: "topographic" });
     expect(
       serializeMapBaseLayerPreference("topographic", map.layerId, true),
-    ).toEqual({ baseLayerId: map.layerId });
+    ).toEqual({ baseLayerChoice: { id: map.layerId } });
+  });
+
+  it("no guarda «sin fondo» cuando no había ningún fondo que elegir", () => {
+    // Es el fallo que dejaba el mapa vacío para siempre: antes de sembrar el
+    // espejo no hay ningún mapa base, y el null resuelto se guardaba como si el
+    // ayuntamiento hubiera elegido no tener fondo.
+    expect(
+      serializeMapBaseLayerPreference(undefined, null, true, false),
+    ).toEqual({});
+    expect(serializeMapBaseLayerPreference(null, null, false, false)).toEqual(
+      {},
+    );
+  });
+
+  it("sí guarda «sin fondo» cuando el usuario lo elige de verdad", () => {
+    expect(serializeMapBaseLayerPreference(null, null, true, true)).toEqual({
+      baseLayerChoice: { id: null },
+    });
+    expect(
+      parseStoredMapBaseLayerPreference({ baseLayerChoice: { id: null } }),
+    ).toBeNull();
+  });
+
+  it("un «sin fondo» del formato antiguo no condena el mapa", () => {
+    // No se puede distinguir de la carencia que lo escribía, y esa carencia la
+    // vivieron todos los navegadores que abrieron el mapa antes de la siembra.
+    expect(
+      parseStoredMapBaseLayerPreference({ baseLayerId: null }),
+    ).toBeUndefined();
+    // El formato nuevo sí manda, incluso conviviendo con el viejo.
+    expect(
+      parseStoredMapBaseLayerPreference({
+        baseLayerId: null,
+        baseLayerChoice: { id: 11 },
+      }),
+    ).toBe(11);
   });
 
   it("makes a selected base exclusive without changing overlay controls", () => {

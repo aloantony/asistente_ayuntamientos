@@ -860,9 +860,25 @@ export function parseStoredMapBaseLayerPreference(
     return undefined;
   }
   const record = preferences as Record<string, unknown>;
-  if (Object.prototype.hasOwnProperty.call(record, "baseLayerId")) {
-    if (record.baseLayerId === null) {
+  const choice = record.baseLayerChoice;
+  if (choice && typeof choice === "object" && !Array.isArray(choice)) {
+    // Formato deliberado: aquí un null SÍ es «el usuario eligió Sin fondo».
+    const chosen = (choice as Record<string, unknown>).id;
+    if (chosen === null) {
       return null;
+    }
+    return Number.isInteger(chosen) && (chosen as number) > 0
+      ? (chosen as number)
+      : undefined;
+  }
+  if (Object.prototype.hasOwnProperty.call(record, "baseLayerId")) {
+    // Formato antiguo. Un null aquí NO se puede tomar por una elección: se
+    // escribía también cuando el catálogo no ofrecía ningún fondo, que es lo
+    // que pasaba antes de sembrar el espejo. Quien lo tenga guardado se
+    // quedaría sin fondo para siempre, así que se lee como «sin elegir»; a
+    // quien de verdad quisiera «Sin fondo» le cuesta un clic volver a decirlo.
+    if (record.baseLayerId === null) {
+      return undefined;
     }
     return Number.isInteger(record.baseLayerId) &&
       (record.baseLayerId as number) > 0
@@ -900,18 +916,26 @@ export function serializeMapBaseLayerPreference(
   preference: StoredMapBaseLayerPreference,
   resolvedLayerId: number | null,
   resolved: boolean,
+  hasLocalBaseMaps: boolean = true,
 ): {
-  baseLayerId?: number | null;
+  baseLayerChoice?: { id: number | null };
   baseLayer?: LegacyMapBaseLayerPreference;
 } {
-  if (resolved) {
-    return { baseLayerId: resolvedLayerId };
+  // Sin ningún fondo que ofrecer no hay nada que el usuario haya podido
+  // elegir, así que no se anota decisión alguna. Guardar el null resuelto
+  // convertía una carencia momentánea del despliegue en una preferencia
+  // permanente, y el mapa ya no se recuperaba al aparecer el fondo.
+  if (resolved && hasLocalBaseMaps) {
+    return { baseLayerChoice: { id: resolvedLayerId } };
   }
   if (preference === "street" || preference === "topographic") {
     return { baseLayer: preference };
   }
-  if (preference === null || typeof preference === "number") {
-    return { baseLayerId: preference };
+  if (typeof preference === "number") {
+    return { baseLayerChoice: { id: preference } };
+  }
+  if (preference === null && hasLocalBaseMaps) {
+    return { baseLayerChoice: { id: null } };
   }
   return {};
 }

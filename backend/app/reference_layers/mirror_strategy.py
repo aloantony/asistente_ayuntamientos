@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 import hashlib
 import json
+import time
 from typing import Any
 
 from sqlalchemy import func, select
@@ -331,6 +332,40 @@ def apply_mirror_strategy_plan(
     )
 
 
+# Serving one tile revalidated the evidence of every strategy row in the
+# catalog -- 228 rows and some 250 JSON serializations for a single 256-pixel
+# square, 45 ms of the 106 ms each tile cost on a deployment that runs one
+# uvicorn worker. Panning the map queued seconds of that.
+#
+# The generation is verified in full, then that verdict is trusted for a few
+# seconds. The fingerprint is taken from the rows already loaded, so a
+# reconcile -- a new generation, a changed evidence hash, a row added or
+# removed -- is picked up on the very next request. What the window defers is
+# only the case the fingerprint cannot see: evidence edited in place while its
+# stored hash is left untouched. That is bounded here, in one number, instead
+# of being paid on every tile. See ADR-060.
+_GENERATION_VERIFICATION_TTL_SECONDS = 15.0
+_generation_verifications: dict[tuple[str, int], tuple[str, float]] = {}
+
+
+def reset_generation_verification_cache() -> None:
+    """Forget every cached verdict; corruption checks start from scratch."""
+
+    _generation_verifications.clear()
+
+
+def _generation_fingerprint(
+    rows: list[ReferenceLayerMirrorStrategy],
+) -> str:
+    return hashlib.sha256(
+        "|".join(
+            f"{row.id}:{row.layer_id}:{row.generation}:"
+            f"{row.evidence_sha256}:{row.catalog_definition_sha256}"
+            for row in rows
+        ).encode("utf-8")
+    ).hexdigest()
+
+
 def current_mirror_strategies(
     db: Session,
     *,
@@ -361,14 +396,24 @@ def current_mirror_strategies(
     )
     if not rows:
         return {}
-    if not _generation_is_complete(
-        db,
-        provider_key=provider_key,
-        snapshot_id=snapshot_id,
-        rows=rows,
-    ):
-        raise MirrorStrategyError(
-            "current mirror strategy generation is incomplete"
+    cache_key = (provider_key, snapshot_id)
+    fingerprint = _generation_fingerprint(rows)
+    cached = _generation_verifications.get(cache_key)
+    now = time.monotonic()
+    if cached is None or cached[0] != fingerprint or cached[1] <= now:
+        if not _generation_is_complete(
+            db,
+            provider_key=provider_key,
+            snapshot_id=snapshot_id,
+            rows=rows,
+        ):
+            _generation_verifications.pop(cache_key, None)
+            raise MirrorStrategyError(
+                "current mirror strategy generation is incomplete"
+            )
+        _generation_verifications[cache_key] = (
+            fingerprint,
+            now + _GENERATION_VERIFICATION_TTL_SECONDS,
         )
     return {row.layer_id: row for row in rows}
 

@@ -639,3 +639,70 @@ def test_current_strategy_reader_rejects_an_incomplete_latest_generation(
             provider_key=provider_key,
             snapshot_id=snapshot.id,
         )
+
+
+def test_verified_generation_is_trusted_briefly_but_a_changed_row_is_not(
+    db,
+) -> None:
+    # La matriz se verifica entera y el veredicto se confía unos segundos, que
+    # es lo que hace usable el mapa (ADR-060). La huella sale de las filas ya
+    # cargadas, así que cualquier reconciliación se ve en la petición siguiente:
+    # eso es lo que esta prueba fija, porque es lo que hace legítimo el atajo.
+    provider_key = "strategy-verification-cache-test"
+    snapshot, layers = _seed_composition_strategy(db, provider_key)
+    mirror_strategy.reset_generation_verification_cache()
+
+    first = mirror_strategy.current_mirror_strategies(
+        db,
+        provider_key=provider_key,
+        snapshot_id=snapshot.id,
+    )
+    assert first
+
+    # Repetirlo con todo intacto sigue dando lo mismo.
+    assert (
+        mirror_strategy.current_mirror_strategies(
+            db,
+            provider_key=provider_key,
+            snapshot_id=snapshot.id,
+        ).keys()
+        == first.keys()
+    )
+
+    # Un hash de evidencia distinto cambia la huella: se revalida en el acto y
+    # falla cerrado, sin esperar a que caduque nada.
+    row = db.scalar(
+        select(ReferenceLayerMirrorStrategy).where(
+            ReferenceLayerMirrorStrategy.provider_key == provider_key,
+            ReferenceLayerMirrorStrategy.layer_id == layers["layer:a"].id,
+        )
+    )
+    row.evidence_sha256 = "0" * 64
+    db.flush()
+
+    with pytest.raises(mirror_strategy.MirrorStrategyError):
+        mirror_strategy.current_mirror_strategies(
+            db,
+            provider_key=provider_key,
+            snapshot_id=snapshot.id,
+        )
+
+
+def test_resetting_the_verification_cache_forces_a_full_check(db) -> None:
+    provider_key = "strategy-verification-reset-test"
+    snapshot, _ = _seed_composition_strategy(db, provider_key)
+    mirror_strategy.reset_generation_verification_cache()
+
+    assert mirror_strategy.current_mirror_strategies(
+        db,
+        provider_key=provider_key,
+        snapshot_id=snapshot.id,
+    )
+
+    mirror_strategy.reset_generation_verification_cache()
+
+    assert mirror_strategy.current_mirror_strategies(
+        db,
+        provider_key=provider_key,
+        snapshot_id=snapshot.id,
+    )
