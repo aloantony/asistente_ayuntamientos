@@ -6,7 +6,7 @@ from dataclasses import dataclass
 import hashlib
 import json
 import re
-from typing import Any, Literal
+from typing import Any, Literal, Mapping
 
 from sqlalchemy import and_, func, select
 from sqlalchemy.orm import Session
@@ -273,6 +273,88 @@ def resolve_local_delivery(
         operation=operation,
         views=snapshot_views,
     )
+
+
+@dataclass(frozen=True)
+class ServedTileCoverage:
+    """What the local archive actually holds for one layer."""
+
+    bounds: dict[str, float] | None
+    min_zoom: int | None
+    max_zoom: int | None
+
+
+def catalog_served_tile_coverage(
+    db: Session,
+    *,
+    provider_key: str,
+    layers: list[ReferenceLayer],
+    availability: dict[int, LayerDeliveryAvailability | None],
+) -> dict[int, ServedTileCoverage]:
+    """Project the reviewed coverage of every layer served from a tile archive.
+
+    SIUR publishes no bounds or zooms for its background maps, so the catalog
+    carries none and the viewer had nothing to go on: it opened wherever a
+    hardcoded constant said and let the user zoom eight levels past the last
+    tile that exists, magnifying one archived square until the place name
+    filled the screen.  The mirror does know -- the envelope and the native
+    zoom are part of the reviewed source definition and of its hash.  Passing
+    that through lets the map open on the cartography it has and stop where
+    the detail stops.  Nothing is invented: a layer with no active local
+    delivery gets nothing.
+    """
+
+    result: dict[int, ServedTileCoverage] = {}
+    servable = [
+        layer.id
+        for layer in layers
+        if layer.node_type == "layer"
+        and (availability.get(layer.id) is not None)
+        and availability[layer.id].delivery_available  # type: ignore[union-attr]
+    ]
+    if not servable:
+        return result
+    sources = db.scalars(
+        select(ReferenceLayerSource)
+        .where(
+            ReferenceLayerSource.provider_key == provider_key,
+            ReferenceLayerSource.layer_id.in_(servable),
+            ReferenceLayerSource.enabled.is_(True),
+            ReferenceLayerSource.target_kind == "tiles",
+        )
+        .order_by(
+            ReferenceLayerSource.layer_id,
+            ReferenceLayerSource.is_primary.desc(),
+            ReferenceLayerSource.priority,
+            ReferenceLayerSource.id,
+        )
+    )
+    for source in sources:
+        if source.layer_id in result:
+            continue
+        config = source.config_json or {}
+        result[source.layer_id] = ServedTileCoverage(
+            bounds=_coverage_bounds(config.get("bounds")),
+            min_zoom=_coverage_zoom(config.get("min_zoom")),
+            max_zoom=_coverage_zoom(config.get("max_zoom")),
+        )
+    return result
+
+
+def _coverage_bounds(value: object) -> dict[str, float] | None:
+    if not isinstance(value, Mapping):
+        return None
+    edges = ("west", "south", "east", "north")
+    if not all(isinstance(value.get(edge), (int, float)) for edge in edges):
+        return None
+    bounds = {edge: float(value[edge]) for edge in edges}
+    if bounds["west"] >= bounds["east"] or bounds["south"] >= bounds["north"]:
+        return None
+    return bounds
+
+
+def _coverage_zoom(value: object) -> int | None:
+    return value if isinstance(value, int) and 0 <= value <= 24 else None
 
 
 def catalog_local_delivery_availability(

@@ -88,8 +88,17 @@ type AreaDragState = {
 // from the municipality being served and outside the cartography the local
 // mirror holds, so a new town hall opened its map on a blank grid. Serving the
 // municipality is the point of the product, so that is where it opens.
+// Dónde se abre el mapa mientras no hay nada que encuadrar ni cartografía
+// cargada. Es un apaño de arranque, no la respuesta: en cuanto el fondo llega,
+// el mapa se encuadra en la envolvente que el espejo tiene de verdad, que es lo
+// que hace que un ayuntamiento vea SU pueblo sin que nadie escriba sus
+// coordenadas en el código.
 const FALLBACK_CENTER: [number, number] = [41.633, -3.583];
 const FALLBACK_ZOOM = 14;
+// Cuántos niveles se deja ampliar por encima del último que el archivo tiene.
+// Dos amplían de verdad; a partir de ahí sólo se agranda la misma tesela hasta
+// que el nombre del pueblo ocupa la pantalla, que es lo que pasaba con 24.
+const VIEWER_OVERZOOM_LEVELS = 2;
 const SINGLE_ITEM_ZOOM = 16;
 const MAX_MAP_ZOOM = 24;
 const AREA_DRAG_THRESHOLD = 4;
@@ -332,8 +341,14 @@ function fitMapToBounds(
   map: LeafletMap,
   bounds: LatLngBounds,
   initialZoom: number | null | undefined,
+  coverageBounds?: LatLngBounds | null,
 ) {
   if (!bounds.isValid()) {
+    // Sin elementos que situar, el encuadre lo manda la cartografía replicada.
+    if (coverageBounds && coverageBounds.isValid()) {
+      map.fitBounds(coverageBounds, { animate: false });
+      return;
+    }
     map.setView(FALLBACK_CENTER, FALLBACK_ZOOM);
     return;
   }
@@ -394,6 +409,7 @@ export function MunicipalMap({
   const mapRef = useRef<LeafletMap | null>(null);
   const leafletRef = useRef<LeafletModule | null>(null);
   const tileLayerRef = useRef<TileLayer | null>(null);
+  const coverageBoundsRef = useRef<LatLngBounds | null>(null);
   const baseTileLayerRecordRef = useRef<{
     layerId: number;
     signature: string;
@@ -740,6 +756,8 @@ export function MunicipalMap({
       tileLayerRef.current?.remove();
       tileLayerRef.current = null;
       baseTileLayerRecordRef.current = null;
+      coverageBoundsRef.current = null;
+      map.setMaxZoom(MAX_MAP_ZOOM);
       return;
     }
     const signature = JSON.stringify([
@@ -772,12 +790,23 @@ export function MunicipalMap({
           [selectedBaseMap.bounds.north, selectedBaseMap.bounds.east],
         )
       : undefined;
+    // El archivo llega hasta un zoom nativo concreto. Más allá sólo se amplía
+    // la última tesela, así que se permiten dos niveles y se corta: dejar 24
+    // convertía el nombre del pueblo en un borrón a pantalla completa.
+    const nativeMaxZoom = selectedBaseMap.maxZoom ?? null;
+    const viewerMaxZoom =
+      nativeMaxZoom === null
+        ? MAX_MAP_ZOOM
+        : Math.min(MAX_MAP_ZOOM, nativeMaxZoom + VIEWER_OVERZOOM_LEVELS);
     const tileLayer = L.tileLayer(selectedBaseMap.tileUrl, {
       attribution: selectedBaseMap.attribution ?? undefined,
       bounds,
-      maxZoom: selectedBaseMap.maxZoom ?? MAX_MAP_ZOOM,
+      maxNativeZoom: nativeMaxZoom ?? undefined,
+      maxZoom: viewerMaxZoom,
       minZoom: selectedBaseMap.minZoom ?? 0,
     });
+    map.setMaxZoom(viewerMaxZoom);
+    coverageBoundsRef.current = bounds ?? null;
     const record = {
       layerId: selectedBaseMap.layerId,
       signature,
@@ -800,6 +829,17 @@ export function MunicipalMap({
     tileLayerRef.current = tileLayer.addTo(map);
     baseTileLayerRecordRef.current = record;
     tileLayer.setZIndex(0);
+    // El fondo suele llegar después del primer encuadre. Si no hay nada situado
+    // ni un punto enfocado, el mapa se abre sobre su propia cartografía.
+    const markerBounds = markerBoundsRef.current;
+    const focus = focusLocationRef.current;
+    if (
+      bounds &&
+      !focus &&
+      (!markerBounds || !markerBounds.isValid())
+    ) {
+      map.fitBounds(bounds, { animate: false });
+    }
   }, [mapReady, selectedBaseMap]);
 
   useEffect(() => {
@@ -928,7 +968,12 @@ export function MunicipalMap({
       !currentFocus ||
       !isValidCoordinate(currentFocus.latitude, currentFocus.longitude)
     ) {
-      fitMapToBounds(map, bounds, initialZoomRef.current);
+      fitMapToBounds(
+        map,
+        bounds,
+        initialZoomRef.current,
+        coverageBoundsRef.current,
+      );
     }
   }, [items, mapReady]);
 
@@ -985,7 +1030,12 @@ export function MunicipalMap({
     }
 
     if (markerBoundsRef.current) {
-      fitMapToBounds(map, markerBoundsRef.current, initialZoom);
+      fitMapToBounds(
+      map,
+      markerBoundsRef.current,
+      initialZoom,
+      coverageBoundsRef.current,
+    );
     }
   }, [
     focusLabel,
@@ -1011,7 +1061,12 @@ export function MunicipalMap({
       copyBounds(markerBounds, L),
       focusLocationRef.current,
     );
-    fitMapToBounds(map, allBounds, initialZoomRef.current);
+    fitMapToBounds(
+      map,
+      allBounds,
+      initialZoomRef.current,
+      coverageBoundsRef.current,
+    );
   }, [fitRequest, mapReady]);
 
   useEffect(() => {

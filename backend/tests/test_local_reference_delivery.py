@@ -14,6 +14,7 @@ from app.reference_layers.catalog import (
 from app.reference_layers.local_delivery import (
     LocalDeliveryError,
     catalog_local_delivery_availability,
+    catalog_served_tile_coverage,
     resolve_local_delivery,
 )
 from app.reference_layers.delivery_builder import canonical_json_sha256
@@ -23,6 +24,7 @@ from app.reference_layers.mirror_lifecycle import (
     catalog_snapshot_delivery_view,
 )
 from app.reference_layers.mirror_status import catalog_mirror_statuses
+from app.reference_layers.wms_delivery import LayerDeliveryAvailability
 from app.reference_layers.models import (
     ReferenceCatalogSnapshot,
     ReferenceDeliveryAsset,
@@ -1167,3 +1169,91 @@ def test_snapshot_delivery_view_of_no_snapshot_delivers_nothing() -> None:
 
     assert view.is_valid is False
     assert view.deliverable_source_keys == frozenset()
+
+
+def _servable() -> LayerDeliveryAvailability:
+    """Una capa que el catálogo ya da por entregable en local."""
+
+    return LayerDeliveryAvailability(
+        delivery_available=True,
+        legend_available=False,
+        identify_available=False,
+        delivery_blocker=None,
+        available_style_ids=(),
+        available_legend_style_ids=(),
+    )
+
+
+def test_served_coverage_reaches_the_catalog_from_the_reviewed_source(db) -> None:
+    # SIUR no publica límites ni zooms de sus fondos, así que el visor no tenía
+    # con qué encuadrarse ni dónde parar de acercarse. El espejo sí lo sabe:
+    # está en la definición revisada de la fuente, y en su hash.
+    layer, styles, source, _, _, _ = seed_local_delivery(db, kind="tiles")
+    bounds = {"west": -3.763, "south": 41.493, "east": -3.403, "north": 41.773}
+    source.config_json = {
+        **(source.config_json or {}),
+        "bounds": bounds,
+        "min_zoom": 0,
+        "max_zoom": 17,
+    }
+    db.flush()
+
+    coverage = catalog_served_tile_coverage(
+        db,
+        provider_key=layer.provider_key,
+        layers=[layer],
+        availability={layer.id: _servable()},
+    )
+
+    assert coverage[layer.id].bounds == bounds
+    assert coverage[layer.id].min_zoom == 0
+    assert coverage[layer.id].max_zoom == 17
+
+
+def test_a_layer_without_local_delivery_gets_no_coverage(db) -> None:
+    # Nada se inventa: sin entrega local activa, el catálogo no gana límites.
+    layer, styles, source, _, _, _ = seed_local_delivery(db, kind="tiles")
+    source.config_json = {
+        **(source.config_json or {}),
+        "bounds": {
+            "west": -3.763,
+            "south": 41.493,
+            "east": -3.403,
+            "north": 41.773,
+        },
+        "min_zoom": 0,
+        "max_zoom": 17,
+    }
+    db.flush()
+
+    coverage = catalog_served_tile_coverage(
+        db,
+        provider_key=layer.provider_key,
+        layers=[layer],
+        availability={layer.id: None},
+    )
+
+    assert coverage == {}
+
+
+def test_nonsense_coverage_is_ignored_rather_than_published(db) -> None:
+    layer, styles, source, _, _, _ = seed_local_delivery(db, kind="tiles")
+    source.config_json = {
+        **(source.config_json or {}),
+        # Este vale y el otro no: este y oeste invertidos.
+        "bounds": {"west": 1.0, "south": 41.0, "east": -1.0, "north": 42.0},
+        "min_zoom": 0,
+        "max_zoom": 99,
+    }
+    db.flush()
+
+    coverage = catalog_served_tile_coverage(
+        db,
+        provider_key=layer.provider_key,
+        layers=[layer],
+        availability={layer.id: _servable()},
+    )
+
+    assert coverage[layer.id].bounds is None
+    assert coverage[layer.id].max_zoom is None
+    assert coverage[layer.id].min_zoom == 0
