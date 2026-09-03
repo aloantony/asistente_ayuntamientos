@@ -19,6 +19,8 @@ from app.reference_layers.local_delivery import (
 from app.reference_layers.delivery_builder import canonical_json_sha256
 from app.reference_layers.mirror_lifecycle import (
     canonical_promotion_event_sha256,
+    catalog_snapshot_contains_active_layer,
+    catalog_snapshot_delivery_view,
 )
 from app.reference_layers.mirror_status import catalog_mirror_statuses
 from app.reference_layers.models import (
@@ -1058,3 +1060,110 @@ def test_disabled_local_sources_are_authoritative(db) -> None:
             operation="tile",
         )
     assert raised.value.blocker == "local_disabled"
+
+
+def _multi_layer_definition() -> ReferenceCatalogDefinition:
+    """Two deliverable layers and one the snapshot froze as inactive."""
+
+    def layer(source_key: str, *, status: str, node_type: str = "layer"):
+        return ReferenceLayerDefinition(
+            source_key=source_key,
+            node_type=node_type,
+            title=source_key,
+            service_key="service",
+            remote_name=f"source:{source_key}",
+            role="overlay",
+            renderer="raster_tile",
+            delivery_mode="mirror",
+            queryable=True,
+            styles=(
+                ReferenceLayerStyleDefinition(
+                    source_key="default",
+                    remote_name="default",
+                    title="Default",
+                    is_default=True,
+                ),
+            ),
+            style_name="default",
+            status=status,
+        )
+
+    return ReferenceCatalogDefinition(
+        provider_key="snapshot-view-test",
+        source_url="https://example.test/settings.json",
+        raw_catalog={"version": 1},
+        services=(
+            ReferenceServiceDefinition(
+                source_key="service",
+                title="Service",
+                upstream_protocol="wms",
+                base_url="https://example.test/geoserver/wms",
+                license_status="pending",
+            ),
+        ),
+        layers=(
+            layer("uno", status="active"),
+            layer("dos", status="degraded"),
+            layer("tres", status="disabled"),
+        ),
+        retrieved_at=datetime(2026, 9, 3, tzinfo=timezone.utc),
+    )
+
+
+def test_snapshot_delivery_view_agrees_with_the_per_layer_check(db) -> None:
+    # El catálogo valida la instantánea una vez y la consulta por capa; la
+    # comprobación por capa la revalidaba entera cada vez. Sólo puede
+    # sustituirla si responde exactamente lo mismo para todas.
+    definition = _multi_layer_definition()
+    snapshot, _ = apply_catalog_definition(db, definition)
+    layers = list(
+        db.scalars(
+            select(ReferenceLayer).where(
+                ReferenceLayer.provider_key == definition.provider_key,
+            )
+        )
+    )
+    assert layers
+
+    view = catalog_snapshot_delivery_view(snapshot)
+
+    assert view.is_valid is True
+    for layer in layers:
+        assert view.contains_active_layer(
+            layer
+        ) is catalog_snapshot_contains_active_layer(snapshot, layer)
+    deliverable = {
+        layer.source_key
+        for layer in layers
+        if catalog_snapshot_contains_active_layer(snapshot, layer)
+    }
+    assert deliverable == {"uno", "dos"}
+
+
+def test_snapshot_delivery_view_is_fail_closed_for_a_corrupt_snapshot(
+    db,
+) -> None:
+    definition = _multi_layer_definition()
+    snapshot, _ = apply_catalog_definition(db, definition)
+    layer = db.scalar(
+        select(ReferenceLayer).where(
+            ReferenceLayer.provider_key == definition.provider_key,
+            ReferenceLayer.source_key == "uno",
+        )
+    )
+    snapshot.content_sha256 = "f" * 64
+    db.flush()
+
+    view = catalog_snapshot_delivery_view(snapshot)
+
+    assert view.is_valid is False
+    assert view.deliverable_source_keys == frozenset()
+    assert view.contains_active_layer(layer) is False
+    assert catalog_snapshot_contains_active_layer(snapshot, layer) is False
+
+
+def test_snapshot_delivery_view_of_no_snapshot_delivers_nothing() -> None:
+    view = catalog_snapshot_delivery_view(None)
+
+    assert view.is_valid is False
+    assert view.deliverable_source_keys == frozenset()
