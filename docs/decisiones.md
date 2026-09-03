@@ -1207,3 +1207,53 @@ anotadas: los contenidos a medida de cada epígrafe —las gráficas de doble ej
 el carrusel de analíticas, la regla de visitas del arquitecto— que el inventario
 de interacción documenta y que no son bloques genéricos, sino componentes por
 construir uno a uno.
+
+## ADR-060: El mapa deja de ahogarse a sí mismo al moverlo (2026-09-03)
+
+**Contexto.** Con el fondo ya servido y el catálogo rápido (ADR-058), el mapa
+seguía siendo incómodo de usar: cargaba a trompicones y se atascaba al
+desplazarlo. Medido contra producción, había tres causas distintas, y ninguna
+era la entrega de la tesela.
+
+1. **Cada tesela costaba 106 ms de CPU.** Para servir un cuadrado de 256 píxeles
+   se revalidaba la instantánea del catálogo seis veces y **la evidencia de las
+   228 filas de la matriz de estrategias**, unas 250 serializaciones JSON. El
+   backend corre con **un único worker** (ADR-010/015), así que veinte teselas
+   son dos segundos de cálculo en cola por los que espera todo lo demás.
+2. **Cada tesela fallida pedía el catálogo entero.** El espejo cubre un sobre
+   finito y salirse de él devuelve 404 **por diseño**; acercarse al borde
+   generaba decenas de 404 y, con ellos, decenas de recargas del catálogo. La
+   aplicación se ahogaba justo cuando más se la movía.
+3. **«Sin fondo» se guardaba como decisión del usuario** aunque no hubiera
+   ningún fondo que elegir. Todo navegador que abriera el mapa antes de sembrar
+   el espejo se quedaba sin fondo **para siempre**, y no había forma de que se
+   recuperase solo. Le pasó al primer usuario real.
+
+**Decisión.**
+
+1. **La instantánea se valida una vez por resolución de entrega**, con el mismo
+   `CatalogSnapshotDeliveryView` de ADR-058 memorizado por identificador dentro
+   de la llamada. Sin concesión alguna: 106 → 76 ms.
+2. **La generación de estrategias se verifica entera y ese veredicto se confía
+   15 segundos.** La huella se calcula sobre las filas ya cargadas —id, capa,
+   generación, `evidence_sha256`, hash de definición—, así que una
+   reconciliación se detecta en la petición siguiente. Lo que la ventana aplaza
+   es sólo lo que la huella no puede ver: evidencia editada en el sitio dejando
+   intacto su hash. **Es un límite explícito y de un solo número**, en lugar de
+   un coste pagado en cada tesela: 76 → 51 ms.
+3. **Un fallo de tesela refresca el catálogo como mucho cada 30 segundos.** El
+   aviso al usuario se mantiene; lo que se corta es la avalancha.
+4. **La preferencia de mapa base distingue «no elegí» de «elegí ninguno».** Se
+   guarda en `baseLayerChoice`, y sólo se anota una decisión cuando había algún
+   fondo que elegir. El `baseLayerId: null` del formato antiguo se lee como «sin
+   elegir», porque no se puede distinguir de la carencia que lo escribía y esa
+   carencia la vivieron todos los navegadores anteriores a la siembra. A quien
+   de verdad quisiera «Sin fondo» le cuesta un clic volver a decirlo; a quien lo
+   tuviera por el fallo, el mapa le vuelve solo.
+
+**Consecuencias.** Quedan 51 ms y 14 consultas por tesela, ahora dominados por
+viajes a la base de datos y no por revalidación. Bajar de ahí exigiría cachear
+la resolución de entrega completa, con su propia pregunta de caducidad, y no se
+hace hasta que se demuestre necesario. El único punto donde este ADR cede
+frescura —el segundo— tiene su constante a la vista y una función de reinicio
+para las pruebas, de modo que la próxima persona vea el precio antes de tocarlo.

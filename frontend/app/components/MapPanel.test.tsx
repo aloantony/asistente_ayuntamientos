@@ -284,6 +284,49 @@ describe("MapPanel SIUR runtime", () => {
     ]);
   });
 
+  it("no vuelve a pedir el catálogo por cada tesela que falta", async () => {
+    // El espejo cubre un sobre finito: acercarse a su borde devuelve decenas de
+    // 404 por diseño. Cuando cada uno pedía el catálogo entero, pasear por el
+    // borde ahogaba al backend justo mientras se movía el mapa.
+    vi.useFakeTimers();
+    runtimeHarness.fetchReferenceCatalog.mockResolvedValue(catalogFixture());
+
+    render(<MapPanel user={USER} />);
+    await flushPromises();
+    expect(runtimeHarness.fetchReferenceCatalog).toHaveBeenCalledTimes(1);
+
+    const reportTileError = () => {
+      act(() => {
+        (
+          currentMapProps().onSiurTileError as (
+            layerId: number,
+            layerTitle: string,
+          ) => void
+        )(20, "MAPA");
+      });
+    };
+
+    reportTileError();
+    await flushPromises();
+    expect(runtimeHarness.fetchReferenceCatalog).toHaveBeenCalledTimes(2);
+
+    for (let index = 0; index < 30; index += 1) {
+      reportTileError();
+    }
+    await flushPromises();
+    expect(runtimeHarness.fetchReferenceCatalog).toHaveBeenCalledTimes(2);
+
+    // Pasado el intervalo vuelve a comprobarlo: sigue enterándose de un cambio.
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(30_000);
+    });
+    reportTileError();
+    await flushPromises();
+    expect(
+      runtimeHarness.fetchReferenceCatalog.mock.calls.length,
+    ).toBeGreaterThan(2);
+  });
+
   it("forwards an authenticated local identify and renders its properties", async () => {
     const catalog = catalogFixture();
     runtimeHarness.fetchReferenceCatalog.mockResolvedValue(catalog);

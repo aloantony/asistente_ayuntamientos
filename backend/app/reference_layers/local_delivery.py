@@ -110,9 +110,11 @@ def resolve_local_delivery(
     not silently fall back to the remote WMS path.
     """
 
+    snapshot_views: dict[int, CatalogSnapshotDeliveryView] = {}
     current_layer, current_snapshot = _load_current_layer_context(
         db,
         layer=layer,
+        views=snapshot_views,
     )
     try:
         strategy_rows = current_mirror_strategies(
@@ -269,6 +271,7 @@ def resolve_local_delivery(
         assets,
         style=style,
         operation=operation,
+        views=snapshot_views,
     )
 
 
@@ -773,6 +776,7 @@ def _load_current_layer_context(
     db: Session,
     *,
     layer: ReferenceLayer,
+    views: dict[int, CatalogSnapshotDeliveryView] | None = None,
 ) -> tuple[ReferenceLayer, ReferenceCatalogSnapshot]:
     row = db.execute(
         select(ReferenceLayer, ReferenceCatalogSnapshot)
@@ -795,10 +799,51 @@ def _load_current_layer_context(
     if row is None:
         raise LocalDeliveryError("local_disabled")
     current_layer, current_snapshot = row
-    blocker = _current_layer_blocker(current_layer, current_snapshot)
+    blocker = _current_layer_blocker(
+        current_layer,
+        current_snapshot,
+        _snapshot_view(views, current_snapshot),
+    )
     if blocker is not None:
         raise LocalDeliveryError(blocker)
     return current_layer, current_snapshot
+
+
+def _snapshot_view(
+    views: dict[int, CatalogSnapshotDeliveryView] | None,
+    snapshot: ReferenceCatalogSnapshot | None,
+) -> CatalogSnapshotDeliveryView | None:
+    """Validate each distinct snapshot once inside one delivery resolution.
+
+    Serving a single tile used to validate the whole catalog six times over,
+    because both checks revalidate and each of the two snapshots involved is
+    checked by both.  The snapshots cannot change while the request runs, so one
+    view per snapshot answers identically for a fraction of the work.  Callers
+    that pass no dict keep revalidating on their own.
+    """
+
+    if views is None or snapshot is None:
+        return None
+    view = views.get(snapshot.id)
+    if view is None:
+        view = catalog_snapshot_delivery_view(snapshot)
+        views[snapshot.id] = view
+    return view
+
+
+def _snapshot_delivers_layer(
+    views: dict[int, CatalogSnapshotDeliveryView] | None,
+    snapshot: ReferenceCatalogSnapshot,
+    layer: ReferenceLayer,
+) -> bool:
+    """``stored_catalog_snapshot_is_valid`` and ``contains_active_layer``, once."""
+
+    view = _snapshot_view(views, snapshot)
+    if view is None:
+        return stored_catalog_snapshot_is_valid(
+            snapshot
+        ) and catalog_snapshot_contains_active_layer(snapshot, layer)
+    return view.is_valid and view.contains_active_layer(layer)
 
 
 def _current_layer_blocker(
@@ -834,8 +879,9 @@ def _build_selection(
     *,
     style: ReferenceLayerStyle | None,
     operation: Operation,
+    views: dict[int, CatalogSnapshotDeliveryView] | None = None,
 ) -> LocalDeliverySelection:
-    primary_asset = _validate_active_record(db, record, assets)
+    primary_asset = _validate_active_record(db, record, assets, views=views)
     if record.version.delivery_kind in {"vector", "raster"}:
         return _geoserver_selection(
             record,
@@ -858,6 +904,8 @@ def _validate_active_record(
     db: Session,
     record: _ActiveRecord,
     assets: list[ReferenceDeliveryAsset],
+    *,
+    views: dict[int, CatalogSnapshotDeliveryView] | None = None,
 ) -> ReferenceDeliveryAsset:
     if not delivery_state_matches_promotion_head(record.state, record.head):
         raise LocalDeliveryError("local_version_invalid")
@@ -913,16 +961,16 @@ def _validate_active_record(
             and record.snapshot.provider_key == record.version.provider_key
             and record.snapshot.definition_sha256
             == record.version.catalog_definition_sha256
-            and stored_catalog_snapshot_is_valid(record.snapshot)
-            and catalog_snapshot_contains_active_layer(
+            and _snapshot_delivers_layer(
+                views,
                 record.snapshot,
                 record.layer,
             )
             and record.current_snapshot.id
             == record.layer.last_seen_snapshot_id
             and record.current_snapshot.is_current
-            and stored_catalog_snapshot_is_valid(record.current_snapshot)
-            and catalog_snapshot_contains_active_layer(
+            and _snapshot_delivers_layer(
+                views,
                 record.current_snapshot,
                 record.layer,
             )
