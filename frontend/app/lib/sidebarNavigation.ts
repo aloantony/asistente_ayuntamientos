@@ -242,7 +242,7 @@ const OPTIONAL_DEFINITIONS = [
   {
     id: "municipal_ordinances",
     label: "Normativa",
-    href: "/ayuntamiento?tab=ordinances",
+    href: "/ordenanzas",
     icon: "ordinances",
     group: "Ayuntamiento",
     tier: "optional",
@@ -252,7 +252,7 @@ const OPTIONAL_DEFINITIONS = [
   {
     id: "municipal_facilities",
     label: "Instalaciones",
-    href: "/ayuntamiento?tab=facilities",
+    href: "/ayuntamiento?tab=administration",
     icon: "inventory",
     group: "Ayuntamiento",
     tier: "optional",
@@ -270,7 +270,7 @@ const OPTIONAL_DEFINITIONS = [
   {
     id: "municipal_roadmap",
     label: "Hoja de ruta",
-    href: "/ayuntamiento?tab=roadmap",
+    href: "/hoja-de-ruta",
     icon: "townhall",
     group: "Ayuntamiento",
     tier: "optional",

@@ -1161,3 +1161,49 @@ vista tiene que responder lo mismo que la comprobación por capa para todas las
 capas de una instantánea, y fallar cerrada cuando la instantánea está corrupta.
 Si alguna vez la validación pasa a depender de algo que cambie dentro de una
 misma petición, esa prueba es la que se romperá, y con razón.
+
+## ADR-059: La fila de pestañas del Ayuntamiento la forman los apartados (2026-09-03)
+
+**Contexto.** El diseño abre el Ayuntamiento con cuatro pestañas —Información,
+Administración, Personal y Mapa general— y el asa que precede a la fila ofrece
+*Renombrar · Añadir apartado · Eliminar apartado*. Es decir: en el diseño una
+pestaña se llama «apartado» y la fila **es dato configurable**, no un conjunto
+de áreas fijas del producto.
+
+La aplicación lo tenía al revés. Había seis áreas fijas —Información, Normativa,
+Servicios municipales, Mapa general, Personal, Hoja de ruta— y los apartados
+configurados se añadían **detrás**. Una organización sembrada enseñaba diez
+pestañas y la fila se partía en dos líneas; además «Información» salía dos
+veces, el área fija y el apartado que el seed acababa de crear.
+
+**Decisión.**
+
+1. **La fila la forman los apartados.** El primero ocupa el sitio de
+   «Información» —conserva el identificador `summary` para no romper los enlaces
+   `?tab=summary`— y lleva su propio título y sus epígrafes. Los demás mantienen
+   pestaña propia, que es la configurabilidad que el diseño tiene. Detrás van
+   Administración, Personal y Mapa general.
+2. **Normativa y Hoja de ruta salen de la fila.** La aplicación ya las sirve en
+   `/ordenanzas` y `/hoja-de-ruta`, y el diseño las trata como pantallas propias.
+   Sus enlaces `?tab=` siguen resolviendo para poder redirigir a la ruta en vez
+   de dejar al visitante en una pestaña que ya no existe.
+3. **Servicios municipales pasa a Administración**, que es donde el diseño la
+   pone: no es hermana de Información, es uno de sus seis epígrafes.
+4. **Un epígrafe puede declarar un módulo** que el producto ya sabe pintar. El
+   enlace viaja en la clave del seed guardada en `data_json`, **no en el
+   título**, para que renombrar la tarjeta no la desconecte. Hoy sólo la
+   corporación municipal reclama uno.
+5. **Las pestañas sobrantes del seed de ADR-053 se pliegan** dentro de
+   «informacion» (migración `20260903_0044`): sus epígrafes pasan a colgar de
+   ella y la pestaña vacía se archiva. Sólo se tocan las que conservan su marca
+   del seed; una pestaña creada a mano no la lleva y se queda donde está. Cada
+   epígrafe movido anota su origen, de modo que la vuelta atrás no depende de
+   títulos que el ayuntamiento puede haber cambiado.
+
+**Consecuencias.** La fila de una organización sembrada de nuevo es exactamente
+la del diseño. El masthead del Ayuntamiento desaparece y el escudo se muda a la
+barra superior, que ya sabía pintarlo pero nunca lo recibía. Quedan fuera, y
+anotadas: los contenidos a medida de cada epígrafe —las gráficas de doble eje,
+el carrusel de analíticas, la regla de visitas del arquitecto— que el inventario
+de interacción documenta y que no son bloques genéricos, sino componentes por
+construir uno a uno.

@@ -1,10 +1,8 @@
 "use client";
 
 import {
-  BookOpen,
   Building2,
   CircleAlert,
-  ClipboardList,
   Landmark,
   Map as MapIcon,
   RefreshCw,
@@ -71,14 +69,11 @@ import { Presupuestos } from "./ayuntamiento/Presupuestos";
 import { Comunicacion } from "./ayuntamiento/Comunicacion";
 import { EstructuraGobierno } from "./ayuntamiento/EstructuraGobierno";
 import { SeriesMunicipio } from "./ayuntamiento/SeriesMunicipio";
-import { HojaDeRuta } from "./ayuntamiento/HojaDeRuta";
 import { InformacionMunicipio } from "./ayuntamiento/InformacionMunicipio";
-import { Normativa } from "./ayuntamiento/Normativa";
 import { Personal } from "./ayuntamiento/Personal";
 import { ServiciosMunicipales } from "./ayuntamiento/ServiciosMunicipales";
 import {
   EMPTY_RESOURCE_ERRORS,
-  ORDINANCE_MANAGEMENT_PERMISSIONS,
   ResourceState,
   getMunicipalContexts,
 } from "./ayuntamiento/shared";
@@ -182,12 +177,24 @@ function moveEpigraph(
 // no cambian: se usan en enlaces `?tab=` repartidos por el producto.
 const TAB_DEFINITIONS: TabDefinition[] = [
   { id: "summary", label: "Información", icon: Landmark },
-  { id: "ordinances", label: "Normativa", icon: BookOpen },
-  { id: "facilities", label: "Servicios municipales", icon: Wrench },
-  { id: "map", label: "Mapa general", icon: MapIcon },
+  { id: "administration", label: "Administración", icon: Wrench },
   { id: "people", label: "Personal", icon: Users },
-  { id: "roadmap", label: "Hoja de ruta", icon: ClipboardList },
+  { id: "map", label: "Mapa general", icon: MapIcon },
 ];
+
+// Normativa y Hoja de ruta salieron de la fila: el diseño las tiene como
+// pantallas propias, y la aplicación ya las sirve en su ruta. Los enlaces
+// `?tab=` antiguos siguen valiendo y llevan allí.
+const TABS_MOVED_TO_ROUTES: Partial<Record<WorkspaceTab, string>> = {
+  ordinances: "/ordenanzas",
+  roadmap: "/hoja-de-ruta",
+};
+
+// «Servicios municipales» no desaparece: en el diseño es un epígrafe de
+// Administración, así que su enlace antiguo abre esa pestaña.
+const RENAMED_TABS: Record<string, WorkspaceTab> = {
+  facilities: "administration",
+};
 
 /** Convierte el texto libre del editor de series en puntos. Una línea por
  *  punto, «etiqueta: valor»; lo que no encaje se descarta en silencio. */
@@ -210,7 +217,11 @@ function parseSeriesPoints(raw: string) {
 }
 
 function isWorkspaceTab(value: string | null): value is WorkspaceTab {
-  return TAB_DEFINITIONS.some(({ id }) => id === value);
+  return (
+    TAB_DEFINITIONS.some(({ id }) => id === value) ||
+    value === "ordinances" ||
+    value === "roadmap"
+  );
 }
 
 // La pestaña vive en la URL, no en estado local: así un enlace `?tab=` abre
@@ -219,6 +230,9 @@ export function resolveWorkspaceTab(
   searchParams: Pick<URLSearchParams, "get">,
 ): ActiveTab {
   const requestedTab = searchParams.get("tab");
+  if (requestedTab !== null && requestedTab in RENAMED_TABS) {
+    return RENAMED_TABS[requestedTab];
+  }
   if (isWorkspaceTab(requestedTab)) {
     return requestedTab;
   }
@@ -294,6 +308,16 @@ function MunicipalWorkspaceContent() {
   const router = useRouter();
   const searchParams = useSearchParams();
   const activeTab = resolveWorkspaceTab(searchParams);
+
+  // Normativa y Hoja de ruta salieron de la fila de pestañas. Un enlace antiguo
+  // sigue llegando aquí, así que se le lleva a la pantalla donde vive ahora ese
+  // contenido en vez de dejarlo en una pestaña que ya no está.
+  useEffect(() => {
+    const destination = TABS_MOVED_TO_ROUTES[activeTab as WorkspaceTab];
+    if (destination) {
+      router.replace(destination);
+    }
+  }, [activeTab, router]);
   const [selectedOrganizationId, setSelectedOrganizationId] = useState<
     number | null
   >(null);
@@ -416,12 +440,6 @@ function MunicipalWorkspaceContent() {
     user &&
       (userHasPermission(user, "heritage.view") ||
         userHasPermission(user, "heritage.manage")),
-  );
-  const canManageOrdinances = Boolean(
-    user &&
-      ORDINANCE_MANAGEMENT_PERMISSIONS.some((permission) =>
-        userHasPermission(user, permission),
-      ),
   );
 
   useEffect(() => {
@@ -844,18 +862,29 @@ function MunicipalWorkspaceContent() {
   const isPaused = selectedContext.organization.status === "paused";
   const townHall = townHallController.townHall;
   const canEditMenu = canEditTownHall(user);
-  // Las pestañas del editor se añaden tras las áreas fijas, de modo que la
-  // tira siga siendo una sola navegación (ADR-052).
+  // En el diseño la fila la forman los apartados configurables, no unas
+  // pestañas fijas con los apartados detrás. El primer apartado ocupa el sitio
+  // de «Información»: conserva el identificador `summary` para que los enlaces
+  // antiguos sigan valiendo, pero lleva su título y pinta sus epígrafes.
+  const sections = townHall?.nav ?? [];
+  const [firstSection, ...extraSections] = sections;
   const workspaceTabs: TabDefinition[] = [
-    ...TAB_DEFINITIONS,
-    ...(townHall?.nav ?? []).map((section) => ({
+    {
+      ...TAB_DEFINITIONS[0],
+      label: firstSection?.title ?? TAB_DEFINITIONS[0].label,
+    },
+    ...extraSections.map((section) => ({
       id: `block-${section.id}` as CustomTab,
       label: section.title,
       icon: Landmark,
     })),
+    ...TAB_DEFINITIONS.slice(1),
   ];
+  // «summary» es el primer apartado; los demás van por su identificador.
   const activeSection =
-    townHall?.nav.find(({ id }) => `block-${id}` === activeTab) ?? null;
+    (activeTab === "summary"
+      ? (firstSection ?? null)
+      : (sections.find(({ id }) => `block-${id}` === activeTab) ?? null));
   const activeTabDefinition =
     workspaceTabs.find((tab) => tab.id === activeTab) ?? workspaceTabs[0];
 
@@ -1056,6 +1085,21 @@ function MunicipalWorkspaceContent() {
         id={`municipal-panel-${activeTabDefinition.id}`}
         role="tabpanel"
       >
+        {activeTab === "summary" && !isLoading && !error && municipality && organization ? (
+          <InformacionMunicipio
+            canViewOrdinances={canViewOrdinances}
+            seriesSection={
+              <SeriesMunicipio
+                climate={climate}
+                households={households}
+                padron={padron}
+              />
+            }
+            onTabChange={(tab) => selectWorkspaceTab(tab, true)}
+            ordinances={ordinances}
+            organization={organization}
+          />
+        ) : null}
         {isLoading ? (
           <div
             aria-busy="true"
@@ -1085,75 +1129,54 @@ function MunicipalWorkspaceContent() {
             title="No se pudo abrir el espacio municipal"
             tone="error"
           />
-        ) : activeTab === "summary" ? (
-          <InformacionMunicipio
-            canViewOrdinances={canViewOrdinances}
-            governmentSection={
-              <EstructuraGobierno
-                canView={canViewGovernment}
-                error={resourceErrors.government}
-                members={government}
-                onRetry={retryWorkspace}
-              />
-            }
-            administrationSection={
-              <>
-                <Administracion
-                  canView={canViewAdministration}
-                  contracts={contracts}
-                  grants={grants}
-                  licences={licences}
-                  officeHours={officeHours}
-                />
-                <Comunicacion
-                  canView={canViewCommunications}
-                  notices={notices}
-                />
-                <Presupuestos
-                  budgets={budgets}
-                  canView={canViewBudgets}
-                  execution={execution}
-                  movements={movements}
-                />
-                <Plenos canView={canViewPlenos} sessions={sessions} />
-                <Patrimonio
-                  archive={archive}
-                  assets={heritage}
-                  canView={canViewHeritage}
-                />
-              </>
-            }
-            seriesSection={
-              <SeriesMunicipio
-                climate={climate}
-                households={households}
-                padron={padron}
-              />
-            }
-            onTabChange={(tab) => selectWorkspaceTab(tab, true)}
-            ordinances={ordinances}
-            organization={organization}
-          />
-        ) : activeTab === "ordinances" ? (
-          <Normativa
-            canManage={canManageOrdinances}
-            canView={canViewOrdinances}
-            error={resourceErrors.ordinances}
-            municipality={municipality}
-            onRetry={retryWorkspace}
-            ordinances={ordinances}
-          />
-        ) : activeTab === "facilities" ? (
-          <ServiciosMunicipales
-            assets={assets}
-            canViewAssets={canViewAssets}
-            canViewMaintenance={canViewMaintenance}
-            canViewMap={canViewMap}
-            errors={resourceErrors}
-            maintenance={maintenance}
-            onRetry={retryWorkspace}
-            organizationId={selectedContext.organization.id}
-          />
+        ) : activeTab === "administration" ? (
+          <div className={styles.tabContent}>
+            <Administracion
+              canView={canViewAdministration}
+              contracts={contracts}
+              grants={grants}
+              licences={licences}
+              officeHours={officeHours}
+            />
+            <ServiciosMunicipales
+              assets={assets}
+              canViewAssets={canViewAssets}
+              canViewMaintenance={canViewMaintenance}
+              canViewMap={canViewMap}
+              errors={resourceErrors}
+              maintenance={maintenance}
+              onRetry={retryWorkspace}
+              organizationId={selectedContext.organization.id}
+            />
+            <Comunicacion canView={canViewCommunications} notices={notices} />
+            <Presupuestos
+              budgets={budgets}
+              canView={canViewBudgets}
+              execution={execution}
+              movements={movements}
+            />
+            <Plenos canView={canViewPlenos} sessions={sessions} />
+            <Patrimonio
+              archive={archive}
+              assets={heritage}
+              canView={canViewHeritage}
+            />
+          </div>
+        ) : activeTab === "ordinances" || activeTab === "roadmap" ? (
+          // La pestaña ya no existe; el efecto de arriba está navegando a su
+          // ruta. Este estado dura lo que tarde el router.
+          <div
+            aria-busy="true"
+            aria-live="polite"
+            className={styles.loadingState}
+            role="status"
+          >
+            <RefreshCw aria-hidden="true" size={22} />
+            <div>
+              <strong>Abriendo la sección</strong>
+              <span>Este contenido tiene ahora su propia pantalla.</span>
+            </div>
+          </div>
         ) : activeTab === "map" ? (
           <MapaGeneral
             canViewMap={canViewMap}
@@ -1167,15 +1190,6 @@ function MunicipalWorkspaceContent() {
             organization={organization}
             posts={staffPosts}
             workers={staffWorkers}
-          />
-        ) : activeTab === "roadmap" ? (
-          <HojaDeRuta
-            assets={assets}
-            canViewMap={canViewMap}
-            maintenance={maintenance}
-            ordinances={ordinances}
-            organizationId={selectedContext.organization.id}
-            user={user}
           />
         ) : activeSection !== null ? (
           <div className={styles.tabContent}>
@@ -1266,7 +1280,18 @@ function MunicipalWorkspaceContent() {
                           ))}
                         </div>
                       ) : null}
-                      {apartado === undefined ? (
+                      {epigraph.module === "government" ? (
+                        // La corporación ya tiene módulo propio: la tarjeta lo
+                        // enseña en vez del contenido genérico, para no contar
+                        // lo mismo dos veces en la misma pestaña.
+                        <EstructuraGobierno
+                          canView={canViewGovernment}
+                          embedded
+                          error={resourceErrors.government}
+                          members={government}
+                          onRetry={retryWorkspace}
+                        />
+                      ) : apartado === undefined ? (
                         <p className="townhall-epigraph-state">
                           Este epígrafe todavía no tiene apartados.
                         </p>

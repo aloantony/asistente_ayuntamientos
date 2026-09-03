@@ -107,6 +107,14 @@ INITIAL_TOWN_HALL_STRUCTURE: tuple[dict, ...] = (
 )
 
 
+# Epígrafes que el producto ya sabe pintar con un módulo propio. La clave es la
+# del seed, no el título: el ayuntamiento puede renombrar la tarjeta y el enlace
+# con su módulo tiene que sobrevivir al cambio.
+EPIGRAPH_MODULES: dict[str, str] = {
+    "informacion/estructura": "government",
+}
+
+
 def read_seed_key(block: MunicipalBlock) -> str | None:
     """Marca del seed guardada en `data_json`, si la lleva."""
     if not block.data_json:
