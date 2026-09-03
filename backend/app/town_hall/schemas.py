@@ -74,6 +74,10 @@ class MunicipalNavEpigraphRead(BaseModel):
     id: int
     title: str
     position: int
+    # Módulo propio que pinta esta tarjeta, si el producto ya tiene uno para
+    # ella (la corporación municipal, por ejemplo). Sin módulo la tarjeta
+    # enseña el contenido genérico de sus apartados.
+    module: str | None = None
     items: list[MunicipalNavItemRead] = []
 
 

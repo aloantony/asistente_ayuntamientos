@@ -384,7 +384,7 @@ export default function HomePage() {
         label: "Ordenanzas",
         href: canSeeAdmin
           ? "/admin/ordenanzas"
-          : "/ayuntamiento?tab=ordinances",
+          : "/ordenanzas",
         icon: "ordinances",
         value: ordinancesTotal,
       });

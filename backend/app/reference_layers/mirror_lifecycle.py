@@ -10,6 +10,7 @@ layer transition is locked, so stale physical state cannot be activated.
 
 from __future__ import annotations
 
+from collections import Counter
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 import hashlib
@@ -2949,6 +2950,78 @@ def stored_catalog_snapshot_is_valid(
         RecursionError,
     ):
         return False
+
+
+@dataclass(frozen=True)
+class CatalogSnapshotDeliveryView:
+    """One validation of an immutable snapshot, shared by all its layers.
+
+    ``stored_catalog_snapshot_is_valid`` re-serializes and re-hashes the whole
+    stored catalog, and ``catalog_snapshot_contains_active_layer`` rescans its
+    layer list.  Answering for one layer that is right; answering the catalog
+    endpoint that way ran both once per layer -- 460 hashes of the same
+    immutable document for a 228-layer catalog, some three seconds during which
+    the map showed nothing.  The snapshot cannot change while it is being read,
+    so the checks are done once here and every layer consults the result.
+    """
+
+    provider_key: str
+    is_valid: bool
+    deliverable_source_keys: frozenset[str]
+
+    def contains_active_layer(self, layer: ReferenceLayer) -> bool:
+        """Match ``catalog_snapshot_contains_active_layer`` exactly."""
+
+        return (
+            self.is_valid
+            and self.provider_key == layer.provider_key
+            and layer.source_key in self.deliverable_source_keys
+        )
+
+
+def catalog_snapshot_delivery_view(
+    snapshot: ReferenceCatalogSnapshot | None,
+) -> CatalogSnapshotDeliveryView:
+    """Validate one snapshot once and index the layers it froze as deliverable."""
+
+    if snapshot is None:
+        return CatalogSnapshotDeliveryView("", False, frozenset())
+    if not stored_catalog_snapshot_is_valid(snapshot):
+        return CatalogSnapshotDeliveryView(
+            snapshot.provider_key, False, frozenset()
+        )
+    try:
+        layers = snapshot.normalized_definition_json.get("layers")
+    except (AttributeError, TypeError, ValueError):
+        layers = None
+    if not isinstance(layers, list):
+        return CatalogSnapshotDeliveryView(
+            snapshot.provider_key, False, frozenset()
+        )
+    # A duplicated source_key is not deliverable, exactly as the per-layer
+    # check requires a single match, so keys are counted before being kept.
+    counts: Counter[str] = Counter()
+    candidates: dict[str, bool] = {}
+    for item in layers:
+        if not isinstance(item, dict):
+            continue
+        source_key = item.get("source_key")
+        if not isinstance(source_key, str):
+            continue
+        counts[source_key] += 1
+        candidates[source_key] = (
+            item.get("node_type") == "layer"
+            and item.get("status") in {"active", "degraded"}
+        )
+    return CatalogSnapshotDeliveryView(
+        snapshot.provider_key,
+        True,
+        frozenset(
+            source_key
+            for source_key, deliverable in candidates.items()
+            if deliverable and counts[source_key] == 1
+        ),
+    )
 
 
 def catalog_snapshot_contains_active_layer(

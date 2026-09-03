@@ -15,29 +15,19 @@ export function InformacionMunicipio({
   organization,
   ordinances,
   canViewOrdinances,
-  governmentSection,
   seriesSection,
-  administrationSection,
   onTabChange,
 }: {
   organization: Organization;
   ordinances: MunicipalCollection<Ordinance> | null;
   canViewOrdinances: boolean;
-  /** Corporación municipal; llega montada para no acoplar la ficha al dominio. */
-  governmentSection: ReactNode;
   /** Series del municipio (padrón, clima, viviendas), montadas igual. */
   seriesSection: ReactNode;
-  /** Administración y comunicación municipal, montadas igual. */
-  administrationSection: ReactNode;
   onTabChange: (tab: WorkspaceTab) => void;
 }) {
   return (
     <div className={styles.tabContent}>
-      {governmentSection}
-
       {seriesSection}
-
-      {administrationSection}
 
       <section className={styles.card}>
         <SectionHeading
@@ -57,7 +47,7 @@ export function InformacionMunicipio({
               </small>
             </span>
           </button>
-          <button type="button" onClick={() => onTabChange("facilities")}>
+          <button type="button" onClick={() => onTabChange("administration")}>
             <Wrench aria-hidden="true" size={20} strokeWidth={1.6} />
             <span>
               <strong>Instalaciones</strong>

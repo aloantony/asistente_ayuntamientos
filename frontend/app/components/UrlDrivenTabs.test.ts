@@ -10,8 +10,18 @@ import {
 
 describe("municipal workspace URL tabs", () => {
   it("derives the active tab from each query snapshot and rejects unknown tabs", () => {
+    // «Servicios municipales» es un epígrafe de Administración en el diseño,
+    // así que su enlace antiguo abre esa pestaña.
     expect(resolveWorkspaceTab(new URLSearchParams("tab=facilities"))).toBe(
-      "facilities",
+      "administration",
+    );
+    // Normativa y Hoja de ruta salieron de la fila pero siguen resolviendo:
+    // la pantalla las reconoce para poder redirigir a su ruta propia.
+    expect(resolveWorkspaceTab(new URLSearchParams("tab=ordinances"))).toBe(
+      "ordinances",
+    );
+    expect(resolveWorkspaceTab(new URLSearchParams("tab=roadmap"))).toBe(
+      "roadmap",
     );
     expect(resolveWorkspaceTab(new URLSearchParams("tab=unknown"))).toBe(
       "summary",

@@ -41,24 +41,23 @@ export function EstructuraGobierno({
   error,
   canView,
   onRetry,
+  embedded = false,
 }: {
   members: MunicipalCollection<GovernmentMember> | null;
   error: string;
   canView: boolean;
   onRetry: () => void;
+  /** Dentro de una tarjeta de epígrafe la corporación va sin envoltorio: la
+   *  tarjeta ya pone el título y el plegado, y anidarlos duplicaría los dos. */
+  embedded?: boolean;
 }) {
   const groups = LEVEL_ORDER.map((level) => ({
     level,
     members: (members?.items ?? []).filter((member) => member.level === level),
   })).filter((group) => group.members.length > 0);
 
-  return (
-    <SectionShell
-      count={canView && !error ? (members?.total ?? null) : null}
-      icon={Landmark}
-      sectionKey="gobierno"
-      title="Estructura de gobierno"
-    >
+  const body = (
+    <>
       {!canView ? (
         <ResourceState
           description="Tu cuenta no dispone del permiso government.view en esta organización."
@@ -131,6 +130,21 @@ export function EstructuraGobierno({
           title="Corporación sin registrar"
         />
       )}
+    </>
+  );
+
+  if (embedded) {
+    return body;
+  }
+
+  return (
+    <SectionShell
+      count={canView && !error ? (members?.total ?? null) : null}
+      icon={Landmark}
+      sectionKey="gobierno"
+      title="Estructura de gobierno"
+    >
+      {body}
     </SectionShell>
   );
 }

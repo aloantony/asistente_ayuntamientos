@@ -26,7 +26,11 @@ from app.town_hall.access import (
 )
 from app.town_hall import weather
 from app.town_hall.models import MunicipalBlock, MunicipalProfile
-from app.town_hall.seed import ensure_initial_town_hall_structure
+from app.town_hall.seed import (
+    EPIGRAPH_MODULES,
+    ensure_initial_town_hall_structure,
+    read_seed_key,
+)
 from app.town_hall.schemas import (
     BLOCK_PARENT_TYPES,
     SECTION_LAYOUTS,
@@ -112,10 +116,12 @@ def build_nav(db: Session, organization_id: int) -> list[MunicipalNavSectionRead
         section = sections.get(block.parent_id)
         if section is None:
             continue
+        seed_key = read_seed_key(block)
         epigraph = MunicipalNavEpigraphRead(
             id=block.id,
             title=block.title,
             position=block.position,
+            module=EPIGRAPH_MODULES.get(seed_key or ""),
             items=[],
         )
         epigraphs[block.id] = epigraph

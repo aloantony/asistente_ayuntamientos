@@ -344,3 +344,46 @@ def test_seeding_another_organization_requires_permission_there(
 
     # Tener el permiso en la propia organización no abre la del vecino.
     assert response.status_code == 403
+
+
+def test_the_corporation_epigraph_carries_its_module(
+    client,
+    make_user,
+    make_organization,
+    grant_permissions,
+):
+    """La tarjeta de la corporación se enlaza con su módulo por la clave del
+    seed, no por el título: renombrarla no puede desconectarla."""
+    user = make_user()
+    organization = make_organization(name="Ayuntamiento de Fuentelcésped")
+    grant_permissions(user, organization, ["town_hall.edit", "town_hall.view"])
+    auth = headers_for(user)
+
+    seed(client, auth)
+    nav = read_nav(client, auth)
+    epigraphs = nav[0]["epigraphs"]
+
+    corporacion = next(
+        epigraph
+        for epigraph in epigraphs
+        if epigraph["title"] == "Estructura de Gobierno"
+    )
+    assert corporacion["module"] == "government"
+    # Ningún otro epígrafe del seed reclama módulo propio todavía.
+    assert [
+        epigraph["title"]
+        for epigraph in epigraphs
+        if epigraph["module"] is not None
+    ] == ["Estructura de Gobierno"]
+
+    # Renombrar la tarjeta no rompe el enlace: la marca vive en `data_json`.
+    renamed = client.patch(
+        f"/town-hall/blocks/{corporacion['id']}",
+        json={"title": "Corporación"},
+        headers=auth,
+    )
+    assert renamed.status_code == 200
+    after = read_nav(client, auth)[0]["epigraphs"]
+    assert next(
+        epigraph for epigraph in after if epigraph["title"] == "Corporación"
+    )["module"] == "government"
