@@ -8,6 +8,8 @@ from urllib.parse import parse_qs, urlsplit
 import zlib
 
 import pytest
+
+from app.reference_layers.mirror_coverage import SIUR_TILE_PROFILE
 from PIL import Image
 
 import app.reference_layers.blob_store as blob_store_module
@@ -138,9 +140,7 @@ def _wms_document(
     if bounds is not None:
         descriptor["bounds"] = bounds
     if supertile_size is not None:
-        descriptor["coverage_profile"] = (
-            "siur-castilla-y-leon-native-z16-v1"
-        )
+        descriptor["coverage_profile"] = SIUR_TILE_PROFILE
         descriptor["wms_supertile_size"] = supertile_size
     return {
         "schema": "reference-tile-source/v1",

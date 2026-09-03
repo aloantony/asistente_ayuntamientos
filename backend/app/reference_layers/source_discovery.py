@@ -59,7 +59,12 @@ from app.reference_layers.idecyl_style_exclusion_evidence import (
 )
 from app.reference_layers.mirror_coverage import (
     SIUR_LAYER_PREFIX,
+    SIUR_ORTHO_TILE_BOUNDS,
+    SIUR_ORTHO_TILE_MAX_ZOOM,
+    SIUR_ORTHO_TILE_PROFILE,
     SIUR_TILE_BOUNDS,
+    SIUR_TILE_MAX_COUNT,
+    SIUR_TILE_MIN_ZOOM,
     SIUR_WMS_SUPERTILE_COVERAGE_PROFILES,
     SIUR_WMS_SUPERTILE_SIZE,
     reviewed_tile_coverage,
@@ -1874,12 +1879,12 @@ def _reviewed_ortho_substitution_config(
 ) -> dict[str, Any]:
     config = _tile_config(service, layer)
     expected_operations = {
-        "bounds": dict(SIUR_TILE_BOUNDS),
-        "min_zoom": 0,
-        "max_zoom": 15,
-        "coverage_profile": "siur-castilla-y-leon-ortho-native-z15-v1",
+        "bounds": dict(SIUR_ORTHO_TILE_BOUNDS),
+        "min_zoom": SIUR_TILE_MIN_ZOOM,
+        "max_zoom": SIUR_ORTHO_TILE_MAX_ZOOM,
+        "coverage_profile": SIUR_ORTHO_TILE_PROFILE,
         "wms_supertile_size": SIUR_WMS_SUPERTILE_SIZE,
-        "max_tile_count": 2_000_000,
+        "max_tile_count": SIUR_TILE_MAX_COUNT,
     }
     actual_operations = {
         "bounds": reviewed.bounds,

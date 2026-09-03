@@ -838,6 +838,11 @@ class MirrorRunProcessor:
                 )
             logger.warning(
                 "Reference mirror run ended with a classified failure",
+                # "unexpected_worker_error" is the catch-all bucket, so without
+                # the original exception a run failure says only that something
+                # went wrong somewhere. The traceback stays out of the stored
+                # run row, which is operator-facing, and goes to the log.
+                exc_info=failure.code == "unexpected_worker_error",
                 extra={
                     "run_id": lease.run_id,
                     "source_id": lease.source_id,

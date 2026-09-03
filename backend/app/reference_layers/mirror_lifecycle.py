@@ -85,9 +85,15 @@ PROMOTION_EVENT_SCHEMA = "siur-mirror-promotion-event-v1"
 DEFAULT_SOURCE_CHECK_INTERVAL_SECONDS = 24 * 60 * 60
 DEFAULT_SOURCE_FULL_REFRESH_INTERVAL_SECONDS = 30 * 24 * 60 * 60
 # A daily deterministic pixel probe catches changes at stable capabilities
-# endpoints.  This weekly full rebuild is the durable upper bound for changes
-# outside that sample, so a tile mirror is never trusted unchanged for 30 days.
-TILE_SOURCE_FULL_REFRESH_INTERVAL_SECONDS = 7 * 24 * 60 * 60
+# endpoints.  This full rebuild is the durable upper bound for changes outside
+# that sample, so a tile mirror is never trusted unchanged for 30 days.
+#
+# It was weekly until the first real tile pyramid was measured: the Castilla y
+# Leon base map is 1.3 million tiles behind roughly 20,600 supertile requests,
+# so a weekly rebuild meant some three hours of upstream traffic every week for
+# a base cartography that changes a couple of times a year.  A fortnight halves
+# that while staying well inside the bound the daily probe is there to guard.
+TILE_SOURCE_FULL_REFRESH_INTERVAL_SECONDS = 14 * 24 * 60 * 60
 _MIRROR_SOURCE_LOCK_DOMAIN = b"asistente/reference-mirror-sources/v1\0"
 _MIRROR_LAYER_LOCK_DOMAIN = b"asistente/reference-mirror-layer/v1\0"
 _PROVIDER_KEY_RE = re.compile(r"^[a-z0-9][a-z0-9_.:/-]{0,63}$")
