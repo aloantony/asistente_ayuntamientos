@@ -14,8 +14,14 @@ import { SidebarNavigation } from "../components/SidebarNavigation";
 import { TopBar } from "../components/TopBar";
 import { userHasPermission, type User } from "../components/types";
 import { fetchRequirementsTotal } from "../lib/fetchers";
+import {
+  fetchTownHall,
+  townHallShieldUrl,
+  uploadTownHallShield,
+} from "../lib/api";
 import { activeTopNavSectionFor, shouldShowTopNav } from "../lib/topNav";
 import {
+  canEditTownHall,
   consumePendingLoginRedirect,
   shouldShowRequirementsPanel,
   useSession,
@@ -96,6 +102,11 @@ export default function AppLayout({
   const [requirementsTotal, setRequirementsTotal] = useState<number | null>(
     null,
   );
+  // Escudo del municipio para la barra superior. El diseño lo pone ahí, no en
+  // el cuerpo del Ayuntamiento; `version` fuerza a saltarse la caché cuando se
+  // sustituye, porque la URL no cambia.
+  const [hasCrest, setHasCrest] = useState(false);
+  const [crestVersion, setCrestVersion] = useState(0);
   const [showOnboarding, setShowOnboarding] = useState(false);
   const [activeOnboardingIndex, setActiveOnboardingIndex] = useState(0);
   const { dark, toggle: toggleTheme } = useDarkMode();
@@ -122,6 +133,27 @@ export default function AppLayout({
       .then((total) => {
         if (isActive) {
           setRequirementsTotal(total);
+        }
+      })
+      .catch(() => undefined);
+    return () => {
+      isActive = false;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [user?.id]);
+
+  // El perfil del ayuntamiento se pide una sola vez por sesión, como el badge
+  // de necesidades: sólo interesa si hay escudo que pintar. Si falla, la barra
+  // se queda con su marcador neutro.
+  useEffect(() => {
+    if (!user) {
+      return;
+    }
+    let isActive = true;
+    fetchTownHall()
+      .then((townHall) => {
+        if (isActive) {
+          setHasCrest(townHall.profile.has_shield);
         }
       })
       .catch(() => undefined);
@@ -595,8 +627,18 @@ export default function AppLayout({
           {showTopNav ? (
             <TopBar
               activeSectionId={activeTopNavSectionId}
+              canEditCrest={canEditTownHall(user)}
+              crestSrc={hasCrest ? townHallShieldUrl(crestVersion) : null}
               municipalityId={user.organizations?.[0]?.municipality?.id ?? null}
               municipalityName={brandName}
+              onCrestDrop={(file) => {
+                void uploadTownHallShield(file)
+                  .then(() => {
+                    setHasCrest(true);
+                    setCrestVersion((value) => value + 1);
+                  })
+                  .catch(() => undefined);
+              }}
             />
           ) : null}
           {children}

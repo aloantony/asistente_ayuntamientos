@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { useCallback, useEffect, useId, useState } from "react";
+import { useCallback, useEffect, useId, useState, type DragEvent } from "react";
 import { visibleTopNavSections, type TopNavSection } from "../lib/topNav";
 import { TopBarWeather } from "./TopBarWeather";
 import styles from "./TopBar.module.css";
@@ -58,6 +58,10 @@ type TopBarProps = {
   activeSectionId?: string | null;
   /** Municipio del que se lee la temperatura; sin él no se dibuja el bloque. */
   municipalityId?: number | null;
+  /** Permite sustituir el escudo soltando una imagen encima (ADR-034). */
+  canEditCrest?: boolean;
+  /** Recibe la imagen soltada sobre el escudo. */
+  onCrestDrop?: (file: File) => void;
 };
 
 export function TopBar({
@@ -65,10 +69,25 @@ export function TopBar({
   crestSrc,
   activeSectionId,
   municipalityId = null,
+  canEditCrest = false,
+  onCrestDrop,
 }: TopBarProps) {
   const sections = visibleTopNavSections();
   const [openSectionId, setOpenSectionId] = useState<string | null>(null);
+  const [isCrestTargeted, setIsCrestTargeted] = useState(false);
   const menuIdPrefix = useId();
+
+  // El escudo se reemplaza arrastrando una imagen encima. Vivía en la banda
+  // del espacio municipal; el diseño lo pone aquí, junto al nombre.
+  function handleCrestDrop(event: DragEvent<HTMLSpanElement>) {
+    event.preventDefault();
+    setIsCrestTargeted(false);
+
+    const file = event.dataTransfer.files?.[0];
+    if (canEditCrest && file && file.type.startsWith("image/")) {
+      onCrestDrop?.(file);
+    }
+  }
 
   const closeMenu = useCallback(() => setOpenSectionId(null), []);
 
@@ -102,7 +121,25 @@ export function TopBar({
     <div className={styles.topBar}>
       <div className={styles.row}>
         <div className={styles.identity}>
-          <span className={styles.crest}>
+          <span
+            className={`${styles.crest}${
+              isCrestTargeted ? ` ${styles.crestTargeted}` : ""
+            }`}
+            onDragLeave={() => setIsCrestTargeted(false)}
+            onDragOver={(event) => {
+              if (!canEditCrest) {
+                return;
+              }
+              event.preventDefault();
+              setIsCrestTargeted(true);
+            }}
+            onDrop={handleCrestDrop}
+            title={
+              canEditCrest
+                ? "Arrastra una imagen para cambiar el escudo"
+                : undefined
+            }
+          >
             {crestSrc ? (
               <img alt="" src={crestSrc} />
             ) : (

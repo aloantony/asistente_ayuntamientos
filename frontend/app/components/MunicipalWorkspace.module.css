@@ -1231,6 +1231,34 @@
   outline-offset: 4px;
 }
 
+/* Selector de organización: lo que queda de la banda del espacio municipal
+   cuando el usuario pertenece a más de una. Discreto, sobre las pestañas. */
+.contextPicker {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 14px;
+}
+
+.contextPicker label {
+  font-family: var(--font-ibm-plex-mono), "IBM Plex Mono", monospace;
+  font-size: 11px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+}
+
+.contextPicker select {
+  min-width: 260px;
+  padding: 6px 10px;
+  border: 1px solid var(--border-strong);
+  border-radius: 8px;
+  background: var(--surface);
+  color: var(--text);
+  font: inherit;
+  font-size: 14px;
+}
+
 /* Bloque de temperatura, junto al selector de organización. */
 .weatherBlock {
   display: inline-flex;
