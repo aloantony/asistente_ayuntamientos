@@ -29,6 +29,12 @@ services:
       # Local reference delivery is the production default. Remote WMS
       # fallback requires an explicit operator opt-in.
       REFERENCE_REMOTE_PROXY_ENABLED: ${REFERENCE_REMOTE_PROXY_ENABLED:-false}
+    # The API serves mirrored tiles straight out of the artifact store, which
+    # the reference worker writes as root:REFERENCE_STORAGE_GID with 0640.  It
+    # reads them as an unprivileged user, so it needs that group the way the
+    # GeoServer readers do; without it every mirrored tile is a 502.
+    group_add:
+      - "${REFERENCE_STORAGE_GID:-2000}"
     network_mode: host
     command:
       ["uvicorn", "app.main:app", "--host", "127.0.0.1", "--port", "8000"]
