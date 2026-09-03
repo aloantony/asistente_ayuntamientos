@@ -83,8 +83,13 @@ type AreaDragState = {
   previousBounds: MapBounds | null;
 };
 
-const FALLBACK_CENTER: [number, number] = [42.3439, -3.6969];
-const FALLBACK_ZOOM = 12;
+// Where the map opens before anything is geolocated, which is how every new
+// deployment starts. It used to be the provincial capital, eighty kilometres
+// from the municipality being served and outside the cartography the local
+// mirror holds, so a new town hall opened its map on a blank grid. Serving the
+// municipality is the point of the product, so that is where it opens.
+const FALLBACK_CENTER: [number, number] = [41.633, -3.583];
+const FALLBACK_ZOOM = 14;
 const SINGLE_ITEM_ZOOM = 16;
 const MAX_MAP_ZOOM = 24;
 const AREA_DRAG_THRESHOLD = 4;

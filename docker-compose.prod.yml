@@ -88,6 +88,12 @@ services:
       - /api
     volumes:
       - document_storage:/var/lib/asistente_ayuntamientos/documents
+      # El fondo cartográfico replicado se sirve leyendo este archivo.
+      - reference_artifacts:/var/lib/asistente_ayuntamientos/reference-artifacts:ro
+    # El worker lo escribe como root:REFERENCE_STORAGE_GID con 0640, así que la
+    # API necesita ese grupo para leer lo que ella misma sirve (ADR-057).
+    group_add:
+      - "${REFERENCE_STORAGE_GID:-2000}"
     depends_on:
       postgres:
         condition: service_healthy
@@ -239,3 +245,5 @@ volumes:
   redis_data:
   caddy_data:
   caddy_config:
+  reference_artifacts:
+  reference_transient:

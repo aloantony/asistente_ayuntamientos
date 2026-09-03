@@ -34,12 +34,18 @@ SIUR_WMS_SUPERTILE_COVERAGE_PROFILES = frozenset(
 # working ring of its neighbours, roughly 30 x 31 km.  It replaces the Castilla
 # y Leon envelope this profile used to carry, which was measured at 1.3 million
 # tiles and 28 GB for the base map alone -- almost six hours of upstream
-# traffic to serve one village, and more than the reviewed cache can hold.  The
-# municipal envelope is 24,500 tiles and some 400 MB while still reaching a
-# zoom level closer, so the town hall sees its own plots instead of a coarser
-# region.  Native zoom stops at 17 because IGN Base is drawn cartography, not
-# imagery: past that the same linework is only magnified, and the seed cost
-# quadruples per level -- z18 measured at nine hours against z17's two.
+# traffic to serve one village, and more than the reviewed cache can hold.
+# This one is 24,500 tiles and some 400 MB while reaching a zoom level closer,
+# so the town hall sees its own plots instead of a coarser region.
+#
+# Stretching it to the provincial capital was tried and abandoned: the capital
+# is dense, its tiles weigh three times as much, and the seed went from seven
+# minutes to an estimated eight hours.  The viewer opening on the municipality
+# instead of the capital is the cheaper half of that problem.
+#
+# Native zoom stops at 17 because IGN Base is drawn cartography, not imagery:
+# past that the same linework is only magnified, while the seed quadruples per
+# level -- z18 measured at nine hours against z17's two.
 # Serving a second municipality means reviewing a second profile.  See ADR-057.
 SIUR_TILE_BOUNDS = {
     "west": -3.763,
