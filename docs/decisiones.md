@@ -1117,3 +1117,47 @@ sobre de los datos del municipio en tiempo de ejecución a propósito: la
 cobertura entra en la definición de cada fuente y en su hash, y una cobertura
 que cambia sola invalidaría en silencio las autorizaciones de espejo que
 dependen de ella.
+
+## ADR-058: El catálogo verifica la instantánea una vez por lectura, no una por capa (2026-09-03)
+
+**Contexto.** El mapa de producción aparecía vacío con dos mensajes:
+«Cargando catálogo verificado…» en el árbol de capas y «Fondo cartográfico local
+pendiente de sincronización» sobre el lienzo. No era un fallo de entrega: la capa
+de fondo estaba sembrada, autorizada y servía teselas en todos los niveles de
+zoom. Era el catálogo, que **tardaba unos ocho segundos y medio** en responder.
+Durante ese rato la pantalla es exactamente la de un mapa roto.
+
+Medido con perfilador contra la base de datos de producción, el coste estaba en
+dos sitios, y ninguno era el que parecía:
+
+1. `_current_layer_blocker` llamaba, **por cada una de las 228 capas**, a
+   `stored_catalog_snapshot_is_valid` y a `catalog_snapshot_contains_active_layer`.
+   Las dos revalidan la instantánea entera: 460 serializaciones y hashes del
+   mismo documento inmutable, 2,2 s sólo en `json.dumps`.
+2. La disponibilidad local pedía la cadena de autorización **una consulta por
+   fuente**: 536 viajes a la base de datos.
+
+**Decisión.**
+
+1. **`CatalogSnapshotDeliveryView`**: la instantánea se valida **una vez por
+   lectura de catálogo** y se indexan de una pasada las `source_key` que quedaron
+   entregables. Cada capa consulta ese índice. La instantánea es inmutable y no
+   puede cambiar mientras se la lee, así que la respuesta no puede diferir entre
+   una capa y la siguiente. **La verificación no se debilita: se deja de repetir.**
+2. **`prefetch_source_authorization_chains`**: las cadenas de autorización de
+   todas las fuentes se cargan en una consulta y se le pasan al mismo
+   `require_current_source_authorization` de siempre. Cambia de dónde salen las
+   filas, no qué se comprueba con ellas.
+3. **Los caminos de una sola capa se quedan como estaban.** La vista y la
+   precarga son parámetros opcionales que sólo usa el camino masivo del catálogo,
+   de modo que la entrega de una tesela concreta sigue revalidando por su cuenta.
+
+**Resultado**, medido contra producción: la proyección pasa de **8,4 s a 0,29 s**
+y de 552 consultas a 26, con salida idéntica —las mismas capas entregables, los
+mismos motivos de bloqueo y la misma atribución proyectada.
+
+**Consecuencias.** Una prueba fija el invariante que hace legítimo el atajo: la
+vista tiene que responder lo mismo que la comprobación por capa para todas las
+capas de una instantánea, y fallar cerrada cuando la instantánea está corrupta.
+Si alguna vez la validación pasa a depender de algo que cambie dentro de una
+misma petición, esa prueba es la que se romperá, y con razón.

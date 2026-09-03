@@ -43,6 +43,10 @@ BATCH_SCHEMA_VERSION = "siur-mirror-authorization-batch-v1"
 MAX_DOCUMENT_BYTES = 256 * 1024
 MAX_BATCH_DOCUMENTS = 2_048
 MAX_BATCH_MANIFEST_BYTES = 2 * 1024 * 1024
+# How many sources one prefetch asks about at a time.  Postgres takes a much
+# larger IN list without complaint; this only keeps a single statement from
+# growing unbounded as the catalog does.
+_AUTHORIZATION_CHAIN_BATCH = 500
 _PROVIDER_RE = re.compile(r"^[a-z0-9][a-z0-9_.:/-]{0,63}$", re.ASCII)
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$", re.ASCII)
 _TEMPLATE_TOKEN_RE = re.compile(r"\{[^{}]+\}")
@@ -1041,10 +1045,22 @@ def require_current_source_authorization(
     *,
     source: ReferenceLayerSource,
     require_acquisition: bool,
+    chains: Mapping[
+        int, Sequence[ReferenceMirrorAuthorizationReview]
+    ] | None = None,
 ) -> ReferenceMirrorAuthorizationReview:
-    """Return the verified current head or raise one stable blocker."""
+    """Return the verified current head or raise one stable blocker.
 
-    reviews = _authorization_chain(db, source.id)
+    ``chains`` is an optional prefetch from
+    :func:`prefetch_source_authorization_chains`.  Every check below runs the
+    same way on it: it only spares the per-source query.
+    """
+
+    reviews = (
+        tuple(chains.get(source.id, ()))
+        if chains is not None
+        else _authorization_chain(db, source.id)
+    )
     if not reviews:
         raise MirrorAuthorizationError(
             "mirror authorization is missing",
@@ -1098,12 +1114,16 @@ def source_authorization_blocker(
     *,
     source: ReferenceLayerSource,
     require_acquisition: bool = True,
+    chains: Mapping[
+        int, Sequence[ReferenceMirrorAuthorizationReview]
+    ] | None = None,
 ) -> str | None:
     try:
         require_current_source_authorization(
             db,
             source=source,
             require_acquisition=require_acquisition,
+            chains=chains,
         )
     except MirrorAuthorizationError as error:
         return error.code
@@ -1162,12 +1182,17 @@ def effective_service_attributions(
         )
     ).all()
     values: dict[int, set[str]] = {}
+    chains = prefetch_source_authorization_chains(
+        db,
+        sources=[source for source, _ in rows],
+    )
     for source, service_id in rows:
         try:
             review = require_current_source_authorization(
                 db,
                 source=source,
                 require_acquisition=False,
+                chains=chains,
             )
         except MirrorAuthorizationError:
             continue
@@ -1524,6 +1549,45 @@ def _validate_review_run(
             "mirror authorization does not match the frozen run",
             code="mirror_authorization_source_changed",
         ) from error
+
+
+def prefetch_source_authorization_chains(
+    db: Session,
+    *,
+    sources: Sequence[ReferenceLayerSource],
+) -> dict[int, tuple[ReferenceMirrorAuthorizationReview, ...]]:
+    """Load every authorization chain for ``sources`` in one query.
+
+    The catalog answers for hundreds of layers at once and used to ask for one
+    chain per source, which cost a query and a chain rebuild each: on the
+    deployed catalog that was 536 round trips and about three seconds of the
+    eight the endpoint took, so the map sat empty while the browser waited.
+    The chains are the same rows the per-source path reads and callers hand
+    them straight back to it, so nothing about the decision changes -- only
+    how many times the database is asked.
+    """
+
+    source_ids = sorted({source.id for source in sources})
+    chains: dict[int, list[ReferenceMirrorAuthorizationReview]] = {
+        source_id: [] for source_id in source_ids
+    }
+    if not source_ids:
+        return {}
+    for start in range(0, len(source_ids), _AUTHORIZATION_CHAIN_BATCH):
+        window = source_ids[start : start + _AUTHORIZATION_CHAIN_BATCH]
+        for review in db.scalars(
+            select(ReferenceMirrorAuthorizationReview)
+            .where(ReferenceMirrorAuthorizationReview.source_id.in_(window))
+            .order_by(
+                ReferenceMirrorAuthorizationReview.source_id,
+                ReferenceMirrorAuthorizationReview.reviewed_at,
+                ReferenceMirrorAuthorizationReview.id,
+            )
+        ):
+            chains[review.source_id].append(review)
+    return {
+        source_id: tuple(reviews) for source_id, reviews in chains.items()
+    }
 
 
 def _authorization_chain(
