@@ -2194,6 +2194,12 @@ def _parse_geowebcache_disk_quota(payload: bytes) -> GeoWebCacheDiskQuota:
     ):
         raise GeoServerAdminResponseError(error)
     children = list(root)
+    # GeoServer echoes back the whole configuration that gwc-config-init
+    # installs, so the two trailing elements it writes are always present.
+    # They are checked rather than skipped: an empty layerQuotas keeps the
+    # global quota the only ceiling, and HSQL is the real accounting store the
+    # health extension demands -- a DummyQuotaStore would silently stop
+    # enforcing the quota at all.
     if [child.tag for child in children] != [
         "enabled",
         "cacheCleanUpFrequency",
@@ -2201,7 +2207,14 @@ def _parse_geowebcache_disk_quota(payload: bytes) -> GeoWebCacheDiskQuota:
         "maxConcurrentCleanUps",
         "globalExpirationPolicyName",
         "globalQuota",
+        "layerQuotas",
+        "quotaStore",
     ]:
+        raise GeoServerAdminResponseError(error)
+    layer_quotas = children[6]
+    if layer_quotas.attrib or list(layer_quotas) or layer_quotas.text:
+        raise GeoServerAdminResponseError(error)
+    if _xml_scalar(children[7], error=error) != "HSQL":
         raise GeoServerAdminResponseError(error)
     enabled_text = _xml_scalar(children[0], error=error)
     cleanup_text = _xml_scalar(children[1], error=error)

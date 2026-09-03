@@ -6,6 +6,7 @@ import {
   buildReferenceMetadataUrl,
   buildReferenceTileUrl,
   buildSiurMapLayers,
+  defaultLocalBaseMapSelection,
   listLocalBaseMapLayers,
   parseStoredMapBaseLayerPreference,
   parseReferenceLayerBounds,
@@ -628,5 +629,55 @@ describe("approved SIUR delivery descriptors", () => {
     const preferences = reconcileSiurPreferences(catalog);
 
     expect(buildSiurMapLayers(catalog, preferences)).toEqual([]);
+  });
+});
+
+describe("defaultLocalBaseMapSelection", () => {
+  it("devuelve el fondo por omisión y lo entrega visible", () => {
+    // El caso que importa: el catálogo trae el fondo apagado. Una pantalla sin
+    // controles de capas no tiene forma de encenderlo, así que si se entregara
+    // tal cual el mapa saldría vacío, que es justo lo que pasaba.
+    const base = makeLayer({
+      id: 4,
+      service_id: 8,
+      source_key: "layer:fondo",
+      title: "MAPA",
+      role: "base",
+      effective_visible: false,
+      active_version_id: 21,
+      active_generation: 1,
+    });
+    const overlay = makeLayer({
+      id: 5,
+      service_id: 8,
+      source_key: "layer:encima",
+      title: "Montes",
+      role: "overlay",
+      effective_visible: true,
+      active_version_id: 22,
+      active_generation: 1,
+    });
+
+    const selection = defaultLocalBaseMapSelection(makeCatalog([base, overlay]));
+
+    expect(selection.baseLayerId).toBe(4);
+    expect(selection.layers.map((layer) => layer.layerId)).toEqual([4]);
+    expect(selection.layers[0].visible).toBe(true);
+  });
+
+  it("sin fondo local no inventa ninguno", () => {
+    const overlay = makeLayer({
+      id: 5,
+      service_id: 8,
+      source_key: "layer:encima",
+      role: "overlay",
+      active_version_id: 22,
+      active_generation: 1,
+    });
+
+    expect(defaultLocalBaseMapSelection(makeCatalog([overlay]))).toEqual({
+      layers: [],
+      baseLayerId: null,
+    });
   });
 });

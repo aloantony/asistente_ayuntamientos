@@ -20,6 +20,16 @@ import unicodedata
 from urllib.parse import parse_qs, urlsplit
 from xml.etree import ElementTree
 
+from app.reference_layers.mirror_coverage import (
+    SIUR_ORTHO_TILE_BOUNDS,
+    SIUR_ORTHO_TILE_MAX_ZOOM,
+    SIUR_ORTHO_TILE_PROFILE,
+    SIUR_TILE_BOUNDS,
+    SIUR_TILE_MAX_COUNT,
+    SIUR_TILE_MIN_ZOOM,
+    SIUR_WMS_SUPERTILE_SIZE,
+)
+
 
 PROFILE_SCHEMA = "siur-reviewed-ign-pnoa-historico-profile/v1"
 EQUIVALENCE_SCHEMA = "siur-reviewed-ign-pnoa-historico-equivalence/v1"
@@ -132,17 +142,12 @@ _EXACT_CATALOG_LAYERS = frozenset(
     }
 )
 _EXPECTED_OPERATIONAL_PROFILE = {
-    "bounds": {
-        "west": -7.6,
-        "south": 39.9,
-        "east": -1.3,
-        "north": 43.4,
-    },
-    "min_zoom": 0,
-    "max_zoom": 15,
-    "coverage_profile": "siur-castilla-y-leon-ortho-native-z15-v1",
-    "wms_supertile_size": 8,
-    "max_tile_count": 2_000_000,
+    "bounds": dict(SIUR_ORTHO_TILE_BOUNDS),
+    "min_zoom": SIUR_TILE_MIN_ZOOM,
+    "max_zoom": SIUR_ORTHO_TILE_MAX_ZOOM,
+    "coverage_profile": SIUR_ORTHO_TILE_PROFILE,
+    "wms_supertile_size": SIUR_WMS_SUPERTILE_SIZE,
+    "max_tile_count": SIUR_TILE_MAX_COUNT,
 }
 _WMS_NS = {"wms": "http://www.opengis.net/wms"}
 _XLINK_HREF = "{http://www.w3.org/1999/xlink}href"

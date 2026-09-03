@@ -4,9 +4,10 @@ SIUR's authoritative settings file stores overlay extents as EPSG:25830
 evidence and does not publish bounds or zooms for its three background maps.
 Those values cannot be passed to an XYZ/WMTS seed implicitly.  This module
 holds the explicit operational coverage reviewed for the local mirror: the
-Castilla y Leon view envelope (padded beyond the public WMC extent) and a
-native zoom that fits the deployed storage budget.  Requests above the native
-zoom remain local and are rendered from the nearest archived parent tile.
+envelope of the municipality being served plus a working ring of its
+neighbours, and a native zoom that fits the deployed storage budget.  Requests
+above the native zoom remain local and are rendered from the nearest archived
+parent tile.
 """
 
 from __future__ import annotations
@@ -17,7 +18,11 @@ from urllib.parse import urlsplit
 
 
 SIUR_LAYER_PREFIX = "layer:siur:"
-SIUR_TILE_PROFILE = "siur-castilla-y-leon-native-z16-v1"
+SIUR_TILE_PROFILE = "siur-municipal-native-z17-v1"
+# The historical-ortho substitution keeps the regional profile it was reviewed
+# under: its equivalence evidence is committed and byte-verified, so its
+# operational profile cannot move without regenerating that file. It is a
+# separate feature from the background maps this deployment mirrors.
 SIUR_ORTHO_TILE_PROFILE = "siur-castilla-y-leon-ortho-native-z15-v1"
 SIUR_WMS_SUPERTILE_COVERAGE_PROFILES = frozenset(
     {
@@ -25,14 +30,37 @@ SIUR_WMS_SUPERTILE_COVERAGE_PROFILES = frozenset(
         SIUR_ORTHO_TILE_PROFILE,
     }
 )
+# The deployment envelope for background maps: the served municipality plus a
+# working ring of its neighbours, roughly 30 x 31 km.  It replaces the Castilla
+# y Leon envelope this profile used to carry, which was measured at 1.3 million
+# tiles and 28 GB for the base map alone -- almost six hours of upstream
+# traffic to serve one village, and more than the reviewed cache can hold.
+# This one is 24,500 tiles and some 400 MB while reaching a zoom level closer,
+# so the town hall sees its own plots instead of a coarser region.
+#
+# Stretching it to the provincial capital was tried and abandoned: the capital
+# is dense, its tiles weigh three times as much, and the seed went from seven
+# minutes to an estimated eight hours.  The viewer opening on the municipality
+# instead of the capital is the cheaper half of that problem.
+#
+# Native zoom stops at 17 because IGN Base is drawn cartography, not imagery:
+# past that the same linework is only magnified, while the seed quadruples per
+# level -- z18 measured at nine hours against z17's two.
+# Serving a second municipality means reviewing a second profile.  See ADR-057.
 SIUR_TILE_BOUNDS = {
+    "west": -3.763,
+    "south": 41.493,
+    "east": -3.403,
+    "north": 41.773,
+}
+SIUR_ORTHO_TILE_BOUNDS = {
     "west": -7.6,
     "south": 39.9,
     "east": -1.3,
     "north": 43.4,
 }
 SIUR_TILE_MIN_ZOOM = 0
-SIUR_TILE_MAX_ZOOM = 16
+SIUR_TILE_MAX_ZOOM = 17
 SIUR_ORTHO_TILE_MAX_ZOOM = 15
 SIUR_TILE_MAX_COUNT = 2_000_000
 SIUR_WMS_SUPERTILE_SIZE = 8
@@ -77,8 +105,11 @@ def reviewed_tile_coverage(
             profile=None,
         )
     ortho_profile = _is_siur_ortho(endpoint_url, remote_name)
+    default_bounds = (
+        SIUR_ORTHO_TILE_BOUNDS if ortho_profile else SIUR_TILE_BOUNDS
+    )
     return ReviewedTileCoverage(
-        bounds=normalized_bounds or dict(SIUR_TILE_BOUNDS),
+        bounds=normalized_bounds or dict(default_bounds),
         min_zoom=SIUR_TILE_MIN_ZOOM if min_zoom is None else min_zoom,
         max_zoom=(
             SIUR_ORTHO_TILE_MAX_ZOOM

@@ -958,6 +958,37 @@ export function selectLocalBaseMapLayer(
   );
 }
 
+/**
+ * El fondo por omisión para un mapa que no tiene controles de capas propios.
+ *
+ * El panel de `/mapa` deja elegir y recordar el mapa base; las pantallas que
+ * sólo necesitan algo debajo de sus marcadores no, y no pasarles nada es lo que
+ * dejaba el mapa del Ayuntamiento sobre una cuadrícula vacía. Aquí se resuelve
+ * el fondo que el propio catálogo trae por omisión y se fuerza su visibilidad:
+ * un fondo predeterminado que llega oculto no pinta nada, y el visor sólo sabe
+ * dibujar bases locales.
+ */
+export function defaultLocalBaseMapSelection(catalog: ReferenceCatalog): {
+  layers: SiurMapLayer[];
+  baseLayerId: number | null;
+} {
+  const preferences = reconcileSiurPreferences(catalog, null);
+  const candidates = buildSiurMapLayers(catalog, preferences);
+  const baseLayerId = resolveLocalBaseMapLayerId(candidates, undefined);
+  if (baseLayerId === null) {
+    return { layers: [], baseLayerId: null };
+  }
+  const selected = applyLocalBaseMapSelection(
+    candidates,
+    preferences,
+    baseLayerId,
+  );
+  return {
+    layers: listLocalBaseMapLayers(buildSiurMapLayers(catalog, selected)),
+    baseLayerId,
+  };
+}
+
 export function selectTopIdentifyLayer(
   layers: SiurMapLayer[],
   zoom: number,
