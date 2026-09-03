@@ -43,6 +43,7 @@ from app.reference_layers.models import (
 )
 from app.reference_layers.local_delivery import (
     catalog_local_delivery_availability,
+    catalog_served_tile_coverage,
 )
 from app.reference_layers.local_metadata import (
     LocalMetadataError,
@@ -409,6 +410,16 @@ def get_reference_catalog(
         if not service_attributions.get(service_id):
             service_attributions[service_id] = credit
 
+    # El catálogo de SIUR no publica límites ni zooms para sus fondos, así que
+    # se le añaden los que el espejo tiene de verdad. Sin esto el visor se abre
+    # donde diga una constante y deja acercarse ocho niveles más allá de la
+    # última tesela que existe.
+    served_coverage = catalog_served_tile_coverage(
+        db,
+        provider_key=snapshot.provider_key,
+        layers=layers,
+        availability=local_delivery_availability,
+    )
     layer_reads: list[ReferenceLayerRead] = []
     for layer in layers:
         setting = settings.get(layer.id)
@@ -420,6 +431,7 @@ def get_reference_catalog(
             if setting.opacity is not None:
                 effective_opacity = Decimal(setting.opacity)
         availability = delivery_availability[layer.id]
+        coverage = served_coverage.get(layer.id)
         mirror_status = mirror_statuses[layer.id]
         substitution = substitutions.get(layer.id)
         layer_reads.append(
@@ -427,6 +439,32 @@ def get_reference_catalog(
                 update={
                     "effective_visible": effective_visible,
                     "effective_opacity": float(effective_opacity),
+                    "bounds_json": (
+                        layer.bounds_json
+                        or (
+                            coverage.bounds
+                            if coverage is not None
+                            else None
+                        )
+                    ),
+                    "min_zoom": (
+                        layer.min_zoom
+                        if layer.min_zoom is not None
+                        else (
+                            coverage.min_zoom
+                            if coverage is not None
+                            else None
+                        )
+                    ),
+                    "max_zoom": (
+                        layer.max_zoom
+                        if layer.max_zoom is not None
+                        else (
+                            coverage.max_zoom
+                            if coverage is not None
+                            else None
+                        )
+                    ),
                     "delivery_available": (
                         availability.delivery_available
                     ),

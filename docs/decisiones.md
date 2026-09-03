@@ -1257,3 +1257,47 @@ la resolución de entrega completa, con su propia pregunta de caducidad, y no se
 hace hasta que se demuestre necesario. El único punto donde este ADR cede
 frescura —el segundo— tiene su constante a la vista y una función de reinicio
 para las pruebas, de modo que la próxima persona vea el precio antes de tocarlo.
+
+## ADR-061: El mapa se abre y se detiene donde llega su cartografía (2026-09-03)
+
+**Contexto.** Dos quejas del primer usuario real, y las dos con la misma raíz.
+El zoom permitía acercarse hasta el nivel 24 cuando el archivo local sólo tiene
+hasta el 17: los últimos siete niveles no añadían detalle, sólo agrandaban la
+misma tesela hasta que el rótulo del pueblo llenaba la pantalla. Y al entrar en
+la sección el mapa no se abría sobre el municipio, sino donde dijera una
+constante escrita en el código.
+
+Esa constante era mía y siempre fue un apaño: unas coordenadas de Fuentelcésped
+puestas a mano porque el visor abría en la capital de provincia. Servía para un
+despliegue y sólo para uno.
+
+**El dato existía y no llegaba.** `settings.json` de SIUR no publica límites ni
+zooms para sus mapas de fondo, así que el catálogo los guarda a nulo y el visor
+se quedaba sin nada con lo que encuadrarse ni con lo que frenar. Pero el espejo
+**sí lo sabe**: la envolvente y el zoom nativo forman parte de la definición
+revisada de la fuente y entran en su hash (ADR-057). `Municipality`, en cambio,
+no tiene coordenadas: no hay de dónde sacar el centro del pueblo por esa vía.
+
+**Decisión.**
+
+1. **El catálogo proyecta la cobertura que el espejo sirve de verdad**
+   (`catalog_served_tile_coverage`): límites y zooms de la fuente revisada, sólo
+   para capas con entrega local activa, y **sólo donde el catálogo no declara ya
+   un valor propio**. No muta nada, igual que la proyección de atribuciones.
+2. **El visor se abre encuadrado en esa envolvente** cuando no hay elementos que
+   situar ni un punto enfocado. Ya no hay coordenadas de ningún municipio
+   concreto en el código: un segundo ayuntamiento se abre sobre su pueblo porque
+   su perfil de cobertura es otro, no porque alguien edite una constante.
+3. **El zoom se detiene dos niveles por encima del nativo.** Se usa
+   `maxNativeZoom` para que Leaflet amplíe la última tesela archivada, y el mapa
+   se limita a `nativo + 2`. Dos niveles amplían de forma útil; el resto era
+   ruido. Sin cobertura declarada se conserva el tope de siempre.
+4. **Los límites llegan también a la capa de teselas**, así que Leaflet deja de
+   pedir cuadrados fuera de la zona replicada en lugar de coleccionar 404.
+
+**Consecuencias.** La constante de reserva sigue existiendo para el instante
+anterior a que el catálogo cargue, pero deja de decidir nada en cuanto llega el
+fondo. Al alejar el zoom se sigue viendo la envolvente municipal recortada sobre
+el vacío: eso es ADR-057 y no se arregla aquí; se arreglaría sembrando los
+niveles lejanos de un área mayor, que es barato en teselas pero obliga a rehacer
+las autorizaciones y a resembrar.

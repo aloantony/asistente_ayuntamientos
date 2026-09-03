@@ -8,10 +8,28 @@ import {
 } from "../lib/referenceLayers";
 import { MunicipalMap } from "./MunicipalMap";
 
-const leafletHarness = vi.hoisted(() => ({
-  maps: [] as unknown[],
-  tileLayers: [] as unknown[],
-}));
+const leafletHarness = vi.hoisted(
+  () =>
+    ({
+      maps: [],
+      tileLayers: [],
+    }) as {
+      maps: {
+        emit: (eventName: string, event: unknown) => void;
+        fittedBounds: { points: unknown } | null;
+        maxZoom: number;
+      }[];
+      tileLayers: {
+        emit: (eventName: string) => void;
+        initialUrl: string;
+        opacity: number | null;
+        options: Record<string, unknown>;
+        setUrlHistory: string[];
+        url: string;
+        zIndex: number | null;
+      }[];
+    },
+);
 
 vi.mock("leaflet", () => {
   type EventHandler = (event: unknown) => void;
@@ -19,7 +37,10 @@ vi.mock("leaflet", () => {
   class FakeBounds {
     private valid: boolean;
 
+    readonly points: unknown;
+
     constructor(points: unknown) {
+      this.points = points;
       this.valid = Array.isArray(points) && points.length > 0;
     }
 
@@ -85,7 +106,10 @@ vi.mock("leaflet", () => {
         ?.forEach((handler) => handler(event));
     }
 
-    fitBounds() {
+    fittedBounds: { points: unknown } | null = null;
+
+    fitBounds(bounds: { points: unknown }) {
+      this.fittedBounds = bounds;
       return this;
     }
 
@@ -96,6 +120,8 @@ vi.mock("leaflet", () => {
     getZoom() {
       return this.zoom;
     }
+
+    maxZoom = 24;
 
     hasLayer(layer: unknown) {
       return this.layers.has(layer);
@@ -131,6 +157,11 @@ vi.mock("leaflet", () => {
       return this;
     }
 
+    setMaxZoom(zoom: number) {
+      this.maxZoom = zoom;
+      return this;
+    }
+
     setView() {
       return this;
     }
@@ -153,9 +184,12 @@ vi.mock("leaflet", () => {
     url: string;
     zIndex: number | null = null;
 
-    constructor(url: string) {
+    readonly options: Record<string, unknown>;
+
+    constructor(url: string, options: Record<string, unknown> = {}) {
       this.initialUrl = url;
       this.url = url;
+      this.options = options;
     }
 
     addTo(map: FakeMap) {
@@ -206,14 +240,15 @@ vi.mock("leaflet", () => {
         addTo: () => undefined,
       }),
     },
-    latLngBounds: (points: unknown) => new FakeBounds(points),
+    latLngBounds: (...points: unknown[]) =>
+      new FakeBounds(points.length > 1 ? points : points[0]),
     map: (container: HTMLElement) => {
       const map = new FakeMap(container);
       leafletHarness.maps.push(map);
       return map;
     },
-    tileLayer: (url: string) => {
-      const tileLayer = new FakeTileLayer(url);
+    tileLayer: (url: string, options: Record<string, unknown> = {}) => {
+      const tileLayer = new FakeTileLayer(url, options);
       leafletHarness.tileLayers.push(tileLayer);
       return tileLayer;
     },
@@ -222,12 +257,15 @@ vi.mock("leaflet", () => {
 
 type FakeMapHandle = {
   emit: (eventName: string, event: unknown) => void;
+  fittedBounds: { points: unknown } | null;
+  maxZoom: number;
 };
 
 type FakeTileLayerHandle = {
   emit: (eventName: string) => void;
   initialUrl: string;
   opacity: number | null;
+  options: Record<string, unknown>;
   setUrlHistory: string[];
   url: string;
   zIndex: number | null;
@@ -419,6 +457,78 @@ describe("MunicipalMap SIUR tile runtime", () => {
     expect(onSiurTileLoad).toHaveBeenCalledTimes(1);
     expect(onSiurTileLoad).toHaveBeenCalledWith(base.layerId);
     expect(onSiurTileError).toHaveBeenCalledTimes(2);
+  });
+
+  it("no deja acercarse más allá de donde el archivo tiene detalle", async () => {
+    // Un archivo nativo hasta z17 sólo puede ampliarse; permitir 24 convertía
+    // el rótulo del pueblo en un borrón a pantalla completa.
+    const base = makeLayer({
+      bounds: { west: -3.763, south: 41.493, east: -3.403, north: 41.773 },
+      identifyAvailable: false,
+      layerId: 10,
+      maxZoom: 17,
+      minZoom: 0,
+      opacity: 1,
+      role: "base",
+      styleId: null,
+      title: "MAPA",
+      versionId: 3,
+      zIndex: 1,
+    });
+
+    render(
+      <MunicipalMap
+        {...mapProps({ baseLayerId: base.layerId, siurLayers: [base] })}
+      />,
+    );
+
+    await waitFor(() => expect(leafletHarness.tileLayers).toHaveLength(1));
+    const tileLayer = leafletHarness.tileLayers[0];
+    expect(tileLayer.options.maxNativeZoom).toBe(17);
+    expect(tileLayer.options.maxZoom).toBe(19);
+    expect(leafletHarness.maps[0].maxZoom).toBe(19);
+  });
+
+  it("se abre encuadrado en la cartografía que tiene, sin elementos", async () => {
+    // Es lo que hace que un ayuntamiento vea su pueblo sin que sus coordenadas
+    // estén escritas en el código.
+    const bounds = {
+      west: -3.763,
+      south: 41.493,
+      east: -3.403,
+      north: 41.773,
+    };
+    const base = makeLayer({
+      bounds,
+      identifyAvailable: false,
+      layerId: 10,
+      maxZoom: 17,
+      opacity: 1,
+      role: "base",
+      styleId: null,
+      title: "MAPA",
+      versionId: 3,
+      zIndex: 1,
+    });
+
+    render(
+      <MunicipalMap
+        {...mapProps({
+          baseLayerId: base.layerId,
+          items: [],
+          siurLayers: [base],
+        })}
+      />,
+    );
+
+    await waitFor(() =>
+      expect(leafletHarness.maps[0].fittedBounds).not.toBeNull(),
+    );
+    expect(leafletHarness.maps[0].fittedBounds?.points).toEqual([
+      [bounds.south, bounds.west],
+      [bounds.north, bounds.east],
+    ]);
+    expect(leafletHarness.maps[0].maxZoom).toBe(19);
   });
 
   it("identifies the top local layer using the projected tile pixel", async () => {
