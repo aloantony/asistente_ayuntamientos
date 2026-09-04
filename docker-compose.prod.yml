@@ -61,14 +61,6 @@ services:
     restart: unless-stopped
     env_file:
       - .env.production
-    environment:
-      # Entrega de cartografía SIUR por proxy al WMS de IDECyL. Falla cerrada:
-      # sin este opt-in explícito el backend no sale a la red aunque exista
-      # catálogo y atestación (ADR-055). Producción no monta GeoServer, así que
-      # el espejo local no está disponible y ésta es la única vía de entrega.
-      # Activarla exige además una revisión humana de licencia firmada por
-      # servicio; sin ella la atestación es de revocación y no se sirve nada.
-      REFERENCE_REMOTE_PROXY_ENABLED: ${REFERENCE_REMOTE_PROXY_ENABLED:-false}
     # --proxy-headers con --forwarded-allow-ips fijado a la IP estática de Caddy:
     # sin ello el limitador de login metería a todos los clientes en el mismo
     # cubo, y con "*" cualquiera podría falsear X-Forwarded-For y esquivarlo.
@@ -88,12 +80,6 @@ services:
       - /api
     volumes:
       - document_storage:/var/lib/asistente_ayuntamientos/documents
-      # El fondo cartográfico replicado se sirve leyendo este archivo.
-      - reference_artifacts:/var/lib/asistente_ayuntamientos/reference-artifacts:ro
-    # El worker lo escribe como root:REFERENCE_STORAGE_GID con 0640, así que la
-    # API necesita ese grupo para leer lo que ella misma sirve (ADR-057).
-    group_add:
-      - "${REFERENCE_STORAGE_GID:-2000}"
     depends_on:
       postgres:
         condition: service_healthy
@@ -245,5 +231,3 @@ volumes:
   redis_data:
   caddy_data:
   caddy_config:
-  reference_artifacts:
-  reference_transient:

@@ -35,3 +35,4 @@ backend/.venv/
 
 ops/geoserver-gwc-health/.spotless-index
 ops/geoserver-gwc-health/target/
+.claude/worktrees/

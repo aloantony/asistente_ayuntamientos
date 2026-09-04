@@ -1,132 +1,35 @@
-x-gwc-contract-environment: &gwc-contract-environment
-  GEOWEBCACHE_DISK_QUOTA_CLEANUP_SECONDS: ${GEOWEBCACHE_DISK_QUOTA_CLEANUP_SECONDS:-10}
-  GEOWEBCACHE_DISK_QUOTA_GIB: ${GEOWEBCACHE_DISK_QUOTA_GIB:-20}
-  GEOWEBCACHE_DISK_QUOTA_MIN_FREE_GIB: ${GEOWEBCACHE_DISK_QUOTA_MIN_FREE_GIB:-5}
-  GEOWEBCACHE_DISK_QUOTA_POLICY: ${GEOWEBCACHE_DISK_QUOTA_POLICY:-LRU}
-  GEOWEBCACHE_PHYSICAL_BURST_MARGIN_GIB: ${GEOWEBCACHE_PHYSICAL_BURST_MARGIN_GIB:-2}
-  GEOWEBCACHE_PHYSICAL_HARD_LIMIT_GIB: ${GEOWEBCACHE_PHYSICAL_HARD_LIMIT_GIB:-28}
-  LOCAL_GEOSERVER_BASE_URL: ${LOCAL_GEOSERVER_BASE_URL:-http://127.0.0.1:8081/geoserver}
-  LOCAL_GEOSERVER_TIMEOUT_SECONDS: ${LOCAL_GEOSERVER_TIMEOUT_SECONDS:-8}
-
-x-gwc-admin-environment: &gwc-admin-environment
-  <<: *gwc-contract-environment
-  GEOSERVER_ADMIN_PASSWORD: ${GEOSERVER_ADMIN_PASSWORD:?GEOSERVER_ADMIN_PASSWORD must be set}
-  GEOSERVER_ADMIN_USER: ${GEOSERVER_ADMIN_USER:?GEOSERVER_ADMIN_USER must be set}
-
 services:
   backend:
     build:
       context: ./backend
     env_file:
       - .env
-    environment:
-      # Publication is worker-only.  Remove its credentials from the web API
-      # even though both services load the shared development env file.
-      GEOSERVER_ADMIN_USER: ""
-      GEOSERVER_ADMIN_PASSWORD: ""
-      LOCAL_GEOSERVER_POSTGIS_PASSWORD: ""
-      LOCAL_GEOSERVER_BASE_URL: http://127.0.0.1:8081/geoserver
-      # Local reference delivery is the production default. Remote WMS
-      # fallback requires an explicit operator opt-in.
-      REFERENCE_REMOTE_PROXY_ENABLED: ${REFERENCE_REMOTE_PROXY_ENABLED:-false}
-    # The API serves mirrored tiles straight out of the artifact store, which
-    # the reference worker writes as root:REFERENCE_STORAGE_GID with 0640.  It
-    # reads them as an unprivileged user, so it needs that group the way the
-    # GeoServer readers do; without it every mirrored tile is a 502.
-    group_add:
-      - "${REFERENCE_STORAGE_GID:-2000}"
     network_mode: host
     command:
       ["uvicorn", "app.main:app", "--host", "127.0.0.1", "--port", "8000"]
     volumes:
       - document_storage:/var/lib/asistente_ayuntamientos/documents
-      - reference_artifacts:/var/lib/asistente_ayuntamientos/reference-artifacts:ro
     depends_on:
       postgres:
         condition: service_healthy
       redis:
         condition: service_started
-      gwc-gateway:
-        condition: service_healthy
-        restart: true
 
   worker:
     build:
       context: ./backend
-    # New reference artifacts are root-owned but share this private group with
-    # the unprivileged GeoServer process (directories 0750, blobs 0640).
-    user: "0:${REFERENCE_STORAGE_GID:-2000}"
     env_file:
       - .env
-    environment:
-      GEOSERVER_ADMIN_USER: ""
-      GEOSERVER_ADMIN_PASSWORD: ""
-      LOCAL_GEOSERVER_POSTGIS_PASSWORD: ""
-      LOCAL_GEOSERVER_BASE_URL: http://127.0.0.1:8081/geoserver
     network_mode: host
     command:
       ["sh", "-c", "rq worker --with-scheduler --url \"$REDIS_URL\" default"]
     volumes:
       - document_storage:/var/lib/asistente_ayuntamientos/documents
-      - reference_artifacts:/var/lib/asistente_ayuntamientos/reference-artifacts
     depends_on:
       postgres:
         condition: service_healthy
       redis:
         condition: service_started
-      gwc-gateway:
-        condition: service_healthy
-        restart: true
-
-  reference-worker:
-    build:
-      context: ./backend
-    env_file:
-      - .env
-    environment:
-      # Publication still traverses the fail-closed gateway; only the private
-      # one-shot bootstrap may address Tomcat on port 8080.
-      LOCAL_GEOSERVER_BASE_URL: http://127.0.0.1:8081/geoserver
-    user: "0:${REFERENCE_STORAGE_GID:-2000}"
-    network_mode: host
-    restart: unless-stopped
-    command:
-      ["python", "-m", "app.reference_layers.mirror_runtime", "worker"]
-    volumes:
-      - reference_artifacts:/var/lib/asistente_ayuntamientos/reference-artifacts
-      # Scratch aislado del CAS servido y de las copias de seguridad. Permite
-      # derivar productos autorizados sin conservar el fichero bruto.
-      - reference_transient:/var/lib/asistente_ayuntamientos/reference-transient
-    depends_on:
-      postgres:
-        condition: service_healthy
-      gwc-gateway:
-        condition: service_healthy
-        restart: true
-
-  reference-scheduler:
-    build:
-      context: ./backend
-    env_file:
-      - .env
-    user: "0:${REFERENCE_STORAGE_GID:-2000}"
-    environment:
-      GEOSERVER_ADMIN_USER: ""
-      GEOSERVER_ADMIN_PASSWORD: ""
-      LOCAL_GEOSERVER_POSTGIS_PASSWORD: ""
-      LOCAL_GEOSERVER_BASE_URL: http://127.0.0.1:8081/geoserver
-    network_mode: host
-    restart: unless-stopped
-    command:
-      ["python", "-m", "app.reference_layers.mirror_runtime", "scheduler"]
-    volumes:
-      - reference_artifacts:/var/lib/asistente_ayuntamientos/reference-artifacts
-    depends_on:
-      postgres:
-        condition: service_healthy
-      gwc-gateway:
-        condition: service_healthy
-        restart: true
 
   frontend:
     build:
@@ -162,58 +65,6 @@ services:
     volumes:
       - postgres_data:/var/lib/postgresql/data
 
-  # Owns the private network namespace shared by GeoServer and its gate. The
-  # only host mapping targets gateway port 8081; GeoServer port 8080 is never
-  # published, so a stopped or unhealthy gateway fails closed.
-  geoserver-network:
-    image: alpine:3.21
-    user: "65534:65534"
-    read_only: true
-    cap_drop: ["ALL"]
-    security_opt: ["no-new-privileges:true"]
-    command: ["tail", "-f", "/dev/null"]
-    ports:
-      - "127.0.0.1:${GEOSERVER_PORT:-8081}:8081"
-
-  geoserver:
-    build:
-      context: .
-      dockerfile: ops/geoserver/Dockerfile
-    image: asistente-ayuntamientos-geoserver:3.0.0-siur
-    network_mode: service:geoserver-network
-    environment:
-      GEOSERVER_ADMIN_PASSWORD: ${GEOSERVER_ADMIN_PASSWORD:?GEOSERVER_ADMIN_PASSWORD must be set}
-      GEOSERVER_ADMIN_USER: ${GEOSERVER_ADMIN_USER:?GEOSERVER_ADMIN_USER must be set}
-      RUN_UNPRIVILEGED: "true"
-      RUN_WITH_USER_UID: "999"
-      RUN_WITH_USER_GID: ${REFERENCE_STORAGE_GID:-2000}
-      # The bounded cache mount is provisioned with exact ownership on the
-      # host. Never recursively chown a potentially multi-million-tile cache.
-      CHANGE_OWNERSHIP_ON_FOLDERS: "/opt /opt/geoserver_data"
-      SKIP_DEMO_DATA: "true"
-      # This path stores persistent GWC configuration, not the tile cache.
-      # The explicit FileBlobStore below points tiles at the separate v4 mount.
-      GEOWEBCACHE_CACHE_DIR: /opt/geoserver_data/gwc
-    volumes:
-      - geoserver_data:/opt/geoserver_data
-      # Versioned tile-only volume. Pre-start XML enables quota; the REST
-      # bootstrap creates and re-reads only the exact FileBlobStore.
-      - type: volume
-        source: geowebcache_tile_cache_v4
-        target: /var/lib/geowebcache
-        volume:
-          nocopy: true
-      - reference_artifacts:/mnt/reference_artifacts:ro
-    depends_on:
-      geoserver-network:
-        condition: service_started
-        restart: true
-      gwc-config-init:
-        condition: service_completed_successfully
-        restart: true
-      postgres:
-        condition: service_healthy
-
   redis:
     image: redis:7-alpine
     ports:
@@ -224,178 +75,6 @@ services:
       timeout: 5s
       retries: 10
 
-  gwc-config-init:
-    build:
-      context: ./backend
-    user: "0:${REFERENCE_STORAGE_GID:-2000}"
-    read_only: true
-    network_mode: none
-    environment:
-      <<: *gwc-contract-environment
-      PYTHONDONTWRITEBYTECODE: "1"
-    command:
-      [
-        "python",
-        "-m",
-        "app.reference_layers.gwc_config_init",
-        "--geoserver-data-path",
-        "/opt/geoserver_data",
-        "--cache-path",
-        "/var/lib/geowebcache",
-        "--owner-uid",
-        "999",
-        "--owner-gid",
-        "${REFERENCE_STORAGE_GID:-2000}",
-        "--apply",
-      ]
-    volumes:
-      - geoserver_data:/opt/geoserver_data
-      - type: volume
-        source: geowebcache_tile_cache_v4
-        target: /var/lib/geowebcache
-        read_only: true
-        volume:
-          nocopy: true
-
-  gwc-bootstrap:
-    build:
-      context: ./backend
-    # Reads the cache like the gateway does, so it needs the same shared group.
-    # Without it the image default (uid 10001, gid 999) cannot enter the 0750
-    # "tmp" directory the FileBlobStore creates as 999:2000, and the inventory
-    # reports the resulting PermissionError as "cache changed during inventory".
-    user: "65534:${REFERENCE_STORAGE_GID:-2000}"
-    environment:
-      <<: *gwc-admin-environment
-      # Private loopback in the shared namespace; never published on the host.
-      LOCAL_GEOSERVER_BASE_URL: http://127.0.0.1:8080/geoserver
-    network_mode: service:geoserver-network
-    restart: "no"
-    command:
-      [
-        "python",
-        "-m",
-        "app.reference_layers.gwc_bootstrap",
-        "--cache-path",
-        "/var/lib/geowebcache",
-        "--wait-seconds",
-        "180",
-      ]
-    volumes:
-      - type: volume
-        source: geowebcache_tile_cache_v4
-        target: /var/lib/geowebcache
-        read_only: true
-        volume:
-          nocopy: true
-    depends_on:
-      geoserver:
-        condition: service_started
-        # Compose-managed GeoServer updates/restarts rerun the gate; the
-        # restart chain above then restarts consumers only after success.
-        restart: true
-
-  gwc-gateway:
-    build:
-      context: ./backend
-    user: "65534:${REFERENCE_STORAGE_GID:-2000}"
-    read_only: true
-    cap_drop: ["ALL"]
-    security_opt: ["no-new-privileges:true"]
-    environment:
-      <<: *gwc-admin-environment
-      GWC_GATEWAY_PUBLIC_PORT: ${GEOSERVER_PORT:-8081}
-      LOCAL_GEOSERVER_BASE_URL: http://127.0.0.1:8080/geoserver
-    network_mode: service:geoserver-network
-    restart: unless-stopped
-    command:
-      [
-        "uvicorn",
-        "app.reference_layers.gwc_gateway:app",
-        "--host",
-        "0.0.0.0",
-        "--port",
-        "8081",
-        "--no-access-log",
-      ]
-    volumes:
-      - type: volume
-        source: geowebcache_tile_cache_v4
-        target: /var/lib/geowebcache
-        read_only: true
-        volume:
-          nocopy: true
-    healthcheck:
-      test:
-        [
-          "CMD",
-          "python",
-          "-m",
-          "app.reference_layers.gwc_gateway",
-          "--healthcheck",
-        ]
-      interval: 5s
-      timeout: 4s
-      retries: 3
-      start_period: 5s
-    depends_on:
-      geoserver-network:
-        condition: service_started
-        restart: true
-      gwc-bootstrap:
-        condition: service_completed_successfully
-        restart: true
-
-  gwc-ops:
-    profiles: ["operations"]
-    build:
-      context: ./backend
-    environment:
-      <<: *gwc-admin-environment
-      LOCAL_GEOSERVER_BASE_URL: http://127.0.0.1:8080/geoserver
-    network_mode: service:geoserver-network
-    command:
-      [
-        "python",
-        "-m",
-        "app.reference_layers.gwc_quota",
-        "--cache-path",
-        "/var/lib/geowebcache",
-      ]
-    volumes:
-      - type: volume
-        source: geowebcache_tile_cache_v4
-        target: /var/lib/geowebcache
-        read_only: true
-        volume:
-          nocopy: true
-    depends_on:
-      geoserver:
-        condition: service_started
-
-  siur-recovery:
-    profiles: ["operations"]
-    build:
-      context: .
-      dockerfile: ops/siur-disaster-recovery.Dockerfile
-    # The sources are private root/group-owned volumes. They remain read-only;
-    # the only writable mount is an explicit operator-provided backup/drill
-    # destination.
-    user: "0:${REFERENCE_STORAGE_GID:-2000}"
-    network_mode: host
-    volumes:
-      - reference_artifacts:/sources/reference_artifacts:ro
-      - geoserver_data:/sources/geoserver_data:ro
-
 volumes:
   postgres_data:
   document_storage:
-  reference_artifacts:
-  reference_transient:
-  geoserver_data:
-  geowebcache_tile_cache_v4:
-    driver: local
-    driver_opts:
-      type: none
-      o: bind
-      device: ${GEOWEBCACHE_TILE_CACHE_HOST_PATH:?GEOWEBCACHE_TILE_CACHE_HOST_PATH must reference a dedicated hard-limited filesystem mount}
