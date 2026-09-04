@@ -176,133 +176,25 @@ curl -s -o /dev/null -w '%{http_code}\n' -X POST https://www.miconcejo.es/api/au
 
 ---
 
-## 4 bis. Cartografía SIUR en el mapa municipal
+## 4 bis. Cartografía del municipio
 
-El mapa de `/mapa` se sirve por **dos vías distintas**, y hacen falta las dos:
+No hay nada que desplegar. El plano del municipio es un fichero estático
+que viaja dentro de la imagen del frontend
+(`frontend/public/cartografia/<municipio>.json`): huellas de edificio del
+Catastro y viales, aguas y usos del suelo de OpenStreetMap, ya reproyectados
+a WGS84. No hay GeoServer, ni GeoWebCache, ni espejo que sincronizar, ni
+volúmenes de teselas que vigilar. Ver ADR-064.
 
-- **Las capas temáticas de IDECyL, por proxy.** El navegador nunca habla con
-  `idecyl.jcyl.es`, sólo con nuestra API, que pide la tesela y la cachea en
-  Redis (ADR-055).
-- **El fondo del mapa, desde el espejo local.** Las capas de fondo son del IGN,
-  no de la Junta, y el proxy sólo habla WMS contra `idecyl.jcyl.es`. Sin espejo,
-  las capas temáticas flotan sobre un cuadriculado vacío (ADR-057).
+Dar de alta un municipio nuevo es añadir su fichero y su entrada en
+`frontend/app/lib/pueblo.ts`, y reconstruir la imagen del frontend.
 
-El espejo **no necesita GeoServer**: sembrar escribe un MBTiles y servir sólo lo
-lee. Producción no monta GeoServer y aun así sirve el fondo desde su propio
-disco.
-
-### El proxy de IDECyL
-
-Falla cerrado por diseño. Hacen falta las cuatro piezas, en este orden:
-
-1. **Catálogo promovido.** Sin una instantánea `applied` y vigente,
-   `/reference-layers/catalog` responde 503 y el mapa no lista ninguna capa.
-   `settings.json` de SIUR cambia con el tiempo, así que la promoción se revisa
-   cada vez y no se puede copiar la de desarrollo:
-
-   ```bash
-   docker compose --env-file .env.production -f docker-compose.prod.yml \
-     exec backend python -m app.reference_layers.siur_sync \
-     --settings /ruta/settings.json --wmc /ruta/wmc.xml
-   ```
-
-   El dry-run imprime conteos y hashes; para `--apply` hay que repetirlos con
-   las opciones `--approved-*`.
-
-2. **Revisión humana de licencia, por servicio.** Un documento
-   `siur-license-review-v1` firmado por una persona identificada. No se aprueba
-   automáticamente: sin él la atestación es de revocación y no se sirve nada.
-   El análisis del aviso legal de la Junta está en
-   `siur-mirror-authorization-review.md`.
-
-3. **Evidencia de entrega importada**, con los cinco hashes aprobados:
-
-   ```bash
-   docker compose --env-file .env.production -f docker-compose.prod.yml \
-     exec backend python -m app.reference_layers.siur_delivery_import \
-     --capabilities /ruta/GetCapabilities.xml \
-     --license-review /ruta/license-review.json
-   ```
-
-   El GetCapabilities se descarga **a mano** y se revisa antes; el importador
-   sólo lee ficheros locales y nunca acepta una URL. Pídelo en **1.3.0**: el
-   1.1.1 de GeoServer lleva DOCTYPE y el parser prohíbe DTD por defensa XXE.
-
-4. **El opt-in del operador**, en `.env.production`:
-
-   ```
-   REFERENCE_REMOTE_PROXY_ENABLED=true
-   ```
-
-   Es lo último que se activa, y basta con recrear el backend
-   (`up -d backend`), sin `down`.
-
-### El espejo del fondo
-
-Tres piezas de despliegue, ya recogidas en `docker-compose.prod.yml`:
-
-- el volumen `reference_artifacts`, montado `:ro` en el backend — es el archivo
-  que la API lee para servir cada tesela;
-- `group_add` con `REFERENCE_STORAGE_GID` en el backend, porque el worker
-  escribe el archivo como `root:<gid>` con 0640 y sin ese grupo la API no puede
-  leer lo que ella misma sirve: **todas las teselas del espejo salen 502**;
-- el volumen `reference_transient`, para el trabajo intermedio de la siembra.
-
-Y tres pasos de operación:
-
-1. **Reconciliar las fuentes** contra el catálogo promovido:
-
-   ```bash
-   docker compose --env-file .env.production -f docker-compose.prod.yml \
-     exec backend python -m app.reference_layers.mirror_reconcile --apply
-   ```
-
-2. **Autorización de espejo, por fuente.** Un documento
-   `siur-mirror-authorization-v1`, distinto y más exigente que la revisión de
-   licencia del proxy: copiar obliga a más que servir de intermediario. El fondo
-   es del IGN, y son sus propios servicios los que declaran `CC BY 4.0 scne.es`
-   en el `AccessConstraints` de sus capacidades — mirar ahí antes que cualquier
-   tabla de productos. Primaria y respaldo usan protocolos distintos
-   (`wms_tiles` y `wmts`), así que necesitan **una autorización cada una**.
-
-3. **Sembrar.** El servicio `backend` monta el archivo en sólo lectura y la red
-   `data` es interna, sin salida a Internet, así que la siembra va en un
-   contenedor de un solo uso conectado a las dos redes:
-
-   ```bash
-   docker create --name anacleto-siembra -u 0:2000 --env-file .env.production \
-     --network anacleto_data \
-     -v anacleto_reference_artifacts:/var/lib/asistente_ayuntamientos/reference-artifacts \
-     -v anacleto_reference_transient:/var/lib/asistente_ayuntamientos/reference-transient \
-     anacleto-backend python -m app.reference_layers.mirror_runtime worker --once
-   docker network connect anacleto_edge anacleto-siembra
-   docker start -a anacleto-siembra
-   ```
-
-   El perfil municipal son unas 24.500 teselas y unos 400 MB: siete minutos, a
-   unas 171 teselas por minuto. `tile_seed` **no reintenta**, así que un solo
-   502 del origen tumba la siembra entera y hay que repetirla.
-
-### Comprobación
-
-```bash
-curl -s -o /dev/null -w '%{http_code}\n' https://www.miconcejo.es/api/health
-```
-
-Con sesión iniciada, `/mapa` debe listar el árbol de capas y pintar las teselas.
-Si el árbol aparece pero las capas salen deshabilitadas, el bloqueo lo dice el
-propio catálogo: `remote_proxy_disabled` es el punto 4, `attestation_missing` el
-3, y `license_not_approved` el 2. Para las capas de fondo el bloqueo es del
-espejo: `mirror_authorization_missing` es su punto 2 y `local_not_ready`
-significa autorizada pero todavía sin sembrar.
-
-### Lo que IDECyL no ofrece
-
-Sus servicios no anuncian `GetLegendGraphic` ni `application/json` en
-`GetFeatureInfo`, así que **leyendas e identificación no están disponibles**. Es
-una limitación del origen, no un fallo del despliegue. Las teselas sí funcionan.
-
----
+Al desplegar la retirada del espejo hay que aplicar la migración
+`20260904_0045`, que suelta sus treinta tablas. Los volúmenes
+`reference_artifacts`, `reference_transient`, `geoserver_data` y
+`geowebcache_tile_cache_v4` dejan de estar declarados: quedan huérfanos y **no
+se borran solos**. Retíralos a mano y de uno en uno cuando lo decidas
+(`docker volume rm <nombre>`); recuerda que `prune` está prohibido en esta
+máquina porque también convive el desarrollo.
 
 ## 5. Copias de seguridad
 

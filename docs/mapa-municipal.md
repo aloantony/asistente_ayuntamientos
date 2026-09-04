@@ -1,6 +1,6 @@
 # Mapa municipal
 
-Actualizado: 2026-07-17.
+Actualizado: 2026-09-04.
 
 ## Propósito
 
@@ -30,11 +30,15 @@ En v1 solo se crean puntos. Cada punto guarda:
 
 La plataforma de base de datos dispone de PostgreSQL 17 con pgvector y PostGIS. La revisión `20260717_0030` habilita PostGIS como capacidad compartida, pero no cambia todavía el dominio `geo_locations`: los puntos municipales siguen usando sus columnas y el GeoJSON textual actuales. La lógica de geometría permanece aislada en `app/geo/geometry.py` para que una migración posterior a columnas espaciales sea explícita y comprobable.
 
-## Base para capas territoriales
+## El plano del pueblo
 
-PostGIS se incorpora como prerrequisito de la integración territorial centralizada. Permitirá almacenar y consultar los vectores descargables de SIUR, conservar su CRS de origen y servir después teselas optimizadas al navegador. Esta revisión no importa datos de SIUR, no crea tablas de features y no modifica el mapa visible.
+El fondo del mapa es un plano del municipio servido que viaja con la aplicación: `frontend/public/cartografia/<municipio>.json`. Reúne las huellas de edificio del Catastro (servicio INSPIRE Buildings, reproyectadas de UTM 30N a WGS84) y los viales, aguas y usos del suelo de OpenStreetMap. Fuentelcésped ocupa 222 KB y se descarga una vez por sesión.
 
-La tolerancia prevista cubre lentitud o indisponibilidad de SIUR mediante sincronización, espejo y caché en la infraestructura central. El ayuntamiento seguirá necesitando conexión a `asistente-ayuntamientos`; no se contempla un servidor local, paquetes offline ni funcionamiento sin Internet.
+No hay servidor de mapas: ni teselas externas, ni WMS, ni espejo que sincronizar. `frontend/app/lib/pueblo.ts` guarda el registro de municipios con plano y lo resuelve por código INE —y, a falta de código, por nombre normalizado—; un municipio sin plano lo dice en pantalla y el resto del mapa sigue funcionando. Cada ayuntamiento que se contrata añade su fichero y su entrada. Ver ADR-064.
+
+El dibujo lo hace `MunicipalMap` con Leaflet en modo SVG: cada capa lleva una clase y `MunicipalMap.module.css` decide el color, de modo que el modo oscuro sale de los tokens de la aplicación. Lo que se enseña depende del zoom (término, pueblo, calle) y todo lo que sobresale del límite municipal se tapa con una máscara —un rectángulo con el término como agujero— en lugar de recortar la geometría.
+
+PostGIS sigue habilitado en la base de datos (revisión `20260717_0030`) como capacidad compartida, pero el dominio `geo_locations` no la usa todavía: los puntos municipales siguen en sus columnas y su GeoJSON textual.
 
 ## API
 
