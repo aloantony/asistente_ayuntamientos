@@ -374,8 +374,18 @@ textarea:disabled {
   width: auto;
 }
 
+/* La regla de arriba viste los campos de texto: ancho completo, relleno, borde
+ * y fondo. Una casilla no es un campo de texto, y sin deshacer aquello se
+ * estira hasta ocupar la fila entera y empuja fuera a su propia etiqueta. Cada
+ * sitio que ponía una casilla venía acordándose de escribir `width: auto`; el
+ * que se olvidaba —el árbol de capas del mapa— enseñaba la fila sin rótulo. */
 input[type="checkbox"],
 input[type="radio"] {
+  flex: none;
+  width: auto;
+  padding: 0;
+  border: none;
+  background: none;
   accent-color: var(--text);
 }
 
