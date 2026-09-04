@@ -679,6 +679,20 @@ def _direct_child_texts(
     names: set[str],
     max_chars: int,
 ) -> list[str]:
+    """Los valores admitidos de un elemento, sin repetir y en su orden.
+
+    Aquí sólo se leen listas de «lo que este servicio admite»: formatos de
+    imagen y sistemas de referencia. Repetir uno no dice nada distinto de
+    declararlo una vez, y el propio código ya las trataba como conjuntos unas
+    líneas más abajo (`dict.fromkeys`). Rechazar el documento por un duplicado
+    era incoherente con eso y tenía un coste real: el PNOA del IGN declara
+    `EPSG:32631` dos veces entre sus veintiún sistemas, y por esa redundancia
+    la ortofoto entera quedaba fuera del espejo.
+
+    La duplicación que sí importa —dos colecciones con el mismo nombre, que
+    haría ambiguo a qué capa nos referimos— se sigue rechazando aparte.
+    """
+
     values = [
         value
         for child in element
@@ -686,9 +700,7 @@ def _direct_child_texts(
         for value in [_clean_text(child.text, max_chars)]
         if value is not None
     ]
-    if len(values) != len(set(values)):
-        raise SourceProbeError("capabilities contains duplicate values")
-    return values
+    return list(dict.fromkeys(values))
 
 
 def _select_entry(

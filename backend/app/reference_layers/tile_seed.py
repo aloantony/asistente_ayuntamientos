@@ -6,6 +6,9 @@ from collections.abc import Callable, Iterable, Iterator, Mapping
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 import hashlib
+import logging
+import random
+import time
 from io import BytesIO
 from itertools import islice
 import math
@@ -27,15 +30,19 @@ from app.reference_layers.local_tile_archive import validate_tile_image
 from app.reference_layers.mirror_coverage import (
     SIUR_WMS_SUPERTILE_COVERAGE_PROFILES,
 )
+from app.core.config import settings
 from app.reference_layers.safe_download import (
     DownloadHTTPError,
     DownloadIntegrityError,
     DownloadLimitError,
     HTTPSDownloadPolicy,
+    SafeDownloadError,
     SafeHTTPSDownloader,
 )
 from app.reference_layers.wms_proxy import TILE_SIZE, tile_bbox
 
+
+logger = logging.getLogger(__name__)
 
 TILE_SOURCE_SCHEMA = "reference-tile-source/v1"
 COORDINATE_HASH_SCHEMA = "xyz-z-x-y-newline-v1"
@@ -1362,6 +1369,62 @@ def _encode_wms_tile(
     return payload
 
 
+def retrying_tile_fetcher(
+    fetch: TileFetcher,
+    *,
+    attempts: int | None = None,
+    base_seconds: float | None = None,
+    max_seconds: float | None = None,
+    sleep: Callable[[float], None] = time.sleep,
+) -> TileFetcher:
+    """Retry only what the download layer classified as transient.
+
+    A seed is tens of thousands of consecutive requests against a public
+    service, and a single 502 used to discard the whole run -- hours of work
+    and of somebody else's bandwidth thrown away because one response arrived
+    badly. The classification already exists (``SafeDownloadError.retryable``),
+    so nothing is guessed here: a 403, a 404, a wrong media type or a URL that
+    left its reviewed origin still fail on the first try, which is what
+    failing closed means.
+    """
+
+    total = attempts or settings.reference_tile_fetch_attempts
+    base = base_seconds or settings.reference_tile_retry_base_seconds
+    ceiling = max_seconds or settings.reference_tile_retry_max_seconds
+
+    def fetch_with_retries(url: str, media_type: str) -> bytes:
+        for attempt in range(1, total + 1):
+            try:
+                return fetch(url, media_type)
+            except SafeDownloadError as error:
+                if not error.retryable or attempt >= total:
+                    raise
+                delay = min(ceiling, base * (2 ** (attempt - 1)))
+                # Un Retry-After del origen manda sobre nuestra espera, pero
+                # sin dejar que nos pare más de lo que hemos decidido tolerar.
+                if error.retry_after_seconds is not None:
+                    delay = min(
+                        ceiling,
+                        max(delay, float(error.retry_after_seconds)),
+                    )
+                # Dispersa los reintentos: con varias hebras a la vez, esperar
+                # todas lo mismo vuelve a golpear el origen en bloque.
+                delay += random.uniform(0.0, delay * 0.25)
+                logger.warning(
+                    "Reference tile fetch failed, retrying",
+                    extra={
+                        "error_code": error.code,
+                        "attempt": attempt,
+                        "attempts": total,
+                        "delay_seconds": round(delay, 3),
+                    },
+                )
+                sleep(delay)
+        raise TileSeedError("tile fetch retries were exhausted")
+
+    return fetch_with_retries
+
+
 def _https_fetcher(
     descriptor: TileSourceDescriptor,
     *,
@@ -1404,7 +1467,7 @@ def _https_fetcher(
             raise TileSeedError("tile response media type is inconsistent")
         return sink.getvalue()
 
-    return fetch
+    return retrying_tile_fetcher(fetch)
 
 
 def _archive_metadata(

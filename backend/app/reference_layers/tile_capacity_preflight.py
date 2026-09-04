@@ -209,8 +209,13 @@ def resolve_tile_source(
     try:
         probe = probe_candidate_document(candidate, document)
     except SourceProbeError as error:
+        # El motivo va en el mensaje, no sólo en la cadena de excepciones: es
+        # lo único que queda registrado en el resumen del error, y sin él un
+        # rechazo de este tipo obliga a reproducir la sonda a mano. La ortofoto
+        # estuvo semanas caída por un motivo que se veía en una línea.
         raise AcquisitionValidationError(
-            "tile capabilities did not pass their protocol probe",
+            "tile capabilities did not pass their protocol probe: "
+            f"{error}",
             code="invalid_capabilities",
         ) from error
     if not probe.available or probe.canonical_name is None:

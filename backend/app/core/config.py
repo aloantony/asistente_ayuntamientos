@@ -86,6 +86,13 @@ class Settings(BaseSettings):
     reference_tile_concurrency: int = 4
     reference_tile_batch_size: int = 64
     reference_tile_change_check_samples: int = 16
+    # Una siembra son decenas de miles de peticiones seguidas contra un
+    # servicio público: que una sola devuelva 502 no puede tirar horas de
+    # trabajo. Sólo se reintenta lo que la capa de descarga clasifica como
+    # transitorio; un 403 o un 404 siguen fallando a la primera.
+    reference_tile_fetch_attempts: int = 4
+    reference_tile_retry_base_seconds: float = 1.0
+    reference_tile_retry_max_seconds: float = 30.0
     reference_geo_max_source_bytes: int = 8 * 1024 * 1024 * 1024
     reference_geo_timeout_seconds: int = 3600
     reference_remote_proxy_enabled: bool = False
@@ -283,6 +290,27 @@ class Settings(BaseSettings):
                 "reference artifact byte limits must be between 1 MiB and 1 PiB"
             )
         return value
+
+    @field_validator("reference_tile_fetch_attempts")
+    @classmethod
+    def validate_reference_tile_fetch_attempts(cls, value: int) -> int:
+        if isinstance(value, bool) or not 1 <= value <= 10:
+            raise ValueError(
+                "reference tile fetch attempts must be between 1 and 10"
+            )
+        return value
+
+    @field_validator(
+        "reference_tile_retry_base_seconds",
+        "reference_tile_retry_max_seconds",
+    )
+    @classmethod
+    def validate_reference_tile_retry_seconds(cls, value: float) -> float:
+        if isinstance(value, bool) or not 0 < value <= 300:
+            raise ValueError(
+                "reference tile retry seconds must be between 0 and 300"
+            )
+        return float(value)
 
     @field_validator("reference_storage_quota_bytes")
     @classmethod
