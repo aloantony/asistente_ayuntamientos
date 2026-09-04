@@ -4,11 +4,12 @@ import { CircleAlert, Layers, MapPin, RefreshCw, ShieldCheck } from "lucide-reac
 import { useEffect, useMemo, useState } from "react";
 import { fetchAllGeoMapItems } from "../../lib/geo";
 import {
-  defaultLocalBaseMapSelection,
-  fetchReferenceCatalog,
-  type SiurMapLayer,
-} from "../../lib/referenceLayers";
-import { MunicipalMap } from "../MunicipalMap";
+  buscarPueblo,
+  cargarCartografia,
+  type CartografiaPueblo,
+  type MunicipioIdentificable,
+} from "../../lib/pueblo";
+import { PuebloMap } from "../PuebloMap";
 import workspaceStyles from "../MunicipalWorkspace.module.css";
 import type { GeoMapItem } from "../types";
 import styles from "./MapaGeneral.module.css";
@@ -68,20 +69,23 @@ export function matchesSearch(item: GeoMapItem, query: string) {
 
 export function MapaGeneral({
   organizationId,
+  municipality,
   canViewMap,
 }: {
   organizationId: number;
+  municipality: MunicipioIdentificable | null;
   canViewMap: boolean;
 }) {
   const [items, setItems] = useState<GeoMapItem[]>([]);
+  const [cartografia, setCartografia] = useState<CartografiaPueblo | null>(
+    null,
+  );
   const [hiddenLayers, setHiddenLayers] = useState<Set<string>>(new Set());
   const [search, setSearch] = useState("");
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [error, setError] = useState("");
   const [isLoading, setIsLoading] = useState(false);
   const [loadAttempt, setLoadAttempt] = useState(0);
-  const [baseMapLayers, setBaseMapLayers] = useState<SiurMapLayer[]>([]);
-  const [baseLayerId, setBaseLayerId] = useState<number | null>(null);
 
   useEffect(() => {
     if (!canViewMap) {
@@ -120,37 +124,34 @@ export function MapaGeneral({
     return () => controller.abort();
   }, [organizationId, canViewMap, loadAttempt]);
 
-  // El fondo del mapa lo sirve el espejo cartográfico, igual que en `/mapa`.
-  // Esta pantalla no elige mapa base ni lo recuerda: le basta con el que el
-  // catálogo trae por omisión. Si el catálogo no está disponible, el mapa se
-  // queda sin fondo pero los elementos municipales se siguen viendo, así que el
-  // fallo no tumba la pantalla; sólo se anuncia debajo.
+  // Cartografía del pueblo. Es un fichero estático que viaja con la
+  // aplicación, así que se pide aparte del inventario: si el municipio todavía
+  // no tiene mapa preparado, el resto de la pantalla sigue funcionando.
+  const pueblo = useMemo(() => buscarPueblo(municipality), [municipality]);
+
   useEffect(() => {
-    if (!canViewMap) {
-      setBaseMapLayers([]);
-      setBaseLayerId(null);
+    if (!pueblo) {
+      setCartografia(null);
       return;
     }
 
-    const controller = new AbortController();
-    fetchReferenceCatalog(organizationId, "", controller.signal)
-      .then((catalog) => {
-        if (controller.signal.aborted) {
-          return;
+    let cancelado = false;
+    cargarCartografia(pueblo)
+      .then((cargada) => {
+        if (!cancelado) {
+          setCartografia(cargada);
         }
-        const selection = defaultLocalBaseMapSelection(catalog);
-        setBaseMapLayers(selection.layers);
-        setBaseLayerId(selection.baseLayerId);
       })
       .catch(() => {
-        if (!controller.signal.aborted) {
-          setBaseMapLayers([]);
-          setBaseLayerId(null);
+        if (!cancelado) {
+          setCartografia(null);
         }
       });
 
-    return () => controller.abort();
-  }, [organizationId, canViewMap, loadAttempt]);
+    return () => {
+      cancelado = true;
+    };
+  }, [pueblo, loadAttempt]);
 
   const layers = useMemo(() => buildLayers(items), [items]);
   const markerColors = useMemo(
@@ -302,25 +303,32 @@ export function MapaGeneral({
           </aside>
 
           <div className={styles.map}>
-            <MunicipalMap
-              items={visibleItems}
-              markerColors={markerColors}
-              siurLayers={baseMapLayers}
-              baseLayerId={baseLayerId}
-              onSelectItem={(item) => setSelectedId(itemKey(item))}
-              selectedItemId={selectedId}
-            />
+            {cartografia ? (
+              <PuebloMap
+                cartografia={cartografia}
+                items={visibleItems}
+                markerColors={markerColors}
+                onSelectItem={(item) => setSelectedId(itemKey(item))}
+                selectedItemId={selectedId}
+              />
+            ) : (
+              <ResourceState
+                description={
+                  pueblo
+                    ? "Preparando el plano del municipio…"
+                    : "Este municipio todavía no tiene plano preparado. Se añade al contratar el servicio."
+                }
+                icon={MapPin}
+                title={pueblo ? "Cargando el plano" : "Sin plano del municipio"}
+                tone={pueblo ? "empty" : "restricted"}
+              />
+            )}
             <p className={styles.counter}>
               {visibleItems.length} de {items.length} elementos
               {hiddenLayers.size > 0 || search.trim()
                 ? " (filtrados)"
                 : ""}
             </p>
-            {baseLayerId === null ? (
-              <p className={styles.counter}>
-                Sin fondo cartográfico disponible
-              </p>
-            ) : null}
           </div>
         </div>
       )}

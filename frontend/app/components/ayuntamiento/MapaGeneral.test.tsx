@@ -30,8 +30,8 @@ vi.mock("../../lib/geo", async () => {
 });
 
 // Leaflet no funciona en jsdom; lo que interesa aquí es qué recibe el mapa.
-vi.mock("../MunicipalMap", () => ({
-  MunicipalMap: (props: Record<string, unknown>) => {
+vi.mock("../PuebloMap", () => ({
+  PuebloMap: (props: Record<string, unknown>) => {
     mapProps(props);
     return <div data-testid="mapa" />;
   },
@@ -40,6 +40,23 @@ vi.mock("../MunicipalMap", () => ({
 const { MapaGeneral, buildLayers, itemKey, matchesSearch } = await import(
   "./MapaGeneral"
 );
+const { _vaciarCacheCartografia } = await import("../../lib/pueblo");
+
+/** El municipio que hoy tiene plano preparado. */
+const FUENTELCESPED = { name: "Fuentelcésped", ine_code: "09140" };
+
+const CARTOGRAFIA = {
+  municipio: "Fuentelcésped",
+  provincia: "Burgos",
+  ine: "09140",
+  centro: [-3.64, 41.59],
+  limite: { type: "Polygon", coordinates: [[[-3.65, 41.58], [-3.63, 41.58], [-3.63, 41.6], [-3.65, 41.58]]] },
+  edificios: { type: "FeatureCollection", features: [] },
+  viales: { type: "FeatureCollection", features: [] },
+  agua: { type: "FeatureCollection", features: [] },
+  verde: { type: "FeatureCollection", features: [] },
+  etiquetas: { type: "FeatureCollection", features: [] },
+};
 
 function item(overrides: Partial<GeoMapItem> = {}): GeoMapItem {
   return {
@@ -150,7 +167,13 @@ beforeEach(() => {
   fetchAllGeoMapItems.mockReset().mockResolvedValue([]);
   fetchReferenceCatalog.mockReset().mockRejectedValue(new Error("sin catálogo"));
   mapProps.mockReset();
+  _vaciarCacheCartografia();
+  vi.stubGlobal(
+    "fetch",
+    vi.fn().mockResolvedValue({ ok: true, json: async () => CARTOGRAFIA }),
+  );
 });
+afterEach(() => vi.unstubAllGlobals());
 
 describe("buildLayers", () => {
   it("agrupa por capa, cuenta y ordena por rótulo", () => {
@@ -204,14 +227,14 @@ describe("matchesSearch", () => {
 
 describe("MapaGeneral", () => {
   it("declara la falta de permiso sin llegar a pedir el mapa", () => {
-    render(<MapaGeneral canViewMap={false} organizationId={1} />);
+    render(<MapaGeneral canViewMap={false} municipality={FUENTELCESPED} organizationId={1} />);
 
     expect(screen.getByText("Mapa no autorizado")).toBeTruthy();
     expect(fetchAllGeoMapItems).not.toHaveBeenCalled();
   });
 
   it("avisa cuando no hay nada situado todavía", async () => {
-    render(<MapaGeneral canViewMap organizationId={1} />);
+    render(<MapaGeneral canViewMap municipality={FUENTELCESPED} organizationId={1} />);
 
     await waitFor(() =>
       expect(screen.getByText(/Todavía no hay nada situado/)).toBeTruthy(),
@@ -253,7 +276,7 @@ describe("MapaGeneral", () => {
   it("pasa al mapa los colores de cada capa", async () => {
     fetchAllGeoMapItems.mockResolvedValue([item()]);
 
-    render(<MapaGeneral canViewMap organizationId={1} />);
+    render(<MapaGeneral canViewMap municipality={FUENTELCESPED} organizationId={1} />);
 
     await waitFor(() => expect(mapProps).toHaveBeenCalled());
     const last = mapProps.mock.calls.at(-1)?.[0];
@@ -270,7 +293,7 @@ describe("MapaGeneral", () => {
       }),
     ]);
 
-    render(<MapaGeneral canViewMap organizationId={1} />);
+    render(<MapaGeneral canViewMap municipality={FUENTELCESPED} organizationId={1} />);
     await waitFor(() => expect(screen.getByText("2 de 2 elementos")).toBeTruthy());
 
     fireEvent.click(screen.getByRole("checkbox", { name: /Alumbrado/ }));
@@ -288,7 +311,7 @@ describe("MapaGeneral", () => {
       item({ entity_id: 2, title: "Fuente del olmo" }),
     ]);
 
-    render(<MapaGeneral canViewMap organizationId={1} />);
+    render(<MapaGeneral canViewMap municipality={FUENTELCESPED} organizationId={1} />);
     await waitFor(() => expect(fetchAllGeoMapItems).toHaveBeenCalledTimes(1));
 
     fireEvent.change(screen.getByPlaceholderText("Buscar en el mapa…"), {
@@ -305,9 +328,24 @@ describe("MapaGeneral", () => {
   it("ofrece reintentar cuando la carga falla", async () => {
     fetchAllGeoMapItems.mockRejectedValue(new Error("boom"));
 
-    render(<MapaGeneral canViewMap organizationId={1} />);
+    render(<MapaGeneral canViewMap municipality={FUENTELCESPED} organizationId={1} />);
 
     await waitFor(() => expect(screen.getByText("Mapa no disponible")).toBeTruthy());
     expect(screen.getByRole("button", { name: "Reintentar" })).toBeTruthy();
+  });
+
+  it("un municipio sin plano lo dice y no rompe el inventario", async () => {
+    render(
+      <MapaGeneral
+        canViewMap
+        municipality={{ name: "Aranda de Duero", ine_code: "09018" }}
+        organizationId={1}
+      />,
+    );
+
+    await waitFor(() =>
+      expect(screen.getByText("Sin plano del municipio")).toBeTruthy(),
+    );
+    expect(screen.getByText("0 de 0 elementos")).toBeTruthy();
   });
 });

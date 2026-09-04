@@ -1,0 +1,204 @@
+/* Mapa del pueblo.
+ *
+ * Todo el color vive aquí, no en el JS: las capas de Leaflet sólo llevan una
+ * clase y la hoja decide cómo se ven. Así el modo oscuro sale gratis con los
+ * tokens de la aplicación y el estilo se retoca sin tocar el componente.
+ *
+ * La paleta es la de la marca —crema y carbón cálidos— para que el mapa
+ * parezca parte de la aplicación y no una ventana a otro sitio. */
+
+.mapa {
+  --termino-fondo: #f7f4ec;
+  --termino-borde: #d9d1c0;
+  --fuera: #ebe6dc;
+  --arbolado: #dfe6d2;
+  --vinedo: #e7e6d4;
+  --deporte: #d9e5da;
+  --cementerio: #dfe1d6;
+  --urbano: #f2ede2;
+  --agua: #b6cfdd;
+  --vial: #ffffff;
+  --vial-borde: #ded7c8;
+  --vial-camino: #cdc5b4;
+  --edificio: #e5dccb;
+  --edificio-borde: #c3b7a0;
+
+  width: 100%;
+  min-height: 420px;
+  height: 100%;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--surface-sunken);
+  overflow: hidden;
+}
+
+:global(html.dark) .mapa {
+  --termino-fondo: #262523;
+  --termino-borde: #454139;
+  --fuera: #1c1b1a;
+  --arbolado: #2b3129;
+  --vinedo: #2e2e26;
+  --deporte: #26302a;
+  --cementerio: #2c2e29;
+  --urbano: #2a2825;
+  --agua: #2f4653;
+  --vial: #56524a;
+  --vial-borde: #34312c;
+  --vial-camino: #47433c;
+  --edificio: #38352f;
+  --edificio-borde: #4d4840;
+}
+
+/* Término municipal: el lienzo. Es el único fondo que hay, así que su relleno
+ * es lo que separa "dentro del pueblo" de "fuera del mapa". */
+.termino {
+  fill: var(--termino-fondo);
+  fill-opacity: 1;
+  stroke: none;
+}
+
+/* Máscara: tapa cuanto sobresale del término. Va por encima de las capas y por
+ * debajo del borde, para que el municipio quede recortado a filo. */
+.mascara {
+  fill: var(--fuera);
+  fill-opacity: 1;
+  stroke: none;
+  pointer-events: none;
+}
+
+.borde {
+  fill: none;
+  stroke: var(--termino-borde);
+  stroke-width: 1.5;
+  stroke-dasharray: 6 4;
+  stroke-linejoin: round;
+  pointer-events: none;
+}
+
+/* Usos del suelo. El monte y el viñedo dan carácter al término; el suelo
+ * residencial NO es una zona verde y por eso lleva un crema apenas distinto
+ * del fondo, sólo para insinuar dónde acaba el casco. */
+.suelo {
+  fill: var(--arbolado);
+  fill-opacity: 1;
+  stroke: none;
+}
+
+.suelo-vineyard,
+.suelo-orchard,
+.suelo-farmland,
+.suelo-meadow {
+  fill: var(--vinedo);
+}
+
+.suelo-pitch,
+.suelo-sports_centre,
+.suelo-park,
+.suelo-garden {
+  fill: var(--deporte);
+}
+
+.suelo-cemetery {
+  fill: var(--cementerio);
+}
+
+.suelo-residential {
+  fill: var(--urbano);
+}
+
+.agua {
+  fill: var(--agua);
+  fill-opacity: 1;
+  stroke: var(--agua);
+  stroke-width: 2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+/* Viales: blancos sobre el crema, como en un plano de papel. El ancho crece
+ * con el zoom para que de lejos se lea la red y de cerca la calle. */
+.vial {
+  fill: none;
+  stroke: var(--vial);
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  paint-order: stroke;
+}
+
+.vial-principal {
+  stroke-width: 5;
+}
+
+.vial-secundaria {
+  stroke-width: 3.5;
+}
+
+.vial-calle {
+  stroke-width: 2.5;
+}
+
+.vial-servicio {
+  stroke-width: 1.5;
+}
+
+.vial-camino {
+  stroke: var(--vial-camino);
+  stroke-width: 1.2;
+  stroke-dasharray: 5 4;
+}
+
+.mapa[data-detalle="termino"] .vial-principal {
+  stroke-width: 2.5;
+}
+
+.mapa[data-detalle="termino"] .vial-secundaria {
+  stroke-width: 1.6;
+}
+
+.mapa[data-detalle="calle"] .vial-principal {
+  stroke-width: 9;
+}
+
+.mapa[data-detalle="calle"] .vial-secundaria {
+  stroke-width: 7;
+}
+
+.mapa[data-detalle="calle"] .vial-calle {
+  stroke-width: 5.5;
+}
+
+.mapa[data-detalle="calle"] .vial-servicio {
+  stroke-width: 3;
+}
+
+/* Edificios: la textura que hace reconocible el casco. De lejos ni se dibujan
+ * los bordes, que a esa escala sólo serían ruido. */
+.edificio {
+  fill: var(--edificio);
+  fill-opacity: 1;
+  stroke: var(--edificio-borde);
+  stroke-width: 0.6;
+  stroke-linejoin: round;
+}
+
+.mapa[data-detalle="termino"] .edificio {
+  stroke: none;
+}
+
+.mapa[data-detalle="calle"] .edificio {
+  stroke-width: 1;
+}
+
+/* Elementos de la aplicación situados en el pueblo. */
+.marcador {
+  filter: drop-shadow(0 1px 2px rgb(45 39 30 / 35%));
+  cursor: pointer;
+  transition: r 120ms ease;
+}
+
+/* El propio contenedor es el mapa de Leaflet, cuya hoja global pinta un gris
+ * de fábrica: la doble clase gana en especificidad y deja el fondo cálido. */
+.mapa:global(.leaflet-container) {
+  background: var(--surface-sunken);
+  font: inherit;
+}
