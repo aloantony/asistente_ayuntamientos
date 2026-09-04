@@ -238,6 +238,44 @@ def test_wms_image_fallback_still_proves_the_layer_exists() -> None:
     assert probe.metadata["formats"] == ["image/png"]
 
 
+def test_a_repeated_crs_does_not_disqualify_a_whole_service() -> None:
+    # Caso real: el PNOA del IGN declara EPSG:32631 dos veces entre sus
+    # veintiún sistemas de referencia. La sonda lo tomaba por documento
+    # corrupto y dejaba la ortofoto entera fuera del espejo, cuando repetir un
+    # sistema admitido no dice nada distinto de declararlo una vez.
+    document = b"""<WMS_Capabilities version="1.3.0">
+      <Capability><Request><GetMap><Format>image/jpeg</Format>
+      <Format>image/jpeg</Format></GetMap></Request>
+      <Layer><CRS>EPSG:3857</CRS><CRS>EPSG:32631</CRS><CRS>EPSG:32631</CRS>
+      <Layer><Name>OI.OrthoimageCoverage</Name></Layer></Layer></Capability>
+    </WMS_Capabilities>"""
+
+    probe = probe_candidate_document(
+        candidate("wms_tiles", "OI.OrthoimageCoverage"),
+        document,
+    )
+
+    assert probe.available is True
+    assert probe.canonical_name == "OI.OrthoimageCoverage"
+    # Lo que importa es que no se repita y que estén los dos.
+    assert sorted(probe.metadata["crs"]) == ["EPSG:32631", "EPSG:3857"]
+    assert probe.metadata["formats"] == ["image/jpeg"]
+
+
+def test_two_collections_sharing_a_name_are_still_rejected() -> None:
+    # La duplicación que sí importa: con dos capas del mismo nombre no se
+    # puede saber a cuál se refiere uno, y eso sigue fallando cerrado.
+    document = b"""<WMS_Capabilities version="1.3.0">
+      <Capability><Request><GetMap><Format>image/png</Format></GetMap></Request>
+      <Layer><CRS>EPSG:3857</CRS>
+      <Layer><Name>flood:Q100</Name></Layer>
+      <Layer><Name>flood:Q100</Name></Layer></Layer></Capability>
+    </WMS_Capabilities>"""
+
+    with pytest.raises(SourceProbeError):
+        probe_candidate_document(candidate("wms_tiles", "flood:Q100"), document)
+
+
 def test_arcgis_probe_uses_layer_id_and_last_edit_fingerprint() -> None:
     document = json.dumps(
         {

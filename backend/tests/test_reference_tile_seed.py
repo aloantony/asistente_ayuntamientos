@@ -19,6 +19,10 @@ from app.reference_layers.blob_store import (
     ReferenceStorageQuotaError,
     ReferenceStorageSpaceError,
 )
+from app.reference_layers.safe_download import (
+    DownloadHTTPError,
+    UnsafeDownloadURLError,
+)
 from app.reference_layers.tile_seed import (
     PREFLIGHT_PROJECTION_SCHEMA,
     TileCoordinate,
@@ -27,6 +31,7 @@ from app.reference_layers.tile_seed import (
     iter_tile_coordinates,
     parse_tile_source_document,
     preflight_tile_archive,
+    retrying_tile_fetcher,
     seed_tile_archive,
     tile_url,
 )
@@ -775,3 +780,125 @@ def test_preflight_projection_still_enforces_configured_free_space_reserve(
             )
     finally:
         store.close()
+
+
+def _recording_sleep(slept: list[float]):
+    def sleep(seconds: float) -> None:
+        slept.append(seconds)
+
+    return sleep
+
+
+def test_a_transient_upstream_failure_no_longer_discards_the_run() -> None:
+    # Un 502 del IGN tumbaba una siembra entera: decenas de miles de
+    # peticiones tiradas por una sola respuesta mala.
+    slept: list[float] = []
+    attempts: list[int] = []
+
+    def fetch(url: str, media_type: str) -> bytes:
+        attempts.append(1)
+        if len(attempts) < 3:
+            raise DownloadHTTPError(502, retry_after_seconds=None)
+        return b"tile"
+
+    fetcher = retrying_tile_fetcher(
+        fetch,
+        attempts=4,
+        base_seconds=1.0,
+        max_seconds=30.0,
+        sleep=_recording_sleep(slept),
+    )
+
+    assert fetcher("https://example.test/0/0/0.png", "image/png") == b"tile"
+    assert len(attempts) == 3
+    assert len(slept) == 2
+    # Espera creciente, y siempre dentro del techo.
+    assert slept[0] < slept[1] <= 30.0
+
+
+def test_a_refusal_still_fails_on_the_first_try() -> None:
+    # Reintentar un 403 o un 404 sería insistirle a un servicio que ya ha
+    # dicho que no. Fallar cerrado significa fallar a la primera.
+    slept: list[float] = []
+    calls: list[int] = []
+
+    def fetch(url: str, media_type: str) -> bytes:
+        calls.append(1)
+        raise DownloadHTTPError(403, retry_after_seconds=None)
+
+    fetcher = retrying_tile_fetcher(
+        fetch,
+        attempts=4,
+        base_seconds=1.0,
+        max_seconds=30.0,
+        sleep=_recording_sleep(slept),
+    )
+
+    with pytest.raises(DownloadHTTPError):
+        fetcher("https://example.test/0/0/0.png", "image/png")
+    assert len(calls) == 1
+    assert slept == []
+
+
+def test_an_unsafe_url_is_never_retried() -> None:
+    slept: list[float] = []
+
+    def fetch(url: str, media_type: str) -> bytes:
+        raise UnsafeDownloadURLError("tile URL is not safe")
+
+    fetcher = retrying_tile_fetcher(
+        fetch,
+        attempts=4,
+        base_seconds=1.0,
+        max_seconds=30.0,
+        sleep=_recording_sleep(slept),
+    )
+
+    with pytest.raises(UnsafeDownloadURLError):
+        fetcher("https://example.test/0/0/0.png", "image/png")
+    assert slept == []
+
+
+def test_exhausting_the_attempts_reports_the_real_cause() -> None:
+    # El último error tiene que llegar tal cual: si el origen lleva media hora
+    # devolviendo 502, eso es lo que hay que poder leer en el registro.
+    slept: list[float] = []
+
+    def fetch(url: str, media_type: str) -> bytes:
+        raise DownloadHTTPError(503, retry_after_seconds=None)
+
+    fetcher = retrying_tile_fetcher(
+        fetch,
+        attempts=3,
+        base_seconds=1.0,
+        max_seconds=30.0,
+        sleep=_recording_sleep(slept),
+    )
+
+    with pytest.raises(DownloadHTTPError) as error:
+        fetcher("https://example.test/0/0/0.png", "image/png")
+    assert error.value.status_code == 503
+    assert len(slept) == 2
+
+
+def test_retry_after_is_honoured_without_exceeding_our_ceiling() -> None:
+    slept: list[float] = []
+    calls: list[int] = []
+
+    def fetch(url: str, media_type: str) -> bytes:
+        calls.append(1)
+        if len(calls) == 1:
+            raise DownloadHTTPError(429, retry_after_seconds=600)
+        return b"tile"
+
+    fetcher = retrying_tile_fetcher(
+        fetch,
+        attempts=3,
+        base_seconds=1.0,
+        max_seconds=30.0,
+        sleep=_recording_sleep(slept),
+    )
+
+    assert fetcher("https://example.test/0/0/0.png", "image/png") == b"tile"
+    # Se respeta que el origen pida más tiempo, pero no diez minutos.
+    assert 30.0 <= slept[0] <= 37.5

@@ -1301,3 +1301,81 @@ fondo. Al alejar el zoom se sigue viendo la envolvente municipal recortada sobre
 el vacío: eso es ADR-057 y no se arregla aquí; se arreglaría sembrando los
 niveles lejanos de un área mayor, que es barato en teselas pero obliga a rehacer
 las autorizaciones y a resembrar.
+
+## ADR-062: Una tesela que falla no tira la siembra entera (2026-09-03)
+
+**Contexto.** Sembrar el espejo son decenas de miles de peticiones seguidas
+contra un servicio público. `tile_seed` no tenía **ningún** reintento: la
+primera respuesta mala abortaba la ejecución completa. Con la ortofoto del IGN,
+que es mucho más pesada de renderizar y devuelve 502 bajo carga, eso convertía
+cualquier intento en una lotería; y para pirámides de horas significa tirar el
+trabajo hecho y el ancho de banda ajeno ya consumido.
+
+Lo llamativo es que **la clasificación ya existía y no se usaba**:
+`SafeDownloadError` lleva `retryable` desde su diseño, `RETRYABLE_HTTP_STATUSES`
+incluye 408, 425, 429, 500, 502, 503 y 504, y la capa de descarga ya leía la
+cabecera `Retry-After`. Lo único que faltaba era hacerle caso.
+
+**Decisión.** `retrying_tile_fetcher` envuelve el descargador real y reintenta
+**sólo lo que la capa de descarga clasificó como transitorio**:
+
+- **Un 403, un 404, una URL fuera del origen revisado o un tipo de contenido
+  incoherente siguen fallando a la primera.** Eso es lo que significa fallar
+  cerrado, y reintentarlo sería insistirle a un servicio que ya ha dicho que no.
+- La espera crece de forma exponencial desde `REFERENCE_TILE_RETRY_BASE_SECONDS`
+  con techo en `REFERENCE_TILE_RETRY_MAX_SECONDS`, y lleva **dispersión**: con
+  varias hebras a la vez, esperar todas exactamente lo mismo vuelve a golpear el
+  origen en bloque.
+- Un `Retry-After` del origen **manda** sobre nuestra espera, pero **sin pasar
+  del techo**: se respeta que pida más tiempo, no que nos pare diez minutos.
+- Agotados los intentos, **se propaga el error original**, no uno genérico: si
+  el origen lleva media hora devolviendo 502, eso es lo que hay que poder leer.
+
+**Consecuencias.** El tope por defecto —cuatro intentos, 30 segundos de espera
+máxima— es deliberadamente modesto: un origen realmente caído no debe convertir
+una siembra de siete minutos en uno de esos procesos que nadie sabe si sigue
+vivo. Los reintentos se registran con su código y su número de intento, así que
+un origen degradado se ve en el registro en vez de esconderse detrás de una
+siembra lenta.
+
+**Lo que esto NO arregla:** no hay reanudación. Si se agotan los intentos, la
+ejecución sigue perdiéndose entera en lugar de continuar por donde iba. Eso es
+trabajo aparte y más caro, porque exige persistir el avance parcial sin romper
+la garantía de que un archivo publicado está completo y verificado.
+
+## ADR-063: Un valor admitido repetido no invalida un servicio (2026-09-03)
+
+**Contexto.** La ortofoto (PNOA) llevaba semanas fuera del espejo y su fuente
+primaria se rechazaba **siempre** con `invalid_capabilities`, sin más
+explicación: el error real de la sonda se envolvía y se perdía. Reproducida la
+sonda sobre el documento auténtico, el motivo resultó ser
+`capabilities contains duplicate values`.
+
+La causa: **el IGN declara `EPSG:32631` dos veces** entre los veintiún sistemas
+de referencia de su capa raíz. Por esa redundancia, `_direct_child_texts`
+rechazaba el documento entero y la ortofoto quedaba inalcanzable.
+
+Lo decisivo es que la comprobación era **incoherente con el propio código**: la
+línea siguiente ya combinaba esos valores con `dict.fromkeys`, es decir, ya los
+trataba como un conjunto. Se exigía que no se repitieran para acto seguido
+deduplicarlos.
+
+**Decisión.** `_direct_child_texts` deduplica conservando el orden. Sólo se usa
+para leer listas de «lo que este servicio admite» —formatos de imagen y sistemas
+de referencia—, donde declarar dos veces un valor no dice nada distinto de
+declararlo una vez.
+
+**La duplicación que sí importa se sigue rechazando**, y en su sitio: dos
+colecciones con el mismo nombre hacen ambiguo a qué capa se refiere uno, y eso
+falla cerrado en `duplicate collections`, que es una comprobación aparte.
+
+**Consecuencias.** Con esto la sonda del PNOA pasa: capa `OI.OrthoimageCoverage`
+disponible, versión 1.3.0. Queda el segundo obstáculo de la ortofoto, que es
+otro y no se arregla aquí: el IGN devuelve 502 bajo carga al renderizarla, para
+lo cual están los reintentos de ADR-062.
+
+**Lección de método**, porque costó semanas: envolver una excepción sin dejar
+rastro del motivo original convierte un fallo diagnosticable en uno opaco. Es el
+mismo patrón que ya se corrigió en `unexpected_worker_error`. Al escribir un
+`raise ... from error`, conviene preguntarse si alguien podrá saber qué pasó sin
+volver a reproducirlo a mano.
