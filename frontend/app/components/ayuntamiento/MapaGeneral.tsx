@@ -9,7 +9,7 @@ import {
   type CartografiaPueblo,
   type MunicipioIdentificable,
 } from "../../lib/pueblo";
-import { PuebloMap } from "../PuebloMap";
+import { MunicipalMap } from "../MunicipalMap";
 import workspaceStyles from "../MunicipalWorkspace.module.css";
 import type { GeoMapItem } from "../types";
 import styles from "./MapaGeneral.module.css";
@@ -304,7 +304,7 @@ export function MapaGeneral({
 
           <div className={styles.map}>
             {cartografia ? (
-              <PuebloMap
+              <MunicipalMap
                 cartografia={cartografia}
                 items={visibleItems}
                 markerColors={markerColors}

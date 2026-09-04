@@ -2,24 +2,10 @@
 
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { ReferenceCatalog } from "../../lib/referenceLayers";
 import type { GeoMapItem } from "../types";
 
 const fetchAllGeoMapItems = vi.fn();
-const fetchReferenceCatalog = vi.fn();
 const mapProps = vi.fn();
-
-vi.mock("../../lib/referenceLayers", async () => {
-  const actual =
-    await vi.importActual<typeof import("../../lib/referenceLayers")>(
-      "../../lib/referenceLayers",
-    );
-  return {
-    ...actual,
-    fetchReferenceCatalog: (...args: unknown[]) =>
-      fetchReferenceCatalog(...args),
-  };
-});
 
 vi.mock("../../lib/geo", async () => {
   const actual = await vi.importActual<typeof import("../../lib/geo")>("../../lib/geo");
@@ -30,8 +16,8 @@ vi.mock("../../lib/geo", async () => {
 });
 
 // Leaflet no funciona en jsdom; lo que interesa aquí es qué recibe el mapa.
-vi.mock("../PuebloMap", () => ({
-  PuebloMap: (props: Record<string, unknown>) => {
+vi.mock("../MunicipalMap", () => ({
+  MunicipalMap: (props: Record<string, unknown>) => {
     mapProps(props);
     return <div data-testid="mapa" />;
   },
@@ -80,92 +66,10 @@ function item(overrides: Partial<GeoMapItem> = {}): GeoMapItem {
   };
 }
 
-const CATALOG_AT = "2026-09-03T10:00:00Z";
-
-/** Catálogo mínimo con un fondo local, que es lo único que esta pantalla usa. */
-function catalogWithBaseMap(): ReferenceCatalog {
-  return {
-    snapshot: {
-      id: 91,
-      provider_key: "siur",
-      content_sha256: "a".repeat(64),
-      definition_sha256: "b".repeat(64),
-      retrieved_at: CATALOG_AT,
-      service_count: 1,
-      group_count: 0,
-      layer_count: 1,
-      unresolved_count: 0,
-      status: "applied",
-      is_current: true,
-    },
-    organization_id: 7,
-    services: [
-      {
-        id: 8,
-        title: "IGN Base",
-        upstream_protocol: "wms",
-        attribution: "CC BY 4.0 scne.es",
-        status: "active",
-        updated_at: CATALOG_AT,
-      },
-    ],
-    layers: [
-      {
-        id: 4,
-        service_id: 8,
-        parent_id: null,
-        source_key: "layer:siur:fondo",
-        node_type: "layer",
-        title: "MAPA",
-        description: null,
-        role: "base",
-        renderer: "raster_tile",
-        delivery_mode: "local",
-        bounds_json: null,
-        sort_order: 0,
-        default_visible: true,
-        default_opacity: 1,
-        effective_visible: true,
-        effective_opacity: 1,
-        min_zoom: null,
-        max_zoom: null,
-        downloadable: false,
-        delivery_available: true,
-        identify_available: false,
-        delivery_blocker: null,
-        available_style_ids: [],
-        legend_available: false,
-        metadata_available: false,
-        source_substitution_status: null,
-        source_substitution_notice: null,
-        source_substitution_selected_layer: null,
-        source_substitution_profile: null,
-        source_substitution_scope: null,
-        source_substitution_attribution: null,
-        source_substitution_content_sha256: null,
-        mirror_status: "active",
-        active_version_id: 21,
-        active_generation: 1,
-        active_source_version: "v1",
-        active_reference_at: CATALOG_AT,
-        active_created_at: CATALOG_AT,
-        last_run_status: "succeeded",
-        last_checked_at: CATALOG_AT,
-        last_sync_error_code: null,
-        last_sync_error_summary: null,
-        next_check_at: null,
-        status: "active",
-        updated_at: CATALOG_AT,
-      },
-    ],
-    styles: [],
-  };
-}
 
 afterEach(cleanup);
 beforeEach(() => {
   fetchAllGeoMapItems.mockReset().mockResolvedValue([]);
-  fetchReferenceCatalog.mockReset().mockRejectedValue(new Error("sin catálogo"));
   mapProps.mockReset();
   _vaciarCacheCartografia();
   vi.stubGlobal(
@@ -239,38 +143,6 @@ describe("MapaGeneral", () => {
     await waitFor(() =>
       expect(screen.getByText(/Todavía no hay nada situado/)).toBeTruthy(),
     );
-  });
-
-  it("pone bajo los marcadores el fondo del espejo cartográfico", async () => {
-    // Sin esto la pestaña montaba el visor sin una sola capa y el ayuntamiento
-    // veía sus elementos flotando sobre una cuadrícula vacía.
-    fetchAllGeoMapItems.mockResolvedValue([item()]);
-    fetchReferenceCatalog.mockResolvedValue(catalogWithBaseMap());
-
-    render(<MapaGeneral canViewMap organizationId={7} />);
-
-    await waitFor(() => {
-      const last = mapProps.mock.calls.at(-1)?.[0];
-      expect(last.baseLayerId).toBe(4);
-    });
-    const last = mapProps.mock.calls.at(-1)?.[0];
-    expect(last.siurLayers).toHaveLength(1);
-    expect(last.siurLayers[0].role).toBe("base");
-  });
-
-  it("sin catálogo sigue enseñando los elementos y lo dice", async () => {
-    fetchAllGeoMapItems.mockResolvedValue([item()]);
-
-    render(<MapaGeneral canViewMap organizationId={7} />);
-
-    await waitFor(() =>
-      expect(
-        screen.getByText("Sin fondo cartográfico disponible"),
-      ).toBeTruthy(),
-    );
-    const last = mapProps.mock.calls.at(-1)?.[0];
-    expect(last.baseLayerId).toBeNull();
-    expect(last.items).toHaveLength(1);
   });
 
   it("pasa al mapa los colores de cada capa", async () => {

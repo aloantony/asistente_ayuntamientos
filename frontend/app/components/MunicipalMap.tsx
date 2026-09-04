@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import type {
   Circle,
   CircleMarker,
@@ -12,16 +12,17 @@ import type {
   Map as LeafletMap,
   Marker,
   Rectangle,
-  TileLayer,
 } from "leaflet";
 import {
-  selectLocalBaseMapLayer,
-  selectTopIdentifyLayer,
-  tileCoordinatesForProjectedPoint,
-  type SiurIdentifyPoint,
-  type SiurMapLayer,
-} from "../lib/referenceLayers";
+  limitesDe,
+  mascaraExterior,
+  nivelDetalle,
+  vialVisible,
+  type CartografiaPueblo,
+  type NivelDetalle,
+} from "../lib/pueblo";
 import type { GeoMapItem } from "./types";
+import styles from "./MunicipalMap.module.css";
 
 export type MapBounds = {
   north: number;
@@ -31,6 +32,8 @@ export type MapBounds = {
 };
 
 type MunicipalMapProps = {
+  /** Plano del municipio servido: es el fondo, y el único que hay. */
+  cartografia: CartografiaPueblo;
   items: GeoMapItem[];
   focusLocation?: {
     latitude: number;
@@ -40,17 +43,12 @@ type MunicipalMapProps = {
   initialZoom?: number | null;
   selectedItemId?: string | null;
   markerColors?: Record<string, string>;
-  baseLayerId?: number | null;
   fitRequest?: number;
   locateRequest?: number;
   areaSelectionEnabled?: boolean;
   areaBounds?: MapBounds | null;
-  siurLayers?: SiurMapLayer[];
   onAreaSelectionChange?: (bounds: MapBounds | null) => void;
   onLocationError?: (message: string) => void;
-  onSiurIdentify?: (point: SiurIdentifyPoint) => void;
-  onSiurTileError?: (layerId: number, layerTitle: string) => void;
-  onSiurTileLoad?: (layerId: number) => void;
   onSelectItem: (item: GeoMapItem) => void;
   onMapContextMenu?: (payload: {
     latitude: number;
@@ -68,13 +66,6 @@ type MarkerRecord = {
   marker: Marker;
 };
 
-type SiurTileLayerRecord = {
-  layer: TileLayer;
-  signature: string;
-  url: string;
-  errorNotified: boolean;
-};
-
 type AreaDragState = {
   startLatLng: LatLng;
   startX: number;
@@ -83,24 +74,17 @@ type AreaDragState = {
   previousBounds: MapBounds | null;
 };
 
-// Where the map opens before anything is geolocated, which is how every new
-// deployment starts. It used to be the provincial capital, eighty kilometres
-// from the municipality being served and outside the cartography the local
-// mirror holds, so a new town hall opened its map on a blank grid. Serving the
-// municipality is the point of the product, so that is where it opens.
-// Dónde se abre el mapa mientras no hay nada que encuadrar ni cartografía
-// cargada. Es un apaño de arranque, no la respuesta: en cuanto el fondo llega,
-// el mapa se encuadra en la envolvente que el espejo tiene de verdad, que es lo
-// que hace que un ayuntamiento vea SU pueblo sin que nadie escriba sus
-// coordenadas en el código.
+// El mapa abre sobre el término municipal, que es su propio fondo. Estas
+// constantes sólo sirven para el instante entre crear el mapa y encajarlo.
 const FALLBACK_CENTER: [number, number] = [41.633, -3.583];
 const FALLBACK_ZOOM = 14;
-// Cuántos niveles se deja ampliar por encima del último que el archivo tiene.
-// Dos amplían de verdad; a partir de ahí sólo se agranda la misma tesela hasta
-// que el nombre del pueblo ocupa la pantalla, que es lo que pasaba con 24.
-const VIEWER_OVERZOOM_LEVELS = 2;
 const SINGLE_ITEM_ZOOM = 16;
-const MAX_MAP_ZOOM = 24;
+// Hasta dónde se deja ampliar. Veinticuatro venían de cuando el fondo eran
+// teselas y sobraban: pasado el zoom nativo del archivo sólo se agrandaba la
+// misma imagen hasta que el nombre del pueblo ocupaba la pantalla (ADR-061).
+// El plano es vectorial y no se emborrona, pero por encima de 19 un edificio ya
+// llena el panel y no queda nada nuevo que enseñar.
+const MAX_MAP_ZOOM = 19;
 const AREA_DRAG_THRESHOLD = 4;
 
 function getItemKey(item: GeoMapItem) {
@@ -341,12 +325,12 @@ function fitMapToBounds(
   map: LeafletMap,
   bounds: LatLngBounds,
   initialZoom: number | null | undefined,
-  coverageBounds?: LatLngBounds | null,
+  fallbackBounds?: LatLngBounds | null,
 ) {
   if (!bounds.isValid()) {
-    // Sin elementos que situar, el encuadre lo manda la cartografía replicada.
-    if (coverageBounds && coverageBounds.isValid()) {
-      map.fitBounds(coverageBounds, { animate: false });
+    // Sin nada situado todavía, lo que hay que enseñar es el pueblo.
+    if (fallbackBounds?.isValid()) {
+      map.fitBounds(fallbackBounds, { padding: [16, 16] });
       return;
     }
     map.setView(FALLBACK_CENTER, FALLBACK_ZOOM);
@@ -385,10 +369,110 @@ function locationErrorMessage(error: LeafletLocationErrorEvent) {
   return "No se pudo obtener tu ubicación.";
 }
 
+/**
+ * Dibuja el municipio: el término como lienzo, sus usos del suelo, aguas,
+ * viales y edificios, y encima una máscara que tapa cuanto sobresale del
+ * límite.
+ *
+ * Los datos de OSM llegan con las geometrías enteras —una carretera no se
+ * corta en el mojón— y recortarlas contra un límite cóncavo es trabajo fino y
+ * frágil. Pintar por encima un rectángulo con el término como agujero da el
+ * borde exacto sin tocar los datos; Leaflet rellena con `evenodd`, así que los
+ * anillos interiores son agujeros sin depender del sentido de giro.
+ *
+ * El color no está aquí: cada capa lleva su clase y la hoja de estilos decide,
+ * de modo que el modo oscuro sale de los tokens de la aplicación.
+ */
+function dibujarPueblo(
+  L: LeafletModule,
+  map: LeafletMap,
+  cartografia: CartografiaPueblo,
+  alCambiarNivel: (nivel: NivelDetalle) => void,
+) {
+  const datos = (valor: unknown) => valor as unknown as GeoJSON.GeoJsonObject;
+  const pane = (nombre: string, orden: number) => {
+    map.createPane(nombre).style.zIndex = String(orden);
+    return nombre;
+  };
+
+  L.geoJSON(datos(cartografia.limite), {
+    interactive: false,
+    pane: pane("pueblo-termino", 180),
+    style: { className: styles.termino },
+  }).addTo(map);
+
+  L.geoJSON(datos(cartografia.verde), {
+    interactive: false,
+    pane: pane("pueblo-suelo", 190),
+    style: (feature) => ({
+      className: [
+        styles.suelo,
+        styles[`suelo-${String(feature?.properties?.tipo)}`] ?? "",
+      ]
+        .filter(Boolean)
+        .join(" "),
+    }),
+  }).addTo(map);
+
+  L.geoJSON(datos(cartografia.agua), {
+    interactive: false,
+    pane: pane("pueblo-agua", 200),
+    style: { className: styles.agua },
+  }).addTo(map);
+
+  // Qué viales se dibujan depende del zoom: de lejos la red principal, de
+  // cerca hasta los caminos. El filtro de Leaflet sólo actúa al añadir datos,
+  // así que la capa se rehace cuando se cruza un umbral.
+  let nivel = nivelDetalle(map.getZoom());
+  const viales = L.geoJSON(datos(cartografia.viales), {
+    interactive: false,
+    pane: pane("pueblo-viales", 210),
+    style: (feature) => ({
+      className: [
+        styles.vial,
+        styles[`vial-${String(feature?.properties?.clase)}`] ?? "",
+      ]
+        .filter(Boolean)
+        .join(" "),
+    }),
+    filter: (feature) => vialVisible(feature?.properties?.clase, nivel),
+  }).addTo(map);
+
+  L.geoJSON(datos(cartografia.edificios), {
+    interactive: false,
+    pane: pane("pueblo-edificios", 220),
+    style: { className: styles.edificio },
+  }).addTo(map);
+
+  L.geoJSON(datos(mascaraExterior(cartografia.limite)), {
+    interactive: false,
+    pane: pane("pueblo-mascara", 230),
+    style: { className: styles.mascara },
+  }).addTo(map);
+
+  L.geoJSON(datos(cartografia.limite), {
+    interactive: false,
+    pane: pane("pueblo-borde", 240),
+    style: { className: styles.borde },
+  }).addTo(map);
+
+  alCambiarNivel(nivel);
+  map.on("zoomend", () => {
+    const siguiente = nivelDetalle(map.getZoom());
+    if (siguiente === nivel) {
+      return;
+    }
+    nivel = siguiente;
+    alCambiarNivel(siguiente);
+    viales.clearLayers();
+    viales.addData(datos(cartografia.viales));
+  });
+}
+
 export function MunicipalMap({
   areaBounds,
   areaSelectionEnabled = false,
-  baseLayerId = null,
+  cartografia,
   fitRequest,
   focusLocation,
   initialZoom,
@@ -396,27 +480,15 @@ export function MunicipalMap({
   locateRequest,
   markerColors,
   selectedItemId,
-  siurLayers = [],
   onAreaSelectionChange,
   onLocationError,
   onMapContextMenu,
   onSelectItem,
-  onSiurIdentify,
-  onSiurTileError,
-  onSiurTileLoad,
 }: MunicipalMapProps) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const mapRef = useRef<LeafletMap | null>(null);
   const leafletRef = useRef<LeafletModule | null>(null);
-  const tileLayerRef = useRef<TileLayer | null>(null);
-  const coverageBoundsRef = useRef<LatLngBounds | null>(null);
-  const baseTileLayerRecordRef = useRef<{
-    layerId: number;
-    signature: string;
-    url: string;
-    errorNotified: boolean;
-  } | null>(null);
-  const siurTileLayersRef = useRef<Map<number, SiurTileLayerRecord>>(new Map());
+  const terminoBoundsRef = useRef<LatLngBounds | null>(null);
   const markerRecordsRef = useRef<Map<string, MarkerRecord>>(new Map());
   const markerBoundsRef = useRef<LatLngBounds | null>(null);
   const focusMarkerRef = useRef<CircleMarker | null>(null);
@@ -430,10 +502,7 @@ export function MunicipalMap({
   const lastFitRequestRef = useRef<number | undefined>(fitRequest);
   const lastLocateRequestRef = useRef<number | undefined>(locateRequest);
   const [mapReady, setMapReady] = useState(false);
-  const selectedBaseMap = useMemo(
-    () => selectLocalBaseMapLayer(siurLayers, baseLayerId),
-    [baseLayerId, siurLayers],
-  );
+  const [nivel, setNivel] = useState<NivelDetalle>("pueblo");
 
   const focusLocationRef = useRef(focusLocation);
   const initialZoomRef = useRef(initialZoom);
@@ -445,10 +514,6 @@ export function MunicipalMap({
   const onLocationErrorRef = useRef(onLocationError);
   const onMapContextMenuRef = useRef(onMapContextMenu);
   const onSelectItemRef = useRef(onSelectItem);
-  const onSiurIdentifyRef = useRef(onSiurIdentify);
-  const onSiurTileErrorRef = useRef(onSiurTileError);
-  const onSiurTileLoadRef = useRef(onSiurTileLoad);
-  const siurLayersRef = useRef(siurLayers);
 
   focusLocationRef.current = focusLocation;
   initialZoomRef.current = initialZoom;
@@ -460,10 +525,6 @@ export function MunicipalMap({
   onLocationErrorRef.current = onLocationError;
   onMapContextMenuRef.current = onMapContextMenu;
   onSelectItemRef.current = onSelectItem;
-  onSiurIdentifyRef.current = onSiurIdentify;
-  onSiurTileErrorRef.current = onSiurTileError;
-  onSiurTileLoadRef.current = onSiurTileLoad;
-  siurLayersRef.current = siurLayers;
 
   const focusLatitude = focusLocation?.latitude;
   const focusLongitude = focusLocation?.longitude;
@@ -479,7 +540,6 @@ export function MunicipalMap({
     let resizeObserver: ResizeObserver | null = null;
     let resizeFrame: number | null = null;
     const markerRecords = markerRecordsRef.current;
-    const siurTileLayers = siurTileLayersRef.current;
 
     async function initializeMap() {
       const L = await import("leaflet");
@@ -491,7 +551,10 @@ export function MunicipalMap({
       const map = L.map(mapContainer, {
         center: FALLBACK_CENTER,
         maxZoom: MAX_MAP_ZOOM,
-        preferCanvas: true,
+        // El dibujo del pueblo se pinta como SVG y no como lienzo: así cada
+        // capa lleva su clase y es la hoja de estilos la que decide el color,
+        // con el modo oscuro heredado de los tokens de la aplicación.
+        preferCanvas: false,
         scrollWheelZoom: true,
         zoom: FALLBACK_ZOOM,
         zoomControl: false,
@@ -500,9 +563,10 @@ export function MunicipalMap({
       mapRef.current = map;
       markerBoundsRef.current = L.latLngBounds([]);
 
-      const siurPane = map.createPane("siurPane");
-      siurPane.style.zIndex = "250";
-      siurPane.style.pointerEvents = "none";
+      dibujarPueblo(L, map, cartografia, setNivel);
+      terminoBoundsRef.current = L.latLngBounds(limitesDe(cartografia.limite));
+      map.setMaxBounds(terminoBoundsRef.current.pad(0.25));
+      map.options.maxBoundsViscosity = 0.9;
 
       L.control.zoom({ position: "bottomleft" }).addTo(map);
 
@@ -514,45 +578,6 @@ export function MunicipalMap({
           zoom: map.getZoom(),
           x: originalEvent.clientX,
           y: originalEvent.clientY,
-        });
-      };
-
-      const handleMapClick = (event: LeafletMouseEvent) => {
-        const originalTarget = (event.originalEvent as MouseEvent).target;
-        if (
-          areaSelectionEnabledRef.current ||
-          areaDragStateRef.current ||
-          (originalTarget instanceof Element &&
-            originalTarget.closest(
-              ".leaflet-control, .leaflet-marker-icon, .leaflet-popup",
-            ))
-        ) {
-          return;
-        }
-        const zoom = map.getZoom();
-        const latlng = map.wrapLatLng(event.latlng);
-        const layer = selectTopIdentifyLayer(
-          siurLayersRef.current,
-          zoom,
-          latlng.lat,
-          latlng.lng,
-        );
-        if (!layer) {
-          return;
-        }
-        const projected = map.project(latlng, zoom);
-        const coordinates = tileCoordinatesForProjectedPoint(
-          projected.x,
-          projected.y,
-          zoom,
-        );
-        onSiurIdentifyRef.current?.({
-          layer,
-          z: zoom,
-          x: coordinates.x,
-          y: coordinates.y,
-          pixelX: coordinates.pixelX,
-          pixelY: coordinates.pixelY,
         });
       };
 
@@ -693,7 +718,6 @@ export function MunicipalMap({
       };
 
       cancelAreaDragRef.current = () => finishAreaDrag(false);
-      map.on("click", handleMapClick);
       map.on("contextmenu", handleContextMenu);
       map.on("mousedown", handleAreaMouseDown);
 
@@ -733,9 +757,7 @@ export function MunicipalMap({
       mapRef.current?.remove();
       mapRef.current = null;
       leafletRef.current = null;
-      tileLayerRef.current = null;
-      baseTileLayerRecordRef.current = null;
-      siurTileLayers.clear();
+      terminoBoundsRef.current = null;
       markerRecords.clear();
       markerBoundsRef.current = null;
       focusMarkerRef.current = null;
@@ -743,187 +765,7 @@ export function MunicipalMap({
       locationAccuracyRef.current = null;
       areaRectangleRef.current = null;
     };
-  }, []);
-
-  useEffect(() => {
-    const L = leafletRef.current;
-    const map = mapRef.current;
-    if (!mapReady || !L || !map) {
-      return;
-    }
-
-    if (!selectedBaseMap) {
-      tileLayerRef.current?.remove();
-      tileLayerRef.current = null;
-      baseTileLayerRecordRef.current = null;
-      coverageBoundsRef.current = null;
-      map.setMaxZoom(MAX_MAP_ZOOM);
-      return;
-    }
-    const signature = JSON.stringify([
-      selectedBaseMap.layerId,
-      selectedBaseMap.attribution,
-      selectedBaseMap.minZoom,
-      selectedBaseMap.maxZoom,
-      selectedBaseMap.bounds,
-    ]);
-    const existing = baseTileLayerRecordRef.current;
-    if (
-      existing &&
-      tileLayerRef.current &&
-      existing.layerId === selectedBaseMap.layerId &&
-      existing.signature === signature
-    ) {
-      if (existing.url !== selectedBaseMap.tileUrl) {
-        tileLayerRef.current.setUrl(selectedBaseMap.tileUrl);
-        existing.url = selectedBaseMap.tileUrl;
-        existing.errorNotified = false;
-      }
-      return;
-    }
-    tileLayerRef.current?.remove();
-    tileLayerRef.current = null;
-    baseTileLayerRecordRef.current = null;
-    const bounds = selectedBaseMap.bounds
-      ? L.latLngBounds(
-          [selectedBaseMap.bounds.south, selectedBaseMap.bounds.west],
-          [selectedBaseMap.bounds.north, selectedBaseMap.bounds.east],
-        )
-      : undefined;
-    // El archivo llega hasta un zoom nativo concreto. Más allá sólo se amplía
-    // la última tesela, así que se permiten dos niveles y se corta: dejar 24
-    // convertía el nombre del pueblo en un borrón a pantalla completa.
-    const nativeMaxZoom = selectedBaseMap.maxZoom ?? null;
-    const viewerMaxZoom =
-      nativeMaxZoom === null
-        ? MAX_MAP_ZOOM
-        : Math.min(MAX_MAP_ZOOM, nativeMaxZoom + VIEWER_OVERZOOM_LEVELS);
-    const tileLayer = L.tileLayer(selectedBaseMap.tileUrl, {
-      attribution: selectedBaseMap.attribution ?? undefined,
-      bounds,
-      maxNativeZoom: nativeMaxZoom ?? undefined,
-      maxZoom: viewerMaxZoom,
-      minZoom: selectedBaseMap.minZoom ?? 0,
-    });
-    map.setMaxZoom(viewerMaxZoom);
-    coverageBoundsRef.current = bounds ?? null;
-    const record = {
-      layerId: selectedBaseMap.layerId,
-      signature,
-      url: selectedBaseMap.tileUrl,
-      errorNotified: false,
-    };
-    tileLayer.on("tileerror", () => {
-      if (!record.errorNotified) {
-        record.errorNotified = true;
-        onSiurTileErrorRef.current?.(
-          selectedBaseMap.layerId,
-          selectedBaseMap.title,
-        );
-      }
-    });
-    tileLayer.on("tileload", () => {
-      record.errorNotified = false;
-      onSiurTileLoadRef.current?.(selectedBaseMap.layerId);
-    });
-    tileLayerRef.current = tileLayer.addTo(map);
-    baseTileLayerRecordRef.current = record;
-    tileLayer.setZIndex(0);
-    // El fondo suele llegar después del primer encuadre. Si no hay nada situado
-    // ni un punto enfocado, el mapa se abre sobre su propia cartografía.
-    const markerBounds = markerBoundsRef.current;
-    const focus = focusLocationRef.current;
-    if (
-      bounds &&
-      !focus &&
-      (!markerBounds || !markerBounds.isValid())
-    ) {
-      map.fitBounds(bounds, { animate: false });
-    }
-  }, [mapReady, selectedBaseMap]);
-
-  useEffect(() => {
-    const L = leafletRef.current;
-    const map = mapRef.current;
-    if (!mapReady || !L || !map) {
-      return;
-    }
-
-    const overlayLayers = siurLayers.filter((layer) => layer.role !== "base");
-    const desiredIds = new Set(overlayLayers.map((layer) => layer.layerId));
-    for (const [layerId, record] of siurTileLayersRef.current) {
-      if (!desiredIds.has(layerId)) {
-        record.layer.remove();
-        siurTileLayersRef.current.delete(layerId);
-      }
-    }
-
-    for (const descriptor of overlayLayers) {
-      const signature = JSON.stringify([
-        descriptor.attribution,
-        descriptor.minZoom,
-        descriptor.maxZoom,
-        descriptor.bounds,
-      ]);
-      let record = siurTileLayersRef.current.get(descriptor.layerId);
-      if (record && record.signature !== signature) {
-        record.layer.remove();
-        siurTileLayersRef.current.delete(descriptor.layerId);
-        record = undefined;
-      }
-      if (!record) {
-        const bounds = descriptor.bounds
-          ? L.latLngBounds(
-              [descriptor.bounds.south, descriptor.bounds.west],
-              [descriptor.bounds.north, descriptor.bounds.east],
-            )
-          : undefined;
-        const tileLayer = L.tileLayer(descriptor.tileUrl, {
-          attribution: descriptor.attribution ?? undefined,
-          bounds,
-          maxZoom: descriptor.maxZoom ?? MAX_MAP_ZOOM,
-          minZoom: descriptor.minZoom ?? 0,
-          opacity: descriptor.opacity,
-          pane: "siurPane",
-        });
-        record = {
-          layer: tileLayer,
-          signature,
-          url: descriptor.tileUrl,
-          errorNotified: false,
-        };
-        const tileRecord = record;
-        tileLayer.on("tileerror", () => {
-          if (!tileRecord.errorNotified) {
-            tileRecord.errorNotified = true;
-            onSiurTileErrorRef.current?.(
-              descriptor.layerId,
-              descriptor.title,
-            );
-          }
-        });
-        tileLayer.on("tileload", () => {
-          tileRecord.errorNotified = false;
-          onSiurTileLoadRef.current?.(descriptor.layerId);
-        });
-        siurTileLayersRef.current.set(descriptor.layerId, record);
-      } else if (record.url !== descriptor.tileUrl) {
-        record.layer.setUrl(descriptor.tileUrl);
-        record.url = descriptor.tileUrl;
-        record.errorNotified = false;
-      }
-
-      record.layer.setOpacity(descriptor.opacity);
-      record.layer.setZIndex(descriptor.zIndex);
-      if (descriptor.visible) {
-        if (!map.hasLayer(record.layer)) {
-          record.layer.addTo(map);
-        }
-      } else if (map.hasLayer(record.layer)) {
-        record.layer.remove();
-      }
-    }
-  }, [mapReady, siurLayers]);
+  }, [cartografia]);
 
   useEffect(() => {
     const L = leafletRef.current;
@@ -972,7 +814,7 @@ export function MunicipalMap({
         map,
         bounds,
         initialZoomRef.current,
-        coverageBoundsRef.current,
+        terminoBoundsRef.current,
       );
     }
   }, [items, mapReady]);
@@ -1031,11 +873,11 @@ export function MunicipalMap({
 
     if (markerBoundsRef.current) {
       fitMapToBounds(
-      map,
-      markerBoundsRef.current,
-      initialZoom,
-      coverageBoundsRef.current,
-    );
+        map,
+        markerBoundsRef.current,
+        initialZoom,
+        terminoBoundsRef.current,
+      );
     }
   }, [
     focusLabel,
@@ -1065,7 +907,7 @@ export function MunicipalMap({
       map,
       allBounds,
       initialZoomRef.current,
-      coverageBoundsRef.current,
+      terminoBoundsRef.current,
     );
   }, [fitRequest, mapReady]);
 
@@ -1215,16 +1057,12 @@ export function MunicipalMap({
   return (
     <div className="municipal-map-shell">
       <div
-        aria-label="Mapa municipal con ubicaciones de necesidades, proyectos y activos"
-        className="municipal-map-canvas"
+        aria-label={`Mapa de ${cartografia.municipio} con las ubicaciones de necesidades, proyectos y activos`}
+        className={`municipal-map-canvas ${styles.mapa}`}
+        data-detalle={nivel}
         ref={containerRef}
         role="region"
       />
-      {!selectedBaseMap ? (
-        <p className="municipal-map-local-base-note" role="status">
-          Fondo cartográfico local pendiente de sincronización.
-        </p>
-      ) : null}
     </div>
   );
 }

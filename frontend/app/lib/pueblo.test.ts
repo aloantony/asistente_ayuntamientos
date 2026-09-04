@@ -4,6 +4,7 @@ import {
   buscarPueblo,
   cargarCartografia,
   limitesDe,
+  mascaraExterior,
   nivelDetalle,
   normalizarNombre,
   PUEBLOS,
@@ -112,6 +113,46 @@ describe("limitesDe", () => {
       [-2, -2],
       [4, 3],
     ]);
+  });
+});
+
+describe("mascaraExterior", () => {
+  it("envuelve el mundo y deja el término como agujero", () => {
+    const limite = {
+      type: "Polygon" as const,
+      coordinates: [
+        [
+          [-3.65, 41.58],
+          [-3.63, 41.58],
+          [-3.63, 41.6],
+          [-3.65, 41.58],
+        ],
+      ],
+    };
+    const mascara = mascaraExterior(limite);
+
+    expect(mascara.type).toBe("Polygon");
+    expect(mascara.coordinates[0]).toEqual([
+      [-180, -85],
+      [180, -85],
+      [180, 85],
+      [-180, 85],
+      [-180, -85],
+    ]);
+    // El anillo del término viaja intacto: es el agujero.
+    expect(mascara.coordinates[1]).toEqual(limite.coordinates[0]);
+  });
+
+  it("un multipolígono aporta todos sus anillos como agujeros", () => {
+    const mascara = mascaraExterior({
+      type: "MultiPolygon",
+      coordinates: [
+        [[[0, 0], [1, 1], [0, 0]]],
+        [[[5, 5], [6, 6], [5, 5]]],
+      ],
+    });
+
+    expect(mascara.coordinates).toHaveLength(3);
   });
 });
 
