@@ -1,6 +1,6 @@
 # Diseño: pantalla Ayuntamiento e Instalaciones (prototipo de Claude Design)
 
-Actualizado: 2026-07-30. Cuerpo del Ayuntamiento terminado; la Fase C depende de SIUR (§3 bis).
+Actualizado: 2026-09-04. Cuerpo del Ayuntamiento terminado; la cartografía cambió de rumbo (§3 bis, ADR-064).
 
 Fuente: proyecto de Claude Design `bb6236ef-e522-46db-a8ce-2f9097b2a3d1`, fichero
 `uploads/ZIP del  HTML de claude Design/Pantalla Principal.dc.html` (1.437 líneas, tres pantallas:
@@ -31,8 +31,8 @@ Lo ya construido y reutilizable:
 - **`geo`**: en `main`, **solo puntos**. `GeoLocation` (punto, lat/lon, municipio, organización) y
   `EntityLocation` (`requirement|project`). `MunicipalMap` es un envoltorio de Leaflet con teselas de
   OpenStreetMap.
-- **`reference_layers` (SIUR)**: **la cartografía ya está construida en otra rama**, sin fusionar. Ver
-  §3 bis: es lo más importante de este documento antes de tocar la Fase C.
+- **Cartografía**: un JSON estático por municipio, dibujado con Leaflet. El espejo SIUR que
+  ocupaba este hueco se retiró; ver §3 bis y ADR-064.
 
 ## 2. Inventario: prototipo frente a implementado
 
@@ -96,39 +96,25 @@ por arrastre. **La tarjeta —plegado, arrastre y menú— está hecha (§9); lo
    #3987e5` sobre `#2a2928`. En claro el turquesa queda bajo 3:1, lo que obliga a etiqueta visible:
    por eso hay leyenda y vista de tabla siempre.
 5 a 8. **Modelo de capas, mapas base externos, el `geoserver` y los GeoJSON** — **RETIRADAS**: las
-   responde SIUR, no este documento. Ver §3 bis.
+   respondía SIUR; hoy las responde ADR-064. Ver §3 bis.
 9. **Numeración de ADR.** El último es el 033. Los ADR de estas fases arrancan en el **034**.
 
-## 3 bis. La cartografía ya existe: SIUR (hallazgo del 2026-07-30)
+## 3 bis. La cartografía: SIUR primero, un fichero después (2026-09-04)
 
-Antes de construir nada de la Fase C hay que saber esto. En la rama
-`codex/add-siur-strategy-reconcile-cli-20260727` (y hermanas, **sin fusionar en `main`**) vive un
-módulo `backend/app/reference_layers/` de **más de 70 ficheros** con **22 migraciones que `main` no
-tiene**, y diez documentos de diseño (`docs/integracion-siur.md`, `siur-local-mirror.md`,
-`siur-disaster-recovery.md`, `siur-mirror-authorization-review.md`…).
+Este apartado decía que la cartografía «ya existía» en el módulo
+`backend/app/reference_layers/` —más de setenta ficheros, un GeoServer propio, un
+GeoWebCache, un espejo del catálogo SIUR— y que la Fase C dependía de fusionarlo.
+Se fusionó, se desplegó y se usó durante dos meses.
 
-Su objetivo declarado: que el mapa sea *«un superconjunto verificable del visor SIUR»* — catálogo,
-jerarquía, bases, capas, orden, visibilidad, estilos, leyendas, metadatos y operaciones públicas.
+**Se ha retirado entero.** Aquella máquina resolvía la reutilización soberana de la
+cartografía pública de una comunidad autónoma; lo que el producto necesita es que un
+pueblo vea sus calles. El mapa se dibuja ahora desde un JSON estático por municipio
+(Catastro para los edificios, OpenStreetMap para lo demás), sin servidor de mapas de
+ninguna clase. Los motivos y lo que se pierde están en **ADR-064**; el funcionamiento,
+en `docs/mapa-municipal.md`.
 
-Lo que ya resuelve:
-
-- **GeoServer propio** (`docker.osgeo.org/geoserver:3.0.0`, en `127.0.0.1:8081`) con volúmenes de
-  datos, caché de teselas y artefactos de referencia. El contenedor «huérfano» de la decisión 7 **es
-  ese**: no es un resto olvidado.
-- **Modelo de capas**: `reference_services`, `reference_layers`, `reference_layer_styles`,
-  instantáneas de catálogo, versiones observadas y comprobaciones de actualización.
-- **Espejo local** de cartografía oficial con autorización, cobertura, reconciliación, recuperación
-  ante desastres y auditoría de fuentes; evidencias de IDECyL, SIGPAC y PNOA histórico.
-- **Proxy y caché WMS**, siembra de teselas y control de cuota — es decir, los mapas base de la
-  decisión 6, servidos desde casa en vez de exponer al navegador contra terceros.
-
-**Consecuencia para este plan**: la Fase C **no construye cartografía, la consume**, igual que C4
-consume `assets` y `maintenance`. Construir aquí un segundo modelo de capas repetiría —a mucho mayor
-coste— el error de duplicar `/ayuntamiento` que ya se cometió al principio de este trabajo.
-
-**Requisito previo**: que SIUR esté fusionado, o al menos su modelo estable. Mientras `main` vaya por
-detrás de las ramas de cartografía, seguridad, despliegue y Ayuntamiento a la vez, cualquier fase
-nueva se construye sobre una base que no es la verdad.
+Lo que sigue valiendo de este apartado es la advertencia que lo motivó: mirar qué hay
+construido antes de construir. Lo que ya no vale es su conclusión.
 
 ## 4. Fases
 
@@ -174,20 +160,19 @@ Orden propuesto, de menor a mayor riesgo:
   por documento y las versiones anteriores archivables: no existen en el modelo de `Ordinance` e
   inventarlos aquí bifurcaría el dominio.
 
-### Fase C — Instalaciones (consumo de SIUR, no construcción)
-- **C1 Modelo de capas** — **NO SE HACE AQUÍ**: lo aporta `reference_layers` (§3 bis). Esta fase se
-  limita a leer su catálogo.
-- **C2 Importación de los GeoJSON de Fuentelcésped** — **revisar contra SIUR antes**: su espejo local
-  y su auditoría de fuentes probablemente ya cubren buena parte, y las que no, deberían entrar por su
-  vía y no por una importación paralela.
-- **C3 Panel de 5 pestañas, leyenda y búsqueda** — sobre `MunicipalMap`, alimentado por el catálogo de
-  `reference_layers`. Es el grueso de lo que queda por hacer.
+### Fase C — Instalaciones (sobre el plano del municipio)
+- **C1 Modelo de capas** — **HECHA por otra vía** (ADR-044): el árbol de capas se deriva de lo que hay
+  situado en el mapa, no de un catálogo externo.
+- **C2 Cartografía de Fuentelcésped** — **HECHA** (ADR-064): edificios del Catastro y viales de
+  OpenStreetMap en un JSON estático que viaja con la aplicación.
+- **C3 Panel de capas, leyenda y búsqueda** — hecha su parte de capas y búsqueda en
+  Ayuntamiento → Mapa general, derivada de los propios elementos.
 - **C4 Fichas y mantenimiento** — HECHA (`305e43c`) en su parte independiente: filtro de vencimiento
   (todas / ≤30 días / vencidas) resuelto **en el servidor** con `scheduled_to`, y aviso en rojo de las
   órdenes pasadas de fecha. Consume `assets` y `maintenance`, sin almacén propio. Queda pendiente lo
   que sí depende del mapa: los paneles por capa y la búsqueda de elementos sobre la cartografía.
-- **C5 Mapas base y ortofotos** — **ya resuelto por SIUR**: su proxy y caché WMS sirven las bases
-  desde casa, así que no hay egreso nuevo del navegador que decidir.
+- **C5 Mapas base y ortofotos** — **FUERA DE ALCANCE** (ADR-064): no hay mapa base externo ni
+  ortofoto; el fondo es el propio plano del municipio, y el navegador no sale a ningún servidor.
 - **C6 Exportación del recorte** a PNG/JPG/PDF.
 - Herramientas de análisis: fuera de alcance.
 
@@ -213,13 +198,12 @@ están sin empezar.
 **El cuerpo del Ayuntamiento está terminado**: la barra y los siete epígrafes. De la Fase C está hecha
 la parte de C4 que no dependía del mapa.
 
-Lo único que queda es la **cartografía**, y ya no está bloqueada por decisiones de diseño sino por
-**topología de ramas**: SIUR la resuelve (§3 bis) pero no está en `main`. El siguiente paso no es
-código, es fusionar.
+La **cartografía** ya está: el plano de Fuentelcésped se dibuja desde un fichero propio (ADR-064) y
+el mapa general lo usa con las capas derivadas del inventario.
 
-Cuando SIUR esté en `main`, la Fase C se reduce a **C3** (panel de capas, leyenda y búsqueda sobre el
-catálogo), **C6** (exportación del recorte) y la parte de C4 que necesita el mapa. Bastante menos de
-lo que este documento estimaba al escribirse.
+De la Fase C quedan **C6** (exportación del recorte) y la parte de C4 que necesita el mapa: los
+paneles por capa y la búsqueda de elementos sobre la cartografía. Bastante menos de lo que este
+documento estimaba al escribirse, y por un camino distinto del que preveía.
 
 ## 7. GIRO (2026-08-02): el diseño no tiene pestañas fijas
 

@@ -1180,6 +1180,7 @@ function MunicipalWorkspaceContent() {
         ) : activeTab === "map" ? (
           <MapaGeneral
             canViewMap={canViewMap}
+            municipality={municipality ?? selectedContext.municipality}
             organizationId={selectedContext.organization.id}
           />
         ) : activeTab === "people" ? (

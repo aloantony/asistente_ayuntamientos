@@ -32,8 +32,7 @@ jobs:
         run: git diff --check "${BASE_SHA}...${GITHUB_SHA}"
 
       # Los contratos de Compose de `scripts/tests` resuelven el fichero de
-      # desarrollo, y su servicio `backend` declara `env_file: .env`. El job de
-      # GeoWebCache hace lo mismo por la misma razón.
+      # desarrollo, y su servicio `backend` declara `env_file: .env`.
       - name: Provide the development env file
         run: cp .env.example .env
 
@@ -50,9 +49,6 @@ jobs:
       SECRET_KEY: ci-only-secret-key-with-at-least-32-characters
       DOCUMENT_STORAGE_ROOT: /tmp/asistente-ayuntamientos-ci-documents
       TEST_REDIS_URL: redis://127.0.0.1:6379/15
-      GEOSERVER_ADMIN_USER: ci-admin
-      GEOSERVER_ADMIN_PASSWORD: ci-only-geoserver-password
-      GEOWEBCACHE_TILE_CACHE_HOST_PATH: /tmp/siur-gwc-ci-not-mounted
     defaults:
       run:
         working-directory: backend
@@ -101,37 +97,6 @@ jobs:
             docker logs "${container_id}"
           fi
 
-  gwc_contract:
-    name: GeoWebCache deployment contract
-    runs-on: ubuntu-24.04
-    timeout-minutes: 15
-    steps:
-      - name: Check out repository
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
-        with:
-          persist-credentials: false
-
-      - name: Validate Compose contract
-        run: |
-          cp .env.example .env
-          docker compose config --quiet
-
-      - name: Set up Java
-        uses: actions/setup-java@be666c2fcd27ec809703dec50e508c2fdc7f6654 # v5.2.0
-        with:
-          distribution: temurin
-          java-version: "17"
-          cache: maven
-          cache-dependency-path: ops/geoserver-gwc-health/pom.xml
-
-      - name: Compile and test the version-pinned health extension
-        run: >-
-          mvn --file ops/geoserver-gwc-health/pom.xml
-          --batch-mode --no-transfer-progress verify
-
-      - name: Require committed Java formatting
-        run: git diff --exit-code -- ops/geoserver-gwc-health
-
   frontend:
     name: Frontend
     runs-on: ubuntu-24.04
@@ -177,7 +142,6 @@ jobs:
     needs:
       - repository
       - backend
-      - gwc_contract
       - frontend
     runs-on: ubuntu-24.04
     timeout-minutes: 2
@@ -186,10 +150,8 @@ jobs:
         env:
           REPOSITORY_RESULT: ${{ needs.repository.result }}
           BACKEND_RESULT: ${{ needs.backend.result }}
-          GWC_CONTRACT_RESULT: ${{ needs.gwc_contract.result }}
           FRONTEND_RESULT: ${{ needs.frontend.result }}
         run: |
           test "${REPOSITORY_RESULT}" = "success"
           test "${BACKEND_RESULT}" = "success"
-          test "${GWC_CONTRACT_RESULT}" = "success"
           test "${FRONTEND_RESULT}" = "success"

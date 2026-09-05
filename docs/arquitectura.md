@@ -1,6 +1,6 @@
 # Arquitectura
 
-Actualizado: 2026-07-30.
+Actualizado: 2026-09-04.
 
 Este documento describe la arquitectura **implementada**. La arquitectura
 objetivo, con una instancia operativa por ayuntamiento y un control de
@@ -39,6 +39,7 @@ La distinción central del dominio:
 - Municipios y ordenanzas son globales: sus permisos (`municipalities.*`, `ordinances.*`) se evalúan sin filtro de organización; quién debe curarlos es una decisión de producto abierta.
 - El Ayuntamiento añade permisos propios (`town_hall.view`, `town_hall.edit`, `town_hall.manage`). La organización viaja siempre explícita, y las mutaciones de bloques revalidan el permiso contra la organización del propio bloque, así que tenerlo en otra no basta.
 - El bloque de temperatura (`app/town_hall/weather.py`) es el único punto de egreso externo del proyecto que no es de IA: consulta Open-Meteo desde el servidor con el topónimo del municipio y sus coordenadas, y nada más (ADR-034).
+- El fondo del mapa municipal es un plano estático del municipio servido (`frontend/public/cartografia/`), con edificios del Catastro y viales, aguas y usos del suelo de OpenStreetMap ya reproyectados a WGS84. Lo dibuja `MunicipalMap` con Leaflet en modo SVG, sin servidor de mapas ni teselas externas; el registro de municipios con plano vive en `app/lib/pueblo.ts` y un municipio sin plano degrada a un aviso sin romper el resto de la pantalla. Ver ADR-064.
 - El mapa municipal añade permisos propios (`map.view`, `map.edit`, `map.import`, `map.manage`). Los marcadores combinan permiso de mapa en la organización de la entidad con su visibilidad normal; los activos requieren además permisos de inventario y edición en ambos dominios para reubicarlos, de modo que la capa geográfica no filtre ni modifique trabajo inaccesible por otra ruta.
 - El mantenimiento usa permisos tenant-scoped propios (`maintenance.view|create|edit|complete|manage`) y exige además visibilidad del activo. Las transiciones de estado y su evento de auditoría se confirman en una única transacción bajo bloqueo de fila; los eventos no tienen API de edición ni borrado.
 - El catálogo de permisos se siembra automáticamente al arrancar el backend (idempotente); `POST /admin/permissions/bootstrap` sigue disponible como re-siembra manual. El arranque también siembra fuentes jurídicas oficiales mínimas para importación de ordenanzas, incluido el BOP de Burgos como fuente primaria del MVP Burgos.

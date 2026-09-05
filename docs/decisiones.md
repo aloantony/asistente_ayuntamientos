@@ -1379,3 +1379,77 @@ rastro del motivo original convierte un fallo diagnosticable en uno opaco. Es el
 mismo patrón que ya se corrigió en `unexpected_worker_error`. Al escribir un
 `raise ... from error`, conviene preguntarse si alguien podrá saber qué pasó sin
 volver a reproducirlo a mano.
+
+## ADR-064: El mapa se dibuja desde un fichero, no desde un servidor de mapas (2026-09-04)
+
+Deja sin efecto ADR-055, ADR-057, ADR-058, ADR-060, ADR-061, ADR-062 y ADR-063,
+y retira el espejo cartográfico entero: GeoServer, GeoWebCache y su pasarela, el
+planificador y el trabajador del espejo, el proxy WMS atestiguado, treinta
+tablas, 86.000 líneas de código de backend, 53 ficheros de prueba, nueve
+servicios de Compose, un trabajo de CI con su extensión Java y diez documentos
+de diseño.
+
+Nada de aquello estaba mal construido. El problema es que estaba construido para
+otro problema. Un espejo con estrategias, atestaciones, paridad de estilos,
+cuota de disco y ensayo de recuperación resuelve la reutilización soberana de la
+cartografía pública de una comunidad autónoma. Lo que el producto necesita es
+que el alcalde de un pueblo de doscientos habitantes vea sus calles y ponga
+encima sus farolas. Entre una cosa y la otra hay dos órdenes de magnitud, y los
+pagábamos en cada avería: cuando fallaba un eslabón —una firma de licencia que
+faltaba, una tesela que no se renderizaba, la pasarela sin arrancar— la pantalla
+no se degradaba, se quedaba en blanco.
+
+Los siete ADR que este deja sin efecto lo cuentan solos: son siete arreglos
+seguidos, en cuatro días, sobre la misma máquina. Ninguno estaba equivocado;
+juntos son la señal de que el problema elegido era demasiado grande.
+
+**El plano del municipio pasa a ser un dato de la aplicación.** Las huellas de
+edificio salen del servicio INSPIRE del Catastro y los viales, aguas y usos del
+suelo de OpenStreetMap; se reproyectan a WGS84 una vez, se simplifican y se
+guardan como un JSON en `frontend/public/cartografia/`. Fuentelcésped ocupa
+222 KB. El navegador lo pide una vez por sesión y Leaflet lo dibuja sin pedirle
+nada a nadie más: no hay tesela que pueda faltar, ni servicio que pueda estar
+caído, ni versión que se pueda quedar obsoleta sin avisar.
+
+**Un municipio por contrato, no un catálogo por comunidad.** El registro vive en
+`frontend/app/lib/pueblo.ts` y hoy tiene una entrada. Un municipio sin plano lo
+dice en pantalla y el resto del mapa —inventario, necesidades, proyectos, alta
+de elementos sobre un punto— sigue funcionando. Preparar el plano de un pueblo
+nuevo es un rato de trabajo con dos fuentes públicas, no un despliegue.
+
+Lo que se pierde es real y se acepta a sabiendas: no hay ortofoto, ni catastro
+navegable, ni capas temáticas del IDECyL, ni consulta de atributos sobre una
+capa WMS. Si alguna vuelve a hacer falta, volverá como un dato más del plano
+—una capa más en el mismo fichero— antes que como un servidor.
+
+También se pierde la actualización automática: el plano es una foto fija de la
+fecha en que se generó. Para un casco urbano que cambia de década en década es
+la compensación correcta, y regenerar el fichero es volver a ejecutar la misma
+descarga.
+
+De ADR-061 sobrevive la lección, no el mecanismo: el mapa sigue abriéndose y
+deteniéndose donde llega su cartografía, sólo que ahora el sobre lo da el límite
+municipal en vez de la envolvente del espejo. Y el zoom máximo baja de 24 a 19
+por el mismo motivo que allí se recortaba, aunque un plano vectorial no se
+emborrone: pasado ese punto no queda nada nuevo que enseñar.
+
+Los volúmenes del espejo (`reference_artifacts`, `reference_transient`,
+`geoserver_data`, `geowebcache_tile_cache_v4`) dejan de estar declarados pero
+**no se borran aquí**: contienen sólo cartografía derivada de fuentes públicas y
+se retiran a mano cuando quien opera lo decida. La migración `20260904_0045` sí
+suelta las treinta tablas, que no guardaban nada introducido por un ayuntamiento.
+
+Esa migración **sigue siendo reversible**, y no por capricho: la cadena de este
+repositorio se comprueba bajando desde la cabeza hasta revisiones muy
+anteriores, y quince pruebas cruzan este punto. Un downgrade que se declarara
+imposible las rompería todas y, con ellas, una propiedad que el proyecto ha
+defendido desde el principio. Así que la revisión lleva al lado el volcado del
+esquema que suelta (`20260904_0045_reference_layer_mirror_schema.sql`, generado
+con `pg_dump`, no escrito a mano) y su downgrade lo restituye para que las
+migraciones que crearon esas tablas puedan desmontarlas como siempre. Son 1.300
+líneas de esquema muerto; el precio de poder borrar 186.000 y no perder la
+reversibilidad por el camino.
+
+ADR-044 se mantiene: el árbol de capas del mapa sigue derivándose de lo que hay
+situado en él. Lo que desaparece es el otro árbol, el del catálogo del
+proveedor.

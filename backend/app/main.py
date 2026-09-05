@@ -34,8 +34,6 @@ from app.plenos.routes import router as plenos_router
 from app.projects.routes import router as projects_router
 from app.rbac.permissions import ensure_initial_permissions
 from app.requirements.routes import router as requirements_router
-from app.reference_layers.routes import router as reference_layers_router
-from app.reference_layers.wms_middleware import ReferenceWMSVaryMiddleware
 from app.security.routes import router as security_router
 from app.sede.routes import router as sede_router
 from app.staff.routes import router as staff_router
@@ -101,7 +99,6 @@ app.add_middleware(
     allow_headers=["Authorization", "Content-Type", "X-Bootstrap-Admin-Token"],
     expose_headers=["X-Total-Count"],
 )
-app.add_middleware(ReferenceWMSVaryMiddleware)
 
 app.add_middleware(OriginCsrfMiddleware, allowed_origins=settings.cors_origins)
 
@@ -116,7 +113,6 @@ for app_router in (
     documents_router,
     requirements_router,
     geo_router,
-    reference_layers_router,
     assets_router,
     maintenance_router,
     government_router,
