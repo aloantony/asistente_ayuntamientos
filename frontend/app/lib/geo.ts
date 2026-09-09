@@ -89,6 +89,7 @@ export function createEntityLocation(
       label: string;
       latitude: number;
       longitude: number;
+      geometry?: { type: "LineString" | "Polygon"; coordinates: number[][] | number[][][] };
       address_text?: string | null;
       place_name?: string | null;
       cadastral_reference?: string | null;

@@ -51,7 +51,7 @@ export type PuebloDisponible = {
 /** Municipios con cartografía preparada. Crece con cada contratación. */
 export const PUEBLOS: PuebloDisponible[] = [
   {
-    ine: "09140",
+    ine: "09137",
     nombre: "Fuentelcésped",
     archivo: "/cartografia/fuentelcesped.json",
   },
@@ -96,10 +96,7 @@ export function buscarPueblo(
   }
   const ine = municipio.ine_code?.trim();
   if (ine) {
-    const porCodigo = PUEBLOS.find((pueblo) => pueblo.ine === ine);
-    if (porCodigo) {
-      return porCodigo;
-    }
+    return PUEBLOS.find((pueblo) => pueblo.ine === ine) ?? null;
   }
   const nombre = municipio.name ? normalizarNombre(municipio.name) : "";
   if (!nombre) {
@@ -130,6 +127,12 @@ export function cargarCartografia(
         throw new Error(`No se pudo cargar el mapa de ${pueblo.nombre}.`);
       }
       return respuesta.json() as Promise<CartografiaPueblo>;
+    })
+    .then((cartografia) => {
+      if (cartografia.ine !== pueblo.ine) {
+        throw new Error("El plano no corresponde al municipio seleccionado.");
+      }
+      return cartografia;
     })
     .catch((motivo: unknown) => {
       // Un fallo no puede dejar la promesa rota en la caché para siempre: el

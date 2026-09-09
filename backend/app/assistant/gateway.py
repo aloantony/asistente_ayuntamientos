@@ -91,6 +91,8 @@ class AIGateway:
 
     @property
     def enabled(self) -> bool:
+        if settings.assistant_runtime == "groq":
+            return bool(settings.groq_api_key)
         if settings.assistant_runtime == "anthropic":
             return bool(settings.anthropic_api_key)
         if settings.assistant_runtime == "hermes_agent":
@@ -109,6 +111,8 @@ class AIGateway:
 
     @property
     def model(self) -> str:
+        if settings.assistant_runtime == "groq":
+            return settings.groq_model
         if settings.assistant_runtime == "hermes_agent":
             return settings.hermes_agent_model
         if settings.assistant_runtime == "openai_responses":
@@ -178,6 +182,11 @@ class AIGateway:
         timeout_seconds: float | None = None,
         safety_identifier: str | None = None,
     ) -> AICompletion:
+        if settings.assistant_runtime == "groq":
+            from app.assistant.groq import complete_groq
+
+            return complete_groq(system=system, messages=messages, tools=tools,
+                                 timeout=_bounded_gateway_timeout(timeout_seconds))
         if settings.assistant_runtime == "anthropic":
             return self._complete_anthropic(
                 system=system,
@@ -219,6 +228,13 @@ class AIGateway:
         timeout_seconds: float | None = None,
         safety_identifier: str | None = None,
     ) -> Generator[AITextDelta, None, AICompletion]:
+        if settings.assistant_runtime == "groq":
+            from app.assistant.groq import complete_groq_stream
+
+            return (yield from complete_groq_stream(
+                system=system, messages=messages, tools=tools,
+                timeout=_bounded_gateway_timeout(timeout_seconds),
+            ))
         if settings.assistant_runtime == "anthropic":
             completion = yield from self._complete_stream_anthropic(
                 system=system,
@@ -584,9 +600,16 @@ def _raise_codex_subscription_gateway_error(error: Exception) -> None:
         logger.error("Assistant API timeout: runtime=codex_subscription")
         raise AssistantTimeoutError("Assistant request timed out") from error
     if isinstance(error, CodexSubscriptionError):
+        failure_site = "unknown"
+        traceback = error.__traceback__
+        while traceback is not None:
+            code = traceback.tb_frame.f_code
+            failure_site = f"{code.co_name}:{traceback.tb_lineno}"
+            traceback = traceback.tb_next
         logger.error(
-            "Assistant runtime failed: runtime=codex_subscription error_type=%s",
+            "Assistant runtime failed: runtime=codex_subscription error_type=%s failure_site=%s",
             type(error).__name__,
+            failure_site,
         )
         raise AssistantUnavailableError("Assistant runtime failed") from error
     raise error

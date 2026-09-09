@@ -133,6 +133,8 @@ def require_assistant_use(db: Session, current_user: User) -> None:
 
 
 def configured_assistant_model() -> str:
+    if settings.assistant_runtime == "groq":
+        return settings.groq_model
     if settings.assistant_runtime == "hermes_agent":
         return settings.hermes_agent_model
     if settings.assistant_runtime == "openai_responses":

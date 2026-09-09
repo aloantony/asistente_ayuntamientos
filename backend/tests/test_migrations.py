@@ -20,7 +20,7 @@ from sqlalchemy.engine.url import make_url
 
 BACKEND_ROOT = Path(__file__).resolve().parents[1]
 DEPLOYED_REVISION = "20260701_0020"
-HEAD_REVISION = "20260904_0045"
+HEAD_REVISION = "20260905_0046"
 LEGACY_GEOGRAPHY_REVISION = "20260716_0026"
 LEGACY_GEOGRAPHY_PATH = (
     BACKEND_ROOT
@@ -4046,5 +4046,33 @@ def test_legacy_town_hall_tabs_fold_into_one_and_unfold(
                 {"id": datos_epigraph},
             ).scalar_one()
             assert marca is None or "merged_from" not in marca
+    finally:
+        engine.dispose()
+
+
+def test_map_registration_upgrade_preserves_existing_users(migration_database_url: str):
+    run_alembic(migration_database_url, 'upgrade', '20260904_0045')
+    engine = create_engine(migration_database_url)
+    try:
+        with engine.begin() as connection:
+            actor_id = connection.execute(text(
+                "INSERT INTO users (email, hashed_password, full_name, is_active, is_superuser) "
+                "VALUES ('map-upgrade@example.test', 'hash', 'Map upgrade', true, false) RETURNING id"
+            )).scalar_one()
+        run_alembic(migration_database_url, 'upgrade', 'head')
+        run_alembic(migration_database_url, 'check')
+        with engine.begin() as connection:
+            assert connection.execute(text('SELECT email FROM users WHERE id=:id'), {'id': actor_id}).scalar_one() == 'map-upgrade@example.test'
+            connection.execute(text(
+                "INSERT INTO map_registrations (actor_id, request_key, payload_sha256, entity_type, entity_id) "
+                "VALUES (:actor, :key, :digest, 'requirement', 1)"
+            ), {'actor': actor_id, 'key': str(uuid.uuid4()), 'digest': 'a' * 64})
+            assert connection.execute(text('SELECT count(*) FROM map_registrations')).scalar_one() == 1
+        blocked = run_alembic(migration_database_url, 'downgrade', '20260904_0045', check=False)
+        assert blocked.returncode != 0 and 'map registration receipts exist' in blocked.stderr
+        with engine.connect() as connection:
+            assert connection.execute(text('SELECT count(*) FROM map_registrations')).scalar_one() == 1
+            assert connection.execute(text('SELECT version_num FROM alembic_version')).scalar_one() == HEAD_REVISION
+
     finally:
         engine.dispose()

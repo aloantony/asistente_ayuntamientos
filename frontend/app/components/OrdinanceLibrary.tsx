@@ -37,6 +37,7 @@ import type {
   OrdinanceSearchPage,
   OrdinanceSemanticSearchResult,
 } from "./types";
+import { OrdinanceCoverage } from "./OrdinanceCoverage";
 import { OrdinanceComparisonPanel } from "./OrdinanceComparisonPanel";
 import { OrdinanceDetailPanel } from "./OrdinanceDetailPanel";
 import { OrdinanceSearchResults } from "./OrdinanceSearchResults";
@@ -646,6 +647,7 @@ export function OrdinanceLibrary() {
           </span>
         </div>
       </header>
+      <OrdinanceCoverage key={user?.id} />
 
       <form className={styles.searchPanel} onSubmit={handleSearch}>
         <div className={styles.searchRow}>

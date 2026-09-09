@@ -105,6 +105,7 @@ export type RuralUrbanProfile =
   | "unknown";
 
 export type MunicipalitySummary = {
+  ine_code?: string | null;
   id: number;
   name: string;
   province: string;

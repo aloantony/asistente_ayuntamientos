@@ -101,6 +101,16 @@ REVIEW_SENSITIVE_ORDINANCE_FIELDS = {
 }
 
 
+@router.get("/coverage/cyl")
+def get_cyl_coverage(
+    db: Annotated[Session, Depends(get_db)],
+    current_user: Annotated[User, Depends(get_current_user)],
+) -> dict:
+    from app.ordinances.coverage import build_cyl_coverage
+    require_ordinance_permission(db, current_user, "ordinances.view")
+    return build_cyl_coverage(db)
+
+
 @router.get("", response_model=list[OrdinanceListRead])
 def list_ordinances(
     db: Annotated[Session, Depends(get_db)],

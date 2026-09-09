@@ -35,8 +35,7 @@ import type {
   GeoEntityType,
   GeoMapItem,
   MunicipalAsset,
-  Project,
-  Requirement,
+  MunicipalAssetType,
   User,
 } from "./types";
 import { userHasPermission } from "./types";
@@ -45,7 +44,9 @@ type MapPanelProps = {
   user: User;
 };
 
-type CreatableMapEntityType = "requirement" | "project";
+import { fetchAssetTypes } from "../lib/assets";
+
+type CreatableMapEntityType = "requirement" | "project" | "asset";
 type MapView = "territory" | "municipalities";
 
 export function resolveMapView(
@@ -122,6 +123,8 @@ type MapContextMenu = {
 };
 
 type MapRegistrationDraft = {
+  requestKey?: string;
+  assetTypeId?: string;
   kind: CreatableMapEntityType;
   latitude: number;
   longitude: number;
@@ -170,7 +173,14 @@ function entityDetailLabel(type: GeoEntityType) {
 }
 
 function formatStatus(value: string) {
-  return value.replace(/_/g, " ");
+  const labels: Record<string, string> = {
+    active: "Activo", inactive: "Inactivo", retired: "Retirado", archived: "Archivado",
+    good: "Bueno", fair: "Regular", poor: "Malo", unknown: "Sin revisar",
+    pending: "Pendiente", in_progress: "En curso", blocked: "Bloqueado", completed: "Completado",
+    cancelled: "Cancelado", draft: "Borrador", approved: "Aprobado", rejected: "Rechazado",
+    low: "Baja", normal: "Normal", high: "Alta", urgent: "Urgente",
+  };
+  return labels[value] ?? value.replace(/_/g, " ");
 }
 
 function normalizeAssetStatus(value: string): AssetStatus {
@@ -475,6 +485,45 @@ function MapPanelContent({ user }: MapPanelProps) {
   const layerDragKeyRef = useRef<string | null>(null);
   const handleRequestErrorRef = useRef(handleRequestError);
 
+  const [registrationTypes, setRegistrationTypes] = useState<MunicipalAssetType[]>([]);
+  const registrationKind = registrationDraft?.kind;
+  const registrationOrg = registrationDraft?.organizationId;
+  useEffect(() => {
+    setRegistrationTypes([]);
+    if (registrationKind !== "asset" || !registrationOrg) return;
+    const controller = new AbortController();
+    fetchAssetTypes(Number(registrationOrg), controller.signal).then((types) => {
+      if (!controller.signal.aborted) setRegistrationTypes(types.items.filter((type) => type.status === "active" && type.category.status === "active"));
+    }).catch((error) => {
+      if (!controller.signal.aborted) handleRequestErrorRef.current(error, setRegistrationError, "No se pudieron cargar los tipos de activo.");
+    });
+    return () => controller.abort();
+  }, [registrationKind, registrationOrg]);
+  const [drawMode, setDrawMode] = useState<"LineString" | "Polygon" | null>(null);
+  const [drawPoints, setDrawPoints] = useState<number[][]>([]);
+  const [savingGeometry, setSavingGeometry] = useState(false);
+  const drawnGeometry = drawMode && drawPoints.length >= 2 ? {
+    type: drawMode,
+    coordinates: drawMode === "Polygon" ? [[...drawPoints, drawPoints[0]]] : drawPoints,
+  } : null;
+  const addDrawPoint = useCallback((longitude: number, latitude: number) => {
+    setDrawPoints((points) => points.length < 199 ? [...points, [longitude, latitude]] : points);
+  }, []);
+  async function saveDrawing() {
+    if (!selectedItem || !drawnGeometry || savingGeometry) return;
+    setSavingGeometry(true);
+    try {
+      const saved = await createEntityLocation(getStoredToken(), {
+        entity_type: selectedItem.entity_type, entity_id: selectedItem.entity_id, role: selectedItem.role,
+        location: { label: selectedItem.location.label, organization_id: selectedItem.organization_id,
+          latitude: drawPoints[0][1], longitude: drawPoints[0][0], geometry: drawnGeometry },
+      });
+      setItems((items) => items.map((item) => getItemKey(item) === getItemKey(saved) ? saved : item));
+      setSelectedItem(saved); setDrawMode(null); setDrawPoints([]);
+      setMessage("Geometría guardada.");
+    } catch (error) { handleRequestError(error, setMessage, "No se pudo guardar el dibujo."); }
+    finally { setSavingGeometry(false); }
+  }
   const canEditMap =
     userHasPermission(user, "map.edit") || userHasPermission(user, "map.manage");
   const canCreateRequirements =
@@ -489,6 +538,7 @@ function MapPanelContent({ user }: MapPanelProps) {
     (userHasPermission(user, "assets.manage") ||
       (userHasPermission(user, "assets.view") &&
         userHasPermission(user, "assets.edit")));
+  const canCreateAssets = canLocateAssets && (userHasPermission(user, "assets.create") || userHasPermission(user, "assets.manage"));
   const activeAssetOrganizations = useMemo(
     () =>
       (user.organizations ?? []).filter(
@@ -1343,54 +1393,25 @@ function MapPanelContent({ user }: MapPanelProps) {
     try {
       const token = getStoredToken();
       const description = registrationDraft.description.trim();
-      const createdEntity =
-        registrationDraft.kind === "requirement"
-          ? await adminRequest<Requirement>(
-              "/requirements",
-              token,
-              "No se pudo crear la necesidad.",
-              {
-                method: "POST",
-                body: JSON.stringify({
-                  organization_id: organizationId,
-                  title,
-                  summary: description || null,
-                  problem: description || null,
-                  priority: "medium",
-                  status: "draft",
-                  source_type: "manual",
-                }),
-              },
-            )
-          : await adminRequest<Project>(
-              "/projects",
-              token,
-              "No se pudo crear el proyecto.",
-              {
-                method: "POST",
-                body: JSON.stringify({
-                  organization_id: organizationId,
-                  name: title,
-                  description: description || null,
-                  status: "active",
-                }),
-              },
-            );
-
-      const mapItem = await createEntityLocation(token, {
-        entity_type: registrationDraft.kind,
-        entity_id: createdEntity.id,
-        role: "primary",
-        location: {
-          organization_id: organizationId,
-          label: title,
-          latitude: registrationDraft.latitude,
-          longitude: registrationDraft.longitude,
-          source: "user_provided",
-          confidence: 1,
-          review_status: "proposed",
-        },
-      });
+      const requestKey = registrationDraft.requestKey ?? crypto.randomUUID();
+      setRegistrationDraft((draft) => draft ? { ...draft, requestKey } : draft);
+      const mapItem = await adminRequest<GeoMapItem>("/geo/registrations", token,
+        "No se pudo registrar el elemento en el mapa.", {
+          method: "POST",
+          body: JSON.stringify({
+            request_key: requestKey,
+            entity_type: registrationDraft.kind,
+            organization_id: organizationId,
+            title,
+            description: description || null,
+            asset_type_id: registrationDraft.kind === "asset" ? Number(registrationDraft.assetTypeId) : null,
+            location: {
+              organization_id: organizationId, label: title,
+              latitude: registrationDraft.latitude, longitude: registrationDraft.longitude,
+              source: "user_provided", confidence: 1, review_status: "proposed",
+            },
+          }),
+        });
 
       mapAbortControllerRef.current?.abort();
       mapAbortControllerRef.current = null;
@@ -1411,7 +1432,7 @@ function MapPanelContent({ user }: MapPanelProps) {
       setMessage(
         registrationDraft.kind === "requirement"
           ? "Necesidad registrada en el mapa."
-          : "Proyecto registrado en el mapa.",
+          : registrationDraft.kind === "asset" ? "Activo registrado en el inventario y el mapa." : "Proyecto registrado en el mapa.",
       );
     } catch (registrationErrorCaught) {
       handleRequestError(
@@ -1876,6 +1897,8 @@ function MapPanelContent({ user }: MapPanelProps) {
           </div>
           {cartografia ? (
           <MunicipalMap
+            onDrawPoint={drawMode ? addDrawPoint : undefined}
+            drawnGeometry={drawnGeometry}
             areaBounds={areaBounds}
             areaSelectionEnabled={areaSelectionEnabled}
             cartografia={cartografia}
@@ -1892,7 +1915,7 @@ function MapPanelContent({ user }: MapPanelProps) {
             onAreaSelectionChange={setAreaBounds}
             onLocationError={setMessage}
             onMapContextMenu={handleMapContextMenu}
-            onSelectItem={handleSelectItem}
+            onSelectItem={drawMode ? () => {} : handleSelectItem}
             selectedItemId={selectedItem ? getItemKey(selectedItem) : null}
           />
           ) : (
@@ -1904,6 +1927,23 @@ function MapPanelContent({ user }: MapPanelProps) {
           )}
 
           <div className="map-overlay-tools">
+          {selectedItem && canEditMap ? (
+            <div className="map-drawing-tools" role="group" aria-label="Dibujar ubicación">
+              <span>Ubicación de {selectedItem.title}</span>
+              {(["LineString", "Polygon"] as const).map((mode) => (
+                <button key={mode} type="button" disabled={savingGeometry}
+                  aria-pressed={drawMode === mode} onClick={() => { setDrawMode(mode); setDrawPoints([]); setAreaSelectionEnabled(false); }}>
+                  {mode === "LineString" ? "Dibujar línea" : "Dibujar superficie"}
+                </button>
+              ))}
+              {drawMode ? <>
+                <span role="status">Pulsa en el plano para añadir vértices ({drawPoints.length}).</span>
+                <button type="button" disabled={savingGeometry || !drawPoints.length} onClick={() => setDrawPoints((points) => points.slice(0,-1))}>Deshacer vértice</button>
+                <button type="button" disabled={savingGeometry || drawPoints.length < (drawMode === "Polygon" ? 3 : 2)} onClick={saveDrawing}>Guardar dibujo</button>
+                <button type="button" disabled={savingGeometry} onClick={() => { setDrawMode(null); setDrawPoints([]); }}>Cancelar dibujo</button>
+              </> : null}
+            </div>
+          ) : null}
             <button
               aria-pressed={areaSelectionEnabled}
               className={areaSelectionEnabled ? "is-active" : ""}
@@ -2045,9 +2085,15 @@ function MapPanelContent({ user }: MapPanelProps) {
                 href={normalizeDetailPath(selectedItem)}
               >
                 {selectedItem.entity_type === "asset"
-                  ? "Abrir contexto municipal"
+                  ? "Abrir ficha del activo"
                   : `Abrir ${entityDetailLabel(selectedItem.entity_type)}`}
               </Link>
+              {userHasPermission(user, "assistant.use") ? (
+                <Link className="secondary-button map-detail-link"
+                  href={`/asistente?q=${encodeURIComponent(`Consulta el elemento seleccionado en el mapa (${selectedItem.entity_type}, identificador ${selectedItem.entity_id}, organización ${selectedItem.organization_id}). Verifica mi acceso y su ficha actual antes de proponer cambios.`)}`}>
+                  Consultar con Anacleto
+                </Link>
+              ) : null}
               {selectedItem.entity_type === "asset" ? (
                 <AssetMaintenancePanel
                   assetId={selectedItem.entity_id}
@@ -2121,6 +2167,12 @@ function MapPanelContent({ user }: MapPanelProps) {
             >
               Registrar proyecto aquí
               <span>Crear un proyecto y guardarlo en este punto</span>
+            </button>
+          ) : null}
+          {canCreateAssets ? (
+            <button type="button" onClick={() => openRegistrationDraft("asset")}>
+              Registrar activo aquí
+              <span>Crear su ficha en el inventario municipal</span>
             </button>
           ) : null}
           {canLocateAssets ? (
@@ -2426,7 +2478,7 @@ function MapPanelContent({ user }: MapPanelProps) {
                 <h2 id="map-registration-dialog-title">
                   {registrationDraft.kind === "requirement"
                     ? "Registrar necesidad aquí"
-                    : "Registrar proyecto aquí"}
+                    : registrationDraft.kind === "asset" ? "Registrar activo aquí" : "Registrar proyecto aquí"}
                 </h2>
               </div>
               <button
@@ -2446,6 +2498,7 @@ function MapPanelContent({ user }: MapPanelProps) {
             <label>
               Organización
               <select
+                disabled={isRegistering || Boolean(registrationDraft.requestKey)}
                 value={registrationDraft.organizationId}
                 onChange={(event) =>
                   setRegistrationDraft({
@@ -2463,11 +2516,23 @@ function MapPanelContent({ user }: MapPanelProps) {
               </select>
             </label>
 
+            {registrationDraft.kind === "asset" ? (
+              <label>Tipo de activo
+                <select required value={registrationDraft.assetTypeId ?? ""} disabled={isRegistering || Boolean(registrationDraft.requestKey)}
+                  onChange={(event) => setRegistrationDraft({ ...registrationDraft, assetTypeId: event.target.value })}>
+                  <option value="">Selecciona un tipo del inventario</option>
+                  {registrationTypes.map((type) => <option key={type.id} value={type.id}>{type.name}</option>)}
+                </select>
+                {registrationTypes.length === 0 ? <span>No hay tipos disponibles. Configúralos en el inventario municipal.</span> : null}
+              </label>
+            ) : null}
+
             <label>
               {registrationDraft.kind === "requirement"
                 ? "Título de la necesidad"
-                : "Nombre del proyecto"}
+                : registrationDraft.kind === "asset" ? "Nombre del activo" : "Nombre del proyecto"}
               <input
+                disabled={isRegistering || Boolean(registrationDraft.requestKey)}
                 value={registrationDraft.title}
                 onChange={(event) =>
                   setRegistrationDraft({
@@ -2486,6 +2551,7 @@ function MapPanelContent({ user }: MapPanelProps) {
             <label>
               Descripción breve
               <textarea
+                disabled={isRegistering || Boolean(registrationDraft.requestKey)}
                 value={registrationDraft.description}
                 onChange={(event) =>
                   setRegistrationDraft({

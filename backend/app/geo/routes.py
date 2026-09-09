@@ -19,13 +19,14 @@ from app.geo.access import (
     has_map_view_permission,
     require_visible_entity,
 )
-from app.geo.geometry import build_point_geojson
+from app.geo.geometry import build_point_geojson, location_geometry_json
 from app.geo.models import EntityLocation, GeoLocation
 from app.geo.schemas import (
     EntityLocationCreate,
     GeoEntityType,
     GeoLocationCreate,
     GeoMapItem,
+    MapRegistrationCreate,
 )
 from app.organizations.models import Organization
 from app.organizations.access import get_user_organization_ids
@@ -97,6 +98,27 @@ def list_map_items(
     )
 
 
+@router.post("/registrations", response_model=GeoMapItem, status_code=status.HTTP_201_CREATED)
+def create_map_registration(
+    payload: MapRegistrationCreate,
+    db: Annotated[Session, Depends(get_db)],
+    current_user: Annotated[User, Depends(get_current_user)],
+) -> GeoMapItem:
+    from app.geo.registration import register_map_item
+
+    if not has_map_view_permission(db, current_user, payload.organization_id):
+        raise HTTPException(403, "Permission required: map.view")
+    entity_type, entity_id = register_map_item(payload, db, current_user)
+    items = list_visible_map_items(db, current_user, entity_type=entity_type,
+        entity_id=entity_id, organization_id=payload.organization_id,
+        status_filter=None, include_archived=False, limit=1, offset=0,
+        map_organization_ids=get_visible_map_organization_ids(db, current_user, organization_id=payload.organization_id),
+        asset_organization_ids=get_visible_asset_map_organization_ids(db, current_user, organization_id=payload.organization_id, map_organization_ids=[payload.organization_id]))
+    if not items:
+        raise HTTPException(403, "Entity access denied")
+    return items[0]
+
+
 @router.post(
     "/entity-locations",
     response_model=GeoMapItem,
@@ -107,8 +129,12 @@ def create_entity_location(
     db: Annotated[Session, Depends(get_db)],
     current_user: Annotated[User, Depends(get_current_user)],
 ) -> GeoMapItem:
+    return save_entity_location(payload, db, current_user)
+
+
+def save_entity_location(payload: EntityLocationCreate, db: Session, current_user: User, *, commit: bool = True) -> GeoMapItem:
     if payload.entity_type == "asset":
-        return upsert_asset_location(db, current_user, payload)
+        return upsert_asset_location(db, current_user, payload, commit=commit)
 
     visible = require_visible_entity(
         db,
@@ -135,10 +161,7 @@ def create_entity_location(
     if municipality_id is None:
         municipality_id = derive_municipality_id(db, organization_id)
 
-    geometry_json = build_point_geojson(
-        payload.location.latitude,
-        payload.location.longitude,
-    )
+    geometry_json = location_geometry_json(payload.location)
 
     attachment = db.scalar(
         select(EntityLocation)
@@ -156,7 +179,7 @@ def create_entity_location(
             organization_id=organization_id,
             municipality_id=municipality_id,
             label=payload.location.label,
-            geometry_type="point",
+            geometry_type=payload.location.geometry_type,
             geometry_json=geometry_json,
             latitude=payload.location.latitude,
             longitude=payload.location.longitude,
@@ -181,7 +204,7 @@ def create_entity_location(
             organization_id=organization_id,
             municipality_id=municipality_id,
             label=payload.location.label,
-            geometry_type="point",
+            geometry_type=payload.location.geometry_type,
             geometry_json=geometry_json,
             latitude=payload.location.latitude,
             longitude=payload.location.longitude,
@@ -197,7 +220,10 @@ def create_entity_location(
         attachment.location = location
 
     try:
-        db.commit()
+        if commit:
+            db.commit()
+        else:
+            db.flush()
     except IntegrityError:
         db.rollback()
         raise HTTPException(
@@ -643,7 +669,7 @@ def hydrate_map_candidates(db: Session, rows) -> list[GeoMapItem]:
                     priority=None,
                     organization_id=asset.organization_id,
                     organization_name=organization_name,
-                    detail_path="/ayuntamiento",
+                    detail_path=f"/inventario?organization_id={asset.organization_id}&asset_id={asset.id}",
                     location=location,
                 )
             )
@@ -654,6 +680,7 @@ def upsert_asset_location(
     db: Session,
     current_user: User,
     payload: EntityLocationCreate,
+    *, commit: bool = True,
 ) -> GeoMapItem:
     if payload.role != "primary":
         raise HTTPException(
@@ -739,7 +766,10 @@ def upsert_asset_location(
         db.flush()
         asset.location_id = location.id
         asset.updated_by_id = current_user.id
-        db.commit()
+        if commit:
+            db.commit()
+        else:
+            db.flush()
     except IntegrityError:
         db.rollback()
         raise HTTPException(
@@ -765,7 +795,7 @@ def upsert_asset_location(
         priority=None,
         organization_id=asset.organization_id,
         organization_name=organization.name,
-        detail_path="/ayuntamiento",
+        detail_path=f"/inventario?organization_id={asset.organization_id}&asset_id={asset.id}",
         location=location,
     )
 
@@ -781,8 +811,8 @@ def build_asset_location(
         organization_id=organization_id,
         municipality_id=municipality_id,
         label=payload.label,
-        geometry_type="point",
-        geometry_json=build_point_geojson(payload.latitude, payload.longitude),
+        geometry_type=payload.geometry_type,
+        geometry_json=location_geometry_json(payload),
         latitude=payload.latitude,
         longitude=payload.longitude,
         address_text=payload.address_text,

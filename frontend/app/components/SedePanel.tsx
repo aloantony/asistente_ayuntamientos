@@ -2,6 +2,7 @@
 
 import { CircleAlert, Landmark, RefreshCw } from "lucide-react";
 import { useEffect, useState } from "react";
+import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import {
   SEDE_SECTIONS,
   countFor,
@@ -75,17 +76,17 @@ function Entry({
 
 export function SedePanel() {
   const { user, handleRequestError } = useSession();
-  // El menú superior enlaza cada sección con `?seccion=`; si el valor no es una
-  // de las conocidas se ignora y se abre el tablón, que es la portada.
-  const [activeSection, setActiveSection] = useState<SedeSectionKey>(() => {
-    if (typeof window === "undefined") {
-      return "tablon";
-    }
-    const requested = new URLSearchParams(window.location.search).get("seccion");
-    return SEDE_SECTIONS.some((section) => section.key === requested)
-      ? (requested as SedeSectionKey)
-      : "tablon";
-  });
+  const searchParams = useSearchParams();
+  const pathname = usePathname();
+  const router = useRouter();
+  const requested = searchParams.get("seccion");
+  const activeSection: SedeSectionKey = SEDE_SECTIONS.some((section) => section.key === requested)
+    ? (requested as SedeSectionKey) : "tablon";
+  function setActiveSection(section: SedeSectionKey) {
+    const params = new URLSearchParams(searchParams.toString());
+    params.set("seccion", section);
+    router.push(`${pathname}?${params}`, { scroll: false });
+  }
   const [content, setContent] = useState<SedeContent | null>(null);
   const [error, setError] = useState("");
   const [isLoading, setIsLoading] = useState(false);

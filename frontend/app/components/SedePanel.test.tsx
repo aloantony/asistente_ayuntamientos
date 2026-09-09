@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { SedeContent, User } from "./types";
 
@@ -16,6 +16,26 @@ vi.mock("../lib/sede", async () => {
   return {
     ...actual,
     fetchSedeContent: (...args: unknown[]) => fetchSedeContent(...args),
+  };
+});
+
+vi.mock("next/navigation", async () => {
+  const React = await import("react");
+  return {
+    usePathname: () => "/sede",
+    useSearchParams: () => {
+      const [query, setQuery] = React.useState(window.location.search);
+      React.useEffect(() => {
+        const changed = () => setQuery(window.location.search);
+        window.addEventListener("popstate", changed);
+        return () => window.removeEventListener("popstate", changed);
+      }, []);
+      return new URLSearchParams(query);
+    },
+    useRouter: () => ({ push: (url: string) => {
+      window.history.pushState({}, "", url);
+      window.dispatchEvent(new PopStateEvent("popstate"));
+    } }),
   };
 });
 
@@ -179,4 +199,20 @@ describe("SedePanel", () => {
     await waitFor(() => expect(screen.getByText("Sede no disponible")).toBeTruthy());
     expect(screen.getByRole("button", { name: "Reintentar" })).toBeTruthy();
   });
+});
+
+it("sigue cambios de URL sin desmontar el panel", async () => {
+  render(<SedePanel />);
+  await waitFor(() => expect(fetchSedeContent).toHaveBeenCalledTimes(1));
+  act(() => {
+    window.history.pushState({}, "", "/sede?seccion=tributos");
+    window.dispatchEvent(new PopStateEvent("popstate"));
+  });
+  expect(screen.getByRole("tab", { name: /Tributos/ }).getAttribute("aria-selected")).toBe("true");
+  act(() => {
+    window.history.replaceState({}, "", "/sede?seccion=inventada");
+    window.dispatchEvent(new PopStateEvent("popstate"));
+  });
+  expect(screen.getByRole("tab", { name: /Tablón/ }).getAttribute("aria-selected")).toBe("true");
+  expect(fetchSedeContent).toHaveBeenCalledTimes(1);
 });

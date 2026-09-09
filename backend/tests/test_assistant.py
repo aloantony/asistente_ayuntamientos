@@ -237,6 +237,9 @@ def build_mutating_tool_probe(
     make_organization,
     tool_name: str,
 ) -> tuple[User, dict, dict]:
+    from municipal_tool_helpers import NAMES, probe
+    if tool_name in NAMES:
+        return probe(db, make_user, make_organization, tool_name)
     user = make_user(is_superuser=True)
     organization = make_organization()
     requirement = Requirement(
@@ -453,6 +456,9 @@ def arm_confirmed_conversation_mutation(
 
 
 def mutation_effect_signature(db, tool_name: str, tool_input: dict):
+    from municipal_tool_helpers import NAMES, signature
+    if tool_name in NAMES:
+        return signature(db, tool_name, tool_input)
     if tool_name == "create_requirement":
         return db.query(Requirement).filter_by(title="Propuesta protegida").count()
     if tool_name == "update_requirement":

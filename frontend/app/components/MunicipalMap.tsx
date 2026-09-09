@@ -3,6 +3,7 @@
 import { useEffect, useRef, useState } from "react";
 import type {
   Circle,
+  LayerGroup,
   CircleMarker,
   ErrorEvent as LeafletLocationErrorEvent,
   LatLng,
@@ -31,7 +32,11 @@ export type MapBounds = {
   west: number;
 };
 
+export type DrawnGeometry = { type: "LineString" | "Polygon"; coordinates: number[][] | number[][][] };
+
 type MunicipalMapProps = {
+  onDrawPoint?: (longitude: number, latitude: number) => void;
+  drawnGeometry?: DrawnGeometry | null;
   /** Plano del municipio servido: es el fondo, y el único que hay. */
   cartografia: CartografiaPueblo;
   items: GeoMapItem[];
@@ -483,6 +488,8 @@ export function MunicipalMap({
   onAreaSelectionChange,
   onLocationError,
   onMapContextMenu,
+  onDrawPoint,
+  drawnGeometry,
   onSelectItem,
 }: MunicipalMapProps) {
   const containerRef = useRef<HTMLDivElement | null>(null);
@@ -490,6 +497,7 @@ export function MunicipalMap({
   const leafletRef = useRef<LeafletModule | null>(null);
   const terminoBoundsRef = useRef<LatLngBounds | null>(null);
   const markerRecordsRef = useRef<Map<string, MarkerRecord>>(new Map());
+  const shapeLayerRef = useRef<LayerGroup | null>(null);
   const markerBoundsRef = useRef<LatLngBounds | null>(null);
   const focusMarkerRef = useRef<CircleMarker | null>(null);
   const locationMarkerRef = useRef<CircleMarker | null>(null);
@@ -768,6 +776,38 @@ export function MunicipalMap({
   }, [cartografia]);
 
   useEffect(() => {
+    const map = mapRef.current;
+    if (!mapReady || !map || !onDrawPoint) return;
+    const draw = (event: LeafletMouseEvent) => onDrawPoint(event.latlng.lng, event.latlng.lat);
+    map.on("click", draw);
+    return () => { map.off("click", draw); };
+  }, [mapReady, onDrawPoint]);
+
+  useEffect(() => {
+    const map = mapRef.current;
+    const L = leafletRef.current;
+    if (!mapReady || !map || !L) return;
+    shapeLayerRef.current?.remove();
+    const layer = L.layerGroup().addTo(map);
+    shapeLayerRef.current = layer;
+    for (const item of items.filter((entry) => entry.location.geometry_type !== "point")) {
+      try {
+        const geometry = JSON.parse(item.location.geometry_json);
+        const shape = L.geoJSON(geometry, { style: {
+          color: markerColors?.[getItemKey(item)] || item.layer_color || "#2f74d0",
+          weight: selectedItemId === getItemKey(item) ? 5 : 3, fillOpacity: 0.2,
+        }}).addTo(layer);
+        shape.bindPopup(createItemPopup(item));
+        shape.on("click", () => onSelectItemRef.current(item));
+      } catch { /* A malformed legacy geometry does not hide valid records. */ }
+    }
+    if (drawnGeometry) {
+      L.geoJSON(drawnGeometry as GeoJSON.Geometry, { style: { color: "#c0603a", dashArray: "6 4", weight: 3 } }).addTo(layer);
+    }
+    return () => { layer.remove(); };
+  }, [items, selectedItemId, markerColors, mapReady, drawnGeometry]);
+
+  useEffect(() => {
     const L = leafletRef.current;
     const map = mapRef.current;
     if (!mapReady || !L || !map) {
@@ -804,6 +844,12 @@ export function MunicipalMap({
       bounds.extend([latitude, longitude]);
     });
 
+    for (const item of items.filter((entry) => entry.location.geometry_type !== "point")) {
+      try {
+        const shapeBounds = L.geoJSON(JSON.parse(item.location.geometry_json)).getBounds();
+        if (shapeBounds.isValid()) bounds.extend(shapeBounds);
+      } catch { /* Ignore malformed legacy shapes when framing valid records. */ }
+    }
     markerBoundsRef.current = bounds;
     const currentFocus = focusLocationRef.current;
     if (
@@ -867,6 +913,16 @@ export function MunicipalMap({
         .bindPopup(
           createFocusPopup(focusLabel || "Ubicación indicada"),
         );
+      const selectedShape = items.find((item) => getItemKey(item) === selectedItemId && item.location.geometry_type !== "point");
+      if (selectedShape) {
+        try {
+          const shapeBounds = L.geoJSON(JSON.parse(selectedShape.location.geometry_json)).getBounds();
+          if (shapeBounds.isValid()) {
+            map.fitBounds(shapeBounds, { paddingTopLeft: [24, 64], paddingBottomRight: [24, 150], maxZoom: 18 });
+            return;
+          }
+        } catch { /* Fall back to the recorded anchor for legacy geometry. */ }
+      }
       map.setView(coordinates, normalizeZoom(initialZoom, SINGLE_ITEM_ZOOM));
       return;
     }
@@ -880,6 +936,8 @@ export function MunicipalMap({
       );
     }
   }, [
+    items,
+    selectedItemId,
     focusLabel,
     focusLatitude,
     focusLongitude,
