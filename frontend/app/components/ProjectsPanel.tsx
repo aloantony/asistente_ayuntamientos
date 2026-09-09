@@ -23,6 +23,7 @@ type ProjectsPanelProps = {
   adminUsers: User[];
   groups: Group[];
   organizations: OrganizationSummary[];
+  selectedProjectId: number | null;
   isLoadingProjects: boolean;
   projectError: string;
   newProjectName: string;
@@ -80,6 +81,7 @@ export function ProjectsPanel({
   adminUsers,
   groups,
   organizations,
+  selectedProjectId,
   isLoadingProjects,
   projectError,
   newProjectName,
@@ -143,6 +145,9 @@ export function ProjectsPanel({
   const selectedMembershipProject = projects.find(
     (project) => String(project.id) === projectMembershipProjectId,
   );
+  const selectedProject = selectedProjectId === null
+    ? null
+    : projects.find((project) => project.id === selectedProjectId) ?? null;
   const projectMembershipUsers = selectedMembershipProject
     ? adminUsers.filter((adminUser) =>
         (adminUser.organizations ?? []).some(
@@ -176,6 +181,17 @@ export function ProjectsPanel({
       </div>
 
       {projectError ? <p className="error-message">{projectError}</p> : null}
+
+      {selectedProject ? (
+        <div className="selected-project-callout" role="status">
+          <div>
+            <p className="eyebrow">Proyecto seleccionado</p>
+            <strong>{selectedProject.name}</strong>
+            <span>{selectedProject.organization.name} · {formatProjectStatus(selectedProject.status)}</span>
+          </div>
+          <p>{selectedProject.description || "Sin descripción disponible."}</p>
+        </div>
+      ) : null}
 
       {!user.is_superuser &&
       !canCreateProjects &&
@@ -221,7 +237,11 @@ export function ProjectsPanel({
                   const assignedGroups = project.groups ?? [];
 
                   return (
-                    <tr key={project.id}>
+                    <tr
+                      className={selectedProjectId === project.id ? "project-row-selected" : undefined}
+                      data-project-id={project.id}
+                      key={project.id}
+                    >
                       <td>{project.id}</td>
                       <td>
                         <span className="tag">{project.organization.name}</span>
