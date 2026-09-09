@@ -197,6 +197,31 @@ describe("MapaGeneral", () => {
     expect(fetchAllGeoMapItems).toHaveBeenCalledTimes(1);
   });
 
+  it("distingue un filtro sin resultados y permite limpiarlo", async () => {
+    fetchAllGeoMapItems.mockResolvedValue([item()]);
+
+    render(
+      <MapaGeneral
+        canViewMap
+        municipality={FUENTELCESPED}
+        organizationId={1}
+      />,
+    );
+    const search = await screen.findByRole("searchbox", {
+      name: "Buscar en el mapa",
+    });
+
+    fireEvent.change(search, { target: { value: "cementerio" } });
+
+    await waitFor(() =>
+      expect(screen.getByText("Sin elementos con estos filtros.")).toBeTruthy(),
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Limpiar filtros" }));
+
+    expect((search as HTMLInputElement).value).toBe("");
+    expect(screen.getByText("1 de 1 elementos")).toBeTruthy();
+  });
+
   it("ofrece reintentar cuando la carga falla", async () => {
     fetchAllGeoMapItems.mockRejectedValue(new Error("boom"));
 

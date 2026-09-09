@@ -1,7 +1,18 @@
 "use client";
 
-import { CircleAlert, Layers, MapPin, RefreshCw, ShieldCheck } from "lucide-react";
-import { useEffect, useMemo, useState } from "react";
+import {
+  CircleAlert,
+  Focus,
+  Layers,
+  Maximize2,
+  Minimize2,
+  MapPin,
+  RefreshCw,
+  ShieldCheck,
+  SlidersHorizontal,
+  X,
+} from "lucide-react";
+import { useEffect, useId, useMemo, useRef, useState } from "react";
 import { fetchAllGeoMapItems } from "../../lib/geo";
 import {
   buscarPueblo,
@@ -86,6 +97,13 @@ export function MapaGeneral({
   const [error, setError] = useState("");
   const [isLoading, setIsLoading] = useState(false);
   const [loadAttempt, setLoadAttempt] = useState(0);
+  const [fitRequest, setFitRequest] = useState(0);
+  const [areLayersOpen, setAreLayersOpen] = useState(false);
+  const [isFullscreen, setIsFullscreen] = useState(false);
+  const layersPanelId = useId();
+  const layersButtonRef = useRef<HTMLButtonElement | null>(null);
+  const layersCloseRef = useRef<HTMLButtonElement | null>(null);
+  const mapWorkspaceRef = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
     if (!canViewMap) {
@@ -153,6 +171,38 @@ export function MapaGeneral({
     };
   }, [pueblo, loadAttempt]);
 
+  useEffect(() => {
+    function handleFullscreenChange() {
+      setIsFullscreen(document.fullscreenElement === mapWorkspaceRef.current);
+    }
+
+    document.addEventListener("fullscreenchange", handleFullscreenChange);
+    return () =>
+      document.removeEventListener("fullscreenchange", handleFullscreenChange);
+  }, []);
+
+  useEffect(() => {
+    if (!areLayersOpen) {
+      return;
+    }
+
+    const focusFrame = window.requestAnimationFrame(() =>
+      layersCloseRef.current?.focus(),
+    );
+    function handleKeyDown(event: KeyboardEvent) {
+      if (event.key === "Escape") {
+        event.preventDefault();
+        setAreLayersOpen(false);
+        window.requestAnimationFrame(() => layersButtonRef.current?.focus());
+      }
+    }
+    window.addEventListener("keydown", handleKeyDown);
+    return () => {
+      window.cancelAnimationFrame(focusFrame);
+      window.removeEventListener("keydown", handleKeyDown);
+    };
+  }, [areLayersOpen]);
+
   const layers = useMemo(() => buildLayers(items), [items]);
   const markerColors = useMemo(
     () =>
@@ -180,6 +230,24 @@ export function MapaGeneral({
       }
       return next;
     });
+  }
+
+  function closeLayers() {
+    setAreLayersOpen(false);
+    window.requestAnimationFrame(() => layersButtonRef.current?.focus());
+  }
+
+  function clearFilters() {
+    setSearch("");
+    setHiddenLayers(new Set());
+  }
+
+  async function toggleFullscreen() {
+    if (document.fullscreenElement === mapWorkspaceRef.current) {
+      await document.exitFullscreen();
+      return;
+    }
+    await mapWorkspaceRef.current?.requestFullscreen();
   }
 
   if (!canViewMap) {
@@ -227,108 +295,185 @@ export function MapaGeneral({
           </div>
         </div>
       ) : (
-        <div className={styles.layout}>
-          <aside className={styles.sidebar}>
-            <label className={styles.search}>
-              <span className="sr-only">Buscar en el mapa</span>
-              <input
-                onChange={(event) => setSearch(event.target.value)}
-                placeholder="Buscar en el mapa…"
-                type="search"
-                value={search}
+        <div className={styles.mapWorkspace} ref={mapWorkspaceRef}>
+          <header className={styles.header}>
+            <div>
+              <p className="eyebrow">Mapa municipal</p>
+              <h2>{municipality?.name ?? "Municipio seleccionado"}</h2>
+              <p>
+                Consulta el plano local y los elementos situados por el
+                ayuntamiento.
+              </p>
+            </div>
+            <div className={styles.actions}>
+              <button
+                disabled={!cartografia}
+                onClick={() => setFitRequest((value) => value + 1)}
+                type="button"
+              >
+                <Focus aria-hidden="true" size={16} />
+                Centrar municipio
+              </button>
+              <button onClick={() => void toggleFullscreen()} type="button">
+                {isFullscreen ? (
+                  <Minimize2 aria-hidden="true" size={16} />
+                ) : (
+                  <Maximize2 aria-hidden="true" size={16} />
+                )}
+                {isFullscreen ? "Salir de pantalla completa" : "Pantalla completa"}
+              </button>
+              <button
+                aria-controls={layersPanelId}
+                aria-expanded={areLayersOpen}
+                className={styles.layersToggle}
+                onClick={() => setAreLayersOpen((open) => !open)}
+                ref={layersButtonRef}
+                type="button"
+              >
+                <SlidersHorizontal aria-hidden="true" size={16} />
+                Capas y filtros
+              </button>
+            </div>
+          </header>
+
+          <div className={styles.layout}>
+            {areLayersOpen ? (
+              <button
+                aria-label="Cerrar capas y filtros"
+                className={styles.scrim}
+                onClick={closeLayers}
+                type="button"
               />
-            </label>
-
-            <section className={styles.tree}>
-              <h3>
-                <Layers aria-hidden="true" size={15} strokeWidth={1.7} />
-                Capas
-              </h3>
-              {layers.length === 0 ? (
-                <p className={styles.empty}>
-                  Todavía no hay nada situado en el mapa. Los elementos del
-                  inventario aparecen aquí en cuanto tienen ubicación.
-                </p>
-              ) : (
-                <ul>
-                  {layers.map((layer) => (
-                    <li key={layer.key}>
-                      <label>
-                        <input
-                          checked={!hiddenLayers.has(layer.key)}
-                          onChange={() => toggleLayer(layer.key)}
-                          type="checkbox"
-                        />
-                        <span
-                          aria-hidden="true"
-                          className={styles.swatch}
-                          style={{ background: layer.color }}
-                        />
-                        <span className={styles.layerLabel}>{layer.label}</span>
-                        <span className={styles.layerCount}>{layer.count}</span>
-                      </label>
-                    </li>
-                  ))}
-                </ul>
-              )}
-            </section>
-
-            {selectedItem ? (
-              <section className={styles.card}>
-                <h3>
-                  <MapPin aria-hidden="true" size={15} strokeWidth={1.7} />
-                  {selectedItem.title}
-                </h3>
-                {selectedItem.subtitle ? (
-                  <p>{selectedItem.subtitle}</p>
-                ) : null}
-                <dl>
-                  <div>
-                    <dt>Capa</dt>
-                    <dd>{selectedItem.layer_label}</dd>
-                  </div>
-                  {selectedItem.item_type ? (
-                    <div>
-                      <dt>Tipo</dt>
-                      <dd>{selectedItem.item_type}</dd>
-                    </div>
-                  ) : null}
-                  <div>
-                    <dt>Estado</dt>
-                    <dd>{selectedItem.status}</dd>
-                  </div>
-                </dl>
-              </section>
             ) : null}
-          </aside>
+            <aside
+              aria-label="Capas y filtros del mapa"
+              className={[
+                styles.sidebar,
+                areLayersOpen ? styles.sidebarOpen : "",
+              ]
+                .filter(Boolean)
+                .join(" ")}
+              id={layersPanelId}
+            >
+              <div className={styles.sidebarHeader}>
+                <strong>Capas y filtros</strong>
+                <button
+                  aria-label="Cerrar capas y filtros"
+                  onClick={closeLayers}
+                  ref={layersCloseRef}
+                  type="button"
+                >
+                  <X aria-hidden="true" size={18} />
+                </button>
+              </div>
+              <label className={styles.search}>
+                <span className="sr-only">Buscar en el mapa</span>
+                <input
+                  onChange={(event) => setSearch(event.target.value)}
+                  placeholder="Buscar en el mapa…"
+                  type="search"
+                  value={search}
+                />
+              </label>
 
-          <div className={styles.map}>
-            {cartografia ? (
-              <MunicipalMap
-                cartografia={cartografia}
-                items={visibleItems}
-                markerColors={markerColors}
-                onSelectItem={(item) => setSelectedId(itemKey(item))}
-                selectedItemId={selectedId}
-              />
-            ) : (
-              <ResourceState
-                description={
-                  pueblo
-                    ? "Preparando el plano del municipio…"
-                    : "Este municipio todavía no tiene plano preparado. Se añade al contratar el servicio."
-                }
-                icon={MapPin}
-                title={pueblo ? "Cargando el plano" : "Sin plano del municipio"}
-                tone={pueblo ? "empty" : "restricted"}
-              />
-            )}
-            <p className={styles.counter}>
-              {visibleItems.length} de {items.length} elementos
-              {hiddenLayers.size > 0 || search.trim()
-                ? " (filtrados)"
-                : ""}
-            </p>
+              <section className={styles.tree}>
+                <h3>
+                  <Layers aria-hidden="true" size={15} strokeWidth={1.7} />
+                  Capas
+                </h3>
+                {layers.length === 0 ? (
+                  <p className={styles.empty}>
+                    Todavía no hay nada situado en el mapa. Los elementos del
+                    inventario aparecen aquí en cuanto tienen ubicación.
+                  </p>
+                ) : (
+                  <ul>
+                    {layers.map((layer) => (
+                      <li key={layer.key}>
+                        <label>
+                          <input
+                            checked={!hiddenLayers.has(layer.key)}
+                            onChange={() => toggleLayer(layer.key)}
+                            type="checkbox"
+                          />
+                          <span
+                            aria-hidden="true"
+                            className={styles.swatch}
+                            style={{ background: layer.color }}
+                          />
+                          <span className={styles.layerLabel}>{layer.label}</span>
+                          <span className={styles.layerCount}>{layer.count}</span>
+                        </label>
+                      </li>
+                    ))}
+                  </ul>
+                )}
+              </section>
+
+              {selectedItem ? (
+                <section className={styles.card}>
+                  <h3>
+                    <MapPin aria-hidden="true" size={15} strokeWidth={1.7} />
+                    {selectedItem.title}
+                  </h3>
+                  {selectedItem.subtitle ? (
+                    <p>{selectedItem.subtitle}</p>
+                  ) : null}
+                  <dl>
+                    <div>
+                      <dt>Capa</dt>
+                      <dd>{selectedItem.layer_label}</dd>
+                    </div>
+                    {selectedItem.item_type ? (
+                      <div>
+                        <dt>Tipo</dt>
+                        <dd>{selectedItem.item_type}</dd>
+                      </div>
+                    ) : null}
+                    <div>
+                      <dt>Estado</dt>
+                      <dd>{selectedItem.status}</dd>
+                    </div>
+                  </dl>
+                </section>
+              ) : null}
+            </aside>
+
+            <div className={styles.map}>
+              {cartografia ? (
+                <MunicipalMap
+                  cartografia={cartografia}
+                  fitRequest={fitRequest}
+                  items={visibleItems}
+                  markerColors={markerColors}
+                  onSelectItem={(item) => setSelectedId(itemKey(item))}
+                  selectedItemId={selectedId}
+                />
+              ) : (
+                <ResourceState
+                  description={
+                    pueblo
+                      ? "Preparando el plano del municipio…"
+                      : "Este municipio todavía no tiene plano preparado. Se añade al contratar el servicio."
+                  }
+                  icon={MapPin}
+                  title={pueblo ? "Cargando el plano" : "Sin plano del municipio"}
+                  tone={pueblo ? "empty" : "restricted"}
+                />
+              )}
+              <p className={styles.counter}>
+                {visibleItems.length} de {items.length} elementos
+                {hiddenLayers.size > 0 || search.trim() ? " (filtrados)" : ""}
+              </p>
+              {items.length > 0 && visibleItems.length === 0 ? (
+                <div className={styles.filterEmpty} role="status">
+                  <span>Sin elementos con estos filtros.</span>
+                  <button onClick={clearFilters} type="button">
+                    Limpiar filtros
+                  </button>
+                </div>
+              ) : null}
+            </div>
           </div>
         </div>
       )}

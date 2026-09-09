@@ -179,7 +179,7 @@ const TAB_DEFINITIONS: TabDefinition[] = [
   { id: "summary", label: "Información", icon: Landmark },
   { id: "administration", label: "Administración", icon: Wrench },
   { id: "people", label: "Personal", icon: Users },
-  { id: "map", label: "Mapa general", icon: MapIcon },
+  { id: "map", label: "Mapa municipal", icon: MapIcon },
 ];
 
 // Normativa y Hoja de ruta salieron de la fila: el diseño las tiene como
@@ -366,6 +366,7 @@ function MunicipalWorkspaceContent() {
   const requestSequenceRef = useRef(0);
   const tabButtonRefs = useRef<Array<HTMLButtonElement | null>>([]);
   const [isMenuEditorOpen, setIsMenuEditorOpen] = useState(false);
+  const [isEditingTownHall, setIsEditingTownHall] = useState(false);
   // Tarjetas de epígrafe desplegadas y epígrafe que se está arrastrando. Es
   // estado de presentación, no de selección: la URL sigue llevando la pestaña.
   const [openEpigraphIds, setOpenEpigraphIds] = useState<number[]>([]);
@@ -862,6 +863,7 @@ function MunicipalWorkspaceContent() {
   const isPaused = selectedContext.organization.status === "paused";
   const townHall = townHallController.townHall;
   const canEditMenu = canEditTownHall(user);
+  const isEditingContent = canEditMenu && isEditingTownHall;
   // En el diseño la fila la forman los apartados configurables, no unas
   // pestañas fijas con los apartados detrás. El primer apartado ocupa el sitio
   // de «Información»: conserva el identificador `summary` para que los enlaces
@@ -929,6 +931,8 @@ function MunicipalWorkspaceContent() {
 
   function changeOrganization(organizationId: number) {
     requestSequenceRef.current += 1;
+    setIsEditingTownHall(false);
+    setIsMenuEditorOpen(false);
     setSelectedOrganizationId(organizationId);
     setMunicipality(null);
     setOrganization(null);
@@ -1002,6 +1006,16 @@ function MunicipalWorkspaceContent() {
     setLoadAttempt((value) => value + 1);
   }
 
+  function toggleEditing() {
+    setIsEditingTownHall((current) => {
+      const next = !current;
+      if (!next) {
+        setIsMenuEditorOpen(false);
+      }
+      return next;
+    });
+  }
+
   return (
     <section className={styles.workspace}>
       {/* El diseño no tiene banda de espacio municipal: el escudo, el nombre y
@@ -1032,13 +1046,73 @@ function MunicipalWorkspaceContent() {
         </p>
       ) : null}
 
-      <nav aria-label="Áreas del ayuntamiento" className={styles.tabs} role="tablist">
-        {canEditMenu ? (
+      {canEditMenu ? (
+        <div className={styles.editBar}>
+          <div className={styles.editBarCopy}>
+            <strong>
+              {isEditingContent ? "Editando contenido" : "Contenido en modo consulta"}
+            </strong>
+            <span>
+              {isEditingContent
+                ? "Los campos se guardan al salir de ellos."
+                : "Activa la edición para cambiar textos, estructura o archivos."}
+            </span>
+          </div>
+          {isEditingContent ? (
+            <div
+              aria-live="polite"
+              className={[
+                styles.editStatus,
+                townHallController.saveStatus === "error" ||
+                townHallController.saveStatus === "refresh-error"
+                  ? styles.editStatusError
+                  : "",
+              ]
+                .filter(Boolean)
+                .join(" ")}
+              role="status"
+            >
+              <span>
+                {townHallController.saveStatus === "saving"
+                  ? "Guardando…"
+                  : townHallController.saveStatus === "saved"
+                    ? "Guardado"
+                    : townHallController.saveStatus === "error"
+                      ? townHallController.townHallError || "No se pudo guardar."
+                      : townHallController.saveStatus === "refresh-error"
+                        ? townHallController.townHallError
+                        : "Sin cambios pendientes"}
+              </span>
+              {townHallController.saveStatus === "error" ? (
+                <button
+                  disabled={townHallController.isSavingTownHall}
+                  onClick={() => void townHallController.retryLastMutation()}
+                  type="button"
+                >
+                  Reintentar
+                </button>
+              ) : null}
+            </div>
+          ) : null}
           <button
-            aria-label="Gestionar pestañas"
+            aria-pressed={isEditingContent}
+            className={styles.editToggle}
+            disabled={townHallController.isSavingTownHall}
+            onClick={toggleEditing}
+            type="button"
+          >
+            {isEditingContent ? "Terminar edición" : "Editar contenido"}
+          </button>
+        </div>
+      ) : null}
+
+      <nav aria-label="Áreas del ayuntamiento" className={styles.tabs} role="tablist">
+        {isEditingContent ? (
+          <button
+            aria-label="Gestionar pestañas y epígrafes"
             className={styles.tabsManage}
             onClick={() => setIsMenuEditorOpen(true)}
-            title="Gestionar pestañas"
+            title="Gestionar pestañas y epígrafes"
             type="button"
           >
             {/* El prototipo abre las pestañas con el mismo asa de seis puntos
@@ -1200,9 +1274,11 @@ function MunicipalWorkspaceContent() {
                 <p className="eyebrow">{activeSection.title}</p>
                 <h1>Sin epígrafes</h1>
                 <p className="muted">
-                  {canEditMenu
-                    ? "Añade el primero desde «Gestionar pestañas», el botón que abre la fila."
-                    : "Esta pestaña todavía no tiene contenido."}
+                  {isEditingContent
+                    ? "Añade el primero desde «Gestionar pestañas y epígrafes»."
+                    : canEditMenu
+                      ? "Activa «Editar contenido» para añadir el primer epígrafe."
+                      : "Esta pestaña todavía no tiene contenido."}
                 </p>
               </section>
             ) : (
@@ -1227,7 +1303,7 @@ function MunicipalWorkspaceContent() {
 
                   return (
                     <TownHallEpigraphCard
-                      canEdit={canEditMenu}
+                      canEdit={isEditingContent}
                       canMoveDown={index < activeSection.epigraphs.length - 1}
                       canMoveUp={index > 0}
                       isOpen={openEpigraphIds.includes(epigraph.id)}
@@ -1298,7 +1374,7 @@ function MunicipalWorkspaceContent() {
                         </p>
                       ) : content !== undefined ? (
                         <TownHallContentPanel
-                          canEdit={canEditMenu}
+                          canEdit={isEditingContent}
                           content={content}
                           embedded
                           isSaving={townHallController.isSavingTownHall}
@@ -1409,7 +1485,7 @@ function MunicipalWorkspaceContent() {
         )}
       </div>
 
-      {canEditMenu && isMenuEditorOpen && townHall !== null ? (
+      {isEditingContent && isMenuEditorOpen && townHall !== null ? (
         <TownHallNavEditor
           fallbackName={selectedContext.municipality.name}
           isSaving={townHallController.isSavingTownHall}

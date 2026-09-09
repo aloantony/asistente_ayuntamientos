@@ -120,7 +120,7 @@ describe("SidebarNavigation", () => {
       "Anacleto",
       "Inicio",
       "Ayuntamiento",
-      "Mapa",
+      "Mapa municipal",
     ]);
     expect(linkLabels).toContain("Ordenanzas");
     expect(linkLabels).toContain("Necesidades4");

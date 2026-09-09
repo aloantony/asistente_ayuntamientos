@@ -42,7 +42,7 @@ export const TOP_NAV_SECTIONS: TopNavSection[] = [
         href: "/ayuntamiento?tab=summary",
         enabled: true,
       },
-      { label: "Mapa general", href: "/ayuntamiento?tab=map", enabled: true },
+      { label: "Mapa municipal", href: "/ayuntamiento?tab=map", enabled: true },
     ],
   },
   {

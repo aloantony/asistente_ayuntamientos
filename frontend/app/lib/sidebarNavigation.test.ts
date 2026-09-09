@@ -37,7 +37,7 @@ describe("sidebar navigation catalog", () => {
       ["Anacleto", "/asistente"],
       ["Inicio", "/"],
       ["Ayuntamiento", "/ayuntamiento"],
-      ["Mapa", "/mapa"],
+      ["Mapa municipal", "/mapa"],
     ]);
     expect(UTILITY_SIDEBAR_ITEMS.map(({ label, href }) => [label, href])).toEqual([
       ["Mi cuenta", "/cuenta"],
@@ -62,7 +62,7 @@ describe("sidebar navigation catalog", () => {
     expect(
       OPTIONAL_SIDEBAR_ITEMS.find(({ id }) => id === "map_municipalities"),
     ).toMatchObject({
-      label: "Municipios y normativa",
+      label: "Explorar municipios",
       href: "/mapa?view=municipalities",
     });
     expect(

@@ -1,3 +1,77 @@
+.mapWorkspace {
+  display: grid;
+  min-width: 0;
+  gap: 16px;
+}
+
+.mapWorkspace:fullscreen {
+  overflow: auto;
+  padding: 20px;
+  background: var(--bg);
+}
+
+.header {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 20px;
+}
+
+.header h2 {
+  margin: 3px 0 4px;
+  color: var(--text);
+  font-size: clamp(1.35rem, 2.5vw, 1.85rem);
+  font-weight: 650;
+  letter-spacing: -0.035em;
+}
+
+.header > div:first-child > p:last-child {
+  max-width: 650px;
+  margin: 0;
+  color: var(--text-secondary);
+  font-size: 0.84rem;
+  line-height: 1.5;
+}
+
+.actions {
+  display: flex;
+  flex: none;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.actions button {
+  display: inline-flex;
+  min-height: 40px;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  padding: 8px 12px;
+  border: 1px solid var(--border-strong);
+  border-radius: 8px;
+  color: var(--text);
+  background: var(--surface-raised);
+  cursor: pointer;
+  font: inherit;
+  font-size: 0.78rem;
+  font-weight: 650;
+}
+
+.actions button:hover:not(:disabled) {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.actions button:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+
+.layersToggle {
+  display: none !important;
+}
+
 .layout {
   display: grid;
   gap: 14px;
@@ -6,14 +80,109 @@
 }
 
 @media (max-width: 900px) {
+  .header {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .actions {
+    width: 100%;
+    justify-content: flex-start;
+  }
+
+  .layersToggle {
+    display: inline-flex !important;
+  }
+
   .layout {
     grid-template-columns: minmax(0, 1fr);
+  }
+
+  .layout .sidebar {
+    position: absolute;
+    z-index: 30;
+    top: 0;
+    left: 0;
+    display: none;
+    width: min(360px, calc(100% - 24px));
+    max-height: min(620px, calc(100vh - 48px));
+    overflow: auto;
+    padding: 14px;
+    border: 1px solid var(--border-strong);
+    border-radius: 12px;
+    background: var(--surface-raised);
+    box-shadow: var(--shadow-raised);
+  }
+
+  .layout .sidebarOpen {
+    display: grid;
+  }
+
+  .sidebar .sidebarHeader {
+    display: flex;
+  }
+
+  .layout .scrim {
+    display: block;
+  }
+
+  .map {
+    grid-column: 1;
+  }
+}
+
+@media (max-width: 560px) {
+  .mapWorkspace:fullscreen {
+    padding: 12px;
+  }
+
+  .actions button {
+    flex: 1 1 145px;
+  }
+
+  .map > div {
+    height: min(62vh, 520px);
+    min-height: 390px;
   }
 }
 
 .sidebar {
   display: grid;
   gap: 12px;
+}
+
+.sidebarHeader {
+  display: none;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.sidebarHeader strong {
+  color: var(--text);
+  font-size: 0.9rem;
+}
+
+.sidebarHeader button {
+  display: inline-grid;
+  width: 40px;
+  height: 40px;
+  place-items: center;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  color: var(--text);
+  background: var(--surface);
+  cursor: pointer;
+}
+
+.scrim {
+  position: absolute;
+  z-index: 20;
+  inset: 0;
+  display: none;
+  border: 0;
+  background: rgb(28 27 25 / 35%);
+  cursor: pointer;
 }
 
 .search input {
@@ -121,10 +290,14 @@
 }
 
 .map > div {
-  height: 520px;
+  height: clamp(460px, 62vh, 680px);
   overflow: hidden;
   border: 1px solid var(--border);
   border-radius: 12px;
+}
+
+.mapWorkspace:fullscreen .map > div {
+  height: calc(100vh - 150px);
 }
 
 .counter {
@@ -133,6 +306,33 @@
   font-family: var(--font-ibm-plex-mono), "IBM Plex Mono", monospace;
   font-size: 11px;
   text-align: right;
+}
+
+.filterEmpty {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-top: 4px;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  color: var(--text-secondary);
+  background: var(--surface-muted);
+  font-size: 0.8rem;
+}
+
+.filterEmpty button {
+  flex: none;
+  min-height: 34px;
+  padding: 6px 10px;
+  border: 1px solid var(--border-strong);
+  border-radius: 7px;
+  color: var(--text);
+  background: var(--surface-raised);
+  cursor: pointer;
+  font: inherit;
+  font-weight: 650;
 }
 
 .empty {
