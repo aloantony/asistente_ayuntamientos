@@ -1,4 +1,4 @@
-"""Privacy-preserving identifiers shared by OpenAI assistant runtimes."""
+"""Privacy-preserving identifiers shared by external assistant runtimes."""
 
 import hashlib
 import hmac

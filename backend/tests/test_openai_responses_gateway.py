@@ -144,6 +144,22 @@ def openai_runtime(monkeypatch):
     monkeypatch.setattr(settings, "assistant_gateway_timeout_seconds", 30.0)
 
 
+@pytest.fixture()
+def groq_runtime(monkeypatch):
+    monkeypatch.setattr(settings, "assistant_runtime", "groq_responses")
+    monkeypatch.setattr(settings, "groq_api_key", "gsk_test-secret")
+    monkeypatch.setattr(
+        settings,
+        "groq_responses_base_url",
+        "https://api.groq.com/openai/v1",
+    )
+    monkeypatch.setattr(settings, "groq_responses_model", "openai/gpt-oss-120b")
+    monkeypatch.setattr(settings, "groq_responses_reasoning_effort", "medium")
+    monkeypatch.setattr(settings, "groq_responses_max_output_tokens", 25000)
+    monkeypatch.setattr(settings, "groq_zero_data_retention_confirmed", True)
+    monkeypatch.setattr(settings, "assistant_gateway_timeout_seconds", 30.0)
+
+
 def install_fake_responses(monkeypatch, responses: list[object]):
     pending = list(responses)
     captured: list[tuple[object, float]] = []
@@ -182,6 +198,41 @@ def test_settings_accept_openai_responses_and_official_regional_base():
     assert configured.openai_responses_base_url == "https://eu.api.openai.com/v1"
 
 
+def test_settings_accept_groq_responses_with_zdr_confirmation():
+    configured = Settings(
+        _env_file=None,
+        assistant_runtime=" GROQ_RESPONSES ",
+        groq_responses_base_url="https://api.groq.com/openai/v1/",
+        groq_responses_model="openai/gpt-oss-120b",
+        groq_zero_data_retention_confirmed=True,
+    )
+
+    assert configured.assistant_runtime == "groq_responses"
+    assert configured.groq_responses_base_url == "https://api.groq.com/openai/v1"
+    assert configured.groq_responses_model == "openai/gpt-oss-120b"
+    assert configured.groq_zero_data_retention_confirmed is True
+
+
+@pytest.mark.parametrize(
+    "base_url",
+    [
+        "http://api.groq.com/v1",
+        "https://api.groq.com.evil.test/v1",
+        "https://api.groq.com:443/v1",
+        "https://user@api.groq.com/v1",
+        "https://api.groq.com/openai/v1/responses",
+    ],
+)
+def test_settings_reject_noncanonical_groq_base_urls(base_url):
+    with pytest.raises(ValidationError):
+        Settings(_env_file=None, groq_responses_base_url=base_url)
+
+
+def test_settings_reject_invalid_groq_model():
+    with pytest.raises(ValidationError):
+        Settings(_env_file=None, groq_responses_model="model con espacios")
+
+
 @pytest.mark.parametrize(
     "base_url",
     [
@@ -218,6 +269,69 @@ def test_openai_gateway_enabled_and_model_follow_runtime(openai_runtime, monkeyp
 
     monkeypatch.setattr(settings, "openai_api_key", None)
     assert gateway.enabled is False
+
+
+def test_groq_gateway_requires_zdr_confirmation_and_uses_supported_contract(
+    groq_runtime,
+    monkeypatch,
+):
+    gateway = AIGateway()
+    captured = install_fake_responses(
+        monkeypatch,
+        [response_payload([output_text("Respuesta segura.")])],
+    )
+
+    completion = gateway.complete(
+        system="Sistema",
+        messages=[
+            {"role": "assistant", "content": "Contexto anterior"},
+            {"role": "user", "content": "Hola"},
+        ],
+        tools=[
+            {
+                "name": "list_projects",
+                "description": "Lista proyectos visibles",
+                "input_schema": {"type": "object", "properties": {}},
+            }
+        ],
+        safety_identifier="private-user-id",
+    )
+
+    assert gateway.enabled is True
+    assert gateway.model == "openai/gpt-oss-120b"
+    assert completion.content[0].text == "Respuesta segura."
+    request, _ = captured[0]
+    assert request.full_url == "https://api.groq.com/openai/v1/responses"
+    assert request.get_header("Authorization") == "Bearer gsk_test-secret"
+    payload = json.loads(request.data)
+    assert payload["model"] == "openai/gpt-oss-120b"
+    assert payload["reasoning"] == {"effort": "medium"}
+    assert "phase" not in payload["input"][0]
+    assert payload["tools"][0]["name"] == "list_projects"
+    for unsupported_field in (
+        "store",
+        "include",
+        "truncation",
+        "safety_identifier",
+    ):
+        assert unsupported_field not in payload
+
+
+def test_groq_gateway_fails_closed_without_zdr_confirmation(
+    groq_runtime,
+    monkeypatch,
+):
+    monkeypatch.setattr(settings, "groq_zero_data_retention_confirmed", False)
+
+    gateway = AIGateway()
+
+    assert gateway.enabled is False
+    with pytest.raises(AssistantUnavailableError, match="not configured"):
+        gateway.complete(
+            system="Sistema",
+            messages=[{"role": "user", "content": "Hola"}],
+            tools=[],
+        )
 
 
 def test_sync_request_uses_responses_contract_and_parses_text(

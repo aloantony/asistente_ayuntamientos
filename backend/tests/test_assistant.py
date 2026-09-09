@@ -1349,6 +1349,24 @@ def test_status_reports_openai_responses_model(
     assert response.json()["model"] == "gpt-5.6"
 
 
+def test_status_reports_groq_responses_model(
+    client,
+    assistant_user,
+    use_gateway,
+    monkeypatch,
+):
+    user, _ = assistant_user
+    monkeypatch.setattr(settings, "assistant_runtime", "groq_responses")
+    monkeypatch.setattr(settings, "groq_responses_model", "openai/gpt-oss-120b")
+    use_gateway(FakeGateway([]))
+
+    response = client.get("/assistant/status", headers=headers_for(user))
+
+    assert response.status_code == 200
+    assert response.json()["runtime"] == "groq_responses"
+    assert response.json()["model"] == "openai/gpt-oss-120b"
+
+
 def test_status_reports_codex_subscription_model(
     client,
     assistant_user,

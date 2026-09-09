@@ -113,6 +113,12 @@ class Settings(BaseSettings):
     openai_responses_model: str = "gpt-5.6"
     openai_responses_reasoning_effort: str = "medium"
     openai_responses_max_output_tokens: int = 25000
+    groq_api_key: str | None = None
+    groq_responses_base_url: str = "https://api.groq.com/openai/v1"
+    groq_responses_model: str = "openai/gpt-oss-120b"
+    groq_responses_reasoning_effort: str = "medium"
+    groq_responses_max_output_tokens: int = 25000
+    groq_zero_data_retention_confirmed: bool = False
     # Local development bridge backed by an interactive ChatGPT/Codex login.
     # It is deliberately isolated from the developer's normal ~/.codex home.
     codex_subscription_enabled: bool = False
@@ -199,11 +205,12 @@ class Settings(BaseSettings):
             "anthropic",
             "hermes_agent",
             "openai_responses",
+            "groq_responses",
             "codex_subscription",
         }:
             raise ValueError(
-                "assistant_runtime must be 'anthropic', 'hermes_agent' or "
-                "'openai_responses' or 'codex_subscription'"
+                "assistant_runtime must be 'anthropic', 'hermes_agent', "
+                "'openai_responses', 'groq_responses' or 'codex_subscription'"
             )
         return normalized
 
@@ -351,6 +358,57 @@ class Settings(BaseSettings):
         if value <= 0:
             raise ValueError(
                 "openai_responses_max_output_tokens must be greater than zero"
+            )
+        return value
+
+    @field_validator("groq_responses_base_url")
+    @classmethod
+    def validate_groq_responses_base_url(cls, value: str) -> str:
+        normalized = value.strip().rstrip("/")
+        parsed = urlsplit(normalized)
+        if (
+            parsed.scheme != "https"
+            or parsed.hostname != "api.groq.com"
+            or parsed.netloc != parsed.hostname
+            or parsed.path != "/openai/v1"
+            or parsed.query
+            or parsed.fragment
+        ):
+            raise ValueError(
+                "groq_responses_base_url must be the official HTTPS Groq API "
+                "base URL ending in /openai/v1"
+            )
+        return "https://api.groq.com/openai/v1"
+
+    @field_validator("groq_responses_model")
+    @classmethod
+    def validate_groq_responses_model(cls, value: str) -> str:
+        normalized = value.strip()
+        if (
+            not normalized
+            or len(normalized) > 128
+            or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._/-]*", normalized)
+        ):
+            raise ValueError("groq_responses_model is invalid")
+        return normalized
+
+    @field_validator("groq_responses_reasoning_effort")
+    @classmethod
+    def validate_groq_responses_reasoning_effort(cls, value: str) -> str:
+        normalized = value.strip().lower()
+        if normalized not in {"none", "low", "medium", "high"}:
+            raise ValueError(
+                "groq_responses_reasoning_effort must be one of: none, low, "
+                "medium, high"
+            )
+        return normalized
+
+    @field_validator("groq_responses_max_output_tokens")
+    @classmethod
+    def validate_groq_responses_max_output_tokens(cls, value: int) -> int:
+        if value <= 0:
+            raise ValueError(
+                "groq_responses_max_output_tokens must be greater than zero"
             )
         return value
 
