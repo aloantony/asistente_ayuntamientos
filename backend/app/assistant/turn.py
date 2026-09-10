@@ -4,6 +4,7 @@ import hashlib
 import json
 import logging
 import re
+import unicodedata
 import uuid
 from collections.abc import Generator
 from dataclasses import dataclass
@@ -220,6 +221,8 @@ def _tool_repetition_policy(
     read_call = tool is None or tool.read_only
     refreshable_manifest = tool_name == "get_ordinance_corpus_manifest"
     return read_call, read_call and not refreshable_manifest
+
+
 TOOL_LOOP_LIMIT_REPLY = (
     "He detenido las consultas para evitar un bucle. No he podido completar "
     "todas las comprobaciones; puedes pedirme que reintente la parte pendiente."
@@ -286,6 +289,110 @@ TOOL_INTENT_STOPWORDS = {
     "visibles",
     "y",
 }
+
+TOOL_DOMAIN_KEYWORDS: dict[str, frozenset[str]] = {
+    "organizations": frozenset({"entidad", "organizacion", "organizaciones"}),
+    "projects": frozenset({"expediente", "expedientes", "proyecto", "proyectos"}),
+    "map": frozenset(
+        {"coordenada", "coordenadas", "donde", "localiza", "mapa", "ubicacion"}
+    ),
+    "ordinances": frozenset(
+        {
+            "articulo",
+            "bando",
+            "bocyl",
+            "boletin",
+            "bop",
+            "fiscal",
+            "ibi",
+            "impuesto",
+            "ivtm",
+            "legal",
+            "norma",
+            "normas",
+            "normativa",
+            "ordenanza",
+            "ordenanzas",
+            "reglamento",
+            "tasa",
+            "tributo",
+            "vigente",
+            "vigencia",
+        }
+    ),
+    "requirements": frozenset(
+        {
+            "borrador",
+            "carencia",
+            "creacion",
+            "crealo",
+            "incidencia",
+            "necesidad",
+            "necesidades",
+            "requisito",
+            "requisitos",
+        }
+    ),
+    "memory": frozenset({"memoriza", "memoria", "recuerda", "recordar"}),
+    "feedback": frozenset(
+        {"administrador", "envialo", "envio", "feedback", "sugerencia", "soporte"}
+    ),
+    "agent_office": frozenset({"agente", "encarga", "investiga", "tarea", "tareas"}),
+    "transversal_features": frozenset(
+        {
+            "adopcion",
+            "activar",
+            "funcionalidad",
+            "funcionalidades",
+            "transversal",
+            "transversales",
+        }
+    ),
+}
+WEB_EXPLICIT_KEYWORDS = frozenset(
+    {
+        "actualidad",
+        "externa",
+        "externo",
+        "fuente",
+        "fuentes",
+        "internet",
+        "noticia",
+        "noticias",
+        "online",
+        "pagina",
+        "publica",
+        "publicado",
+        "url",
+        "web",
+    }
+)
+WEB_VERIFICATION_KEYWORDS = frozenset(
+    {"busca", "buscar", "comprueba", "consulta", "verifica"}
+)
+FOLLOWUP_INTENT_KEYWORDS = frozenset(
+    {
+        "anterior",
+        "continua",
+        "cual",
+        "cuales",
+        "esa",
+        "ese",
+        "eso",
+        "segunda",
+        "siguiente",
+    }
+)
+TOOL_DOMAIN_DEPENDENCIES: dict[str, frozenset[str]] = {
+    "agent_office": frozenset({"organizations"}),
+    "feedback": frozenset({"organizations"}),
+    "memory": frozenset({"organizations"}),
+    "projects": frozenset({"organizations"}),
+    "requirements": frozenset({"organizations", "projects"}),
+    "transversal_features": frozenset({"organizations"}),
+}
+HISTORY_SUMMARY_MAX_CHARS = 1200
+HISTORY_SUMMARY_MESSAGE_LIMIT = 6
 
 
 @dataclass(frozen=True)
@@ -431,7 +538,22 @@ def _run_agent_turn_events(
     )
 
     attachment_tainted = bool(current_attachments)
-    tools = [] if attachment_tainted else get_available_tool_specs(db, current_user)
+    messages = build_history(
+        conversation,
+        attachment_context_message_id=user_message.id,
+        attachment_context=build_turn_attachment_context(current_attachments),
+    )
+    available_tools = (
+        [] if attachment_tainted else get_available_tool_specs(db, current_user)
+    )
+    tools = select_relevant_tool_specs(
+        available_tools,
+        user_text=user_text,
+        messages=messages,
+        required_tool_name=(
+            confirmation_context.tool if confirmation_context is not None else None
+        ),
+    )
     tools_by_name = {tool.name: tool for tool in tools}
     tool_definitions = [tool.definition for tool in tools]
     tool_names = frozenset(tool.name for tool in tools)
@@ -439,11 +561,13 @@ def _run_agent_turn_events(
         conversation_id=conversation.id,
         user_message_id=user_message.id,
     )
-    system = build_system_prompt(db, current_user, tools, input_mode=input_mode)
-    messages = build_history(
-        conversation,
-        attachment_context_message_id=user_message.id,
-        attachment_context=build_turn_attachment_context(current_attachments),
+    memory_context = " ".join(recent_text_messages(messages)[-6:])[-4000:]
+    system = build_system_prompt(
+        db,
+        current_user,
+        tools,
+        input_mode=input_mode,
+        context_text=memory_context,
     )
     safety_identifier = build_assistant_safety_identifier(current_user.id)
 
@@ -664,9 +788,7 @@ def _run_agent_turn_events(
                             attachment_tainted=False,
                         )
                     if track_repetition:
-                        non_retryable_failure = (
-                            _is_non_retryable_tool_failure(result)
-                        )
+                        non_retryable_failure = _is_non_retryable_tool_failure(result)
                         if result.ok or non_retryable_failure:
                             seen_read_calls.add(signature)
                         if non_retryable_failure:
@@ -710,13 +832,9 @@ def _run_agent_turn_events(
             elif not tool_results:
                 force_synthesis_reason = "empty_tool_response"
             elif iterations_remaining <= 0:
-                force_synthesis_reason = (
-                    force_synthesis_reason or "iteration_budget"
-                )
+                force_synthesis_reason = force_synthesis_reason or "iteration_budget"
             elif tool_calls_used >= tool_call_budget:
-                force_synthesis_reason = (
-                    force_synthesis_reason or "tool_call_budget"
-                )
+                force_synthesis_reason = force_synthesis_reason or "tool_call_budget"
 
             if force_synthesis_reason is not None:
                 if force_synthesis_reason == "turn_timeout":
@@ -827,7 +945,9 @@ def _run_agent_turn_events(
 def tool_call_signature(tool_name: str, tool_input: dict) -> str:
     """Return a stable signature for superficially equivalent tool inputs."""
     normalized = _normalize_tool_call_value(tool_input)
-    return f"{tool_name}:{json.dumps(normalized, sort_keys=True, separators=(',', ':'))}"
+    return (
+        f"{tool_name}:{json.dumps(normalized, sort_keys=True, separators=(',', ':'))}"
+    )
 
 
 def _redact_attachment_tool_completion(
@@ -1010,10 +1130,7 @@ def _execute_tool_for_current_turn(
 def _confirmation_context_from_result(
     result: ConfirmationToolResult | None,
 ) -> ConfirmationReference | None:
-    if (
-        isinstance(result, ConfirmationToolResult)
-        and result.status == "required"
-    ):
+    if isinstance(result, ConfirmationToolResult) and result.status == "required":
         return result.confirmation
     return None
 
@@ -1098,16 +1215,42 @@ def build_history(
         ):
             continue
         if content:
-            if (
-                message.id == attachment_context_message_id
-                and attachment_context
-            ):
+            if message.id == attachment_context_message_id and attachment_context:
                 content = f"{content}\n\n{attachment_context}"
             messages.append({"role": message.role, "content": content})
     max_messages = max(2, settings.assistant_history_max_messages)
     if len(messages) <= max_messages:
         return messages
-    return messages[-max_messages:]
+
+    recent_messages = messages[-(max_messages - 1) :]
+    older_messages = messages[: -(max_messages - 1)]
+    summary = summarize_older_history(older_messages)
+    if not summary:
+        return messages[-max_messages:]
+    return [{"role": "assistant", "content": summary}, *recent_messages]
+
+
+def summarize_older_history(messages: list[dict]) -> str:
+    candidates = [
+        message
+        for message in messages[-HISTORY_SUMMARY_MESSAGE_LIMIT:]
+        if isinstance(message.get("content"), str)
+        and message.get("content", "").strip()
+    ]
+    if not candidates:
+        return ""
+
+    prefix = "Resumen automático del contexto anterior:\n"
+    available_chars = HISTORY_SUMMARY_MAX_CHARS - len(prefix)
+    per_message_limit = max(80, available_chars // len(candidates) - 16)
+    lines: list[str] = []
+    for message in candidates:
+        content = " ".join(message["content"].split())
+        if len(content) > per_message_limit:
+            content = f"{content[: per_message_limit - 1].rstrip()}…"
+        role = "Usuario" if message.get("role") == "user" else "Asistente"
+        lines.append(f"- {role}: {content}")
+    return f"{prefix}{chr(10).join(lines)}"[:HISTORY_SUMMARY_MAX_CHARS]
 
 
 def _assistant_response_message(response: AICompletion) -> dict:
@@ -1252,8 +1395,12 @@ def recent_text_messages(messages: list[dict]) -> list[str]:
 
 
 def tokenize_tool_intent(text: str) -> set[str]:
+    normalized = unicodedata.normalize("NFD", text.lower())
+    plain_text = "".join(
+        character for character in normalized if unicodedata.category(character) != "Mn"
+    )
     tokens: set[str] = set()
-    for raw_token in TOKEN_PATTERN.findall(text.lower()):
+    for raw_token in TOKEN_PATTERN.findall(plain_text):
         if raw_token in TOOL_INTENT_STOPWORDS:
             continue
         tokens.add(raw_token)
@@ -1262,6 +1409,66 @@ def tokenize_tool_intent(text: str) -> set[str]:
         if len(raw_token) > 4 and raw_token.endswith("s"):
             tokens.add(raw_token[:-1])
     return tokens
+
+
+def _tool_domains_for_text(text: str) -> set[str]:
+    tokens = tokenize_tool_intent(text)
+    domains = {
+        domain
+        for domain, keywords in TOOL_DOMAIN_KEYWORDS.items()
+        if tokens.intersection(keywords)
+    }
+    if tokens.intersection(WEB_EXPLICIT_KEYWORDS) or (
+        tokens.intersection(WEB_VERIFICATION_KEYWORDS) and "ordinances" in domains
+    ):
+        domains.add("web")
+    for domain in tuple(domains):
+        domains.update(TOOL_DOMAIN_DEPENDENCIES.get(domain, ()))
+    return domains
+
+
+def select_relevant_tool_specs(
+    tools: list[ToolSpec],
+    *,
+    user_text: str,
+    messages: list[dict],
+    required_tool_name: str | None = None,
+) -> list[ToolSpec]:
+    """Return the authorized tools relevant to this turn's explicit context."""
+
+    domains = _tool_domains_for_text(user_text)
+    is_elliptical_followup = bool(
+        tokenize_tool_intent(user_text).intersection(FOLLOWUP_INTENT_KEYWORDS)
+    )
+    if not domains and is_elliptical_followup:
+        previous_user_messages = [
+            content
+            for message in messages[:-1][-6:]
+            if message.get("role") == "user"
+            and isinstance((content := message.get("content")), str)
+        ]
+        for content in reversed(previous_user_messages):
+            domains = _tool_domains_for_text(content)
+            if domains:
+                break
+
+    if required_tool_name:
+        required_tool = next(
+            (tool for tool in tools if tool.name == required_tool_name),
+            None,
+        )
+        if required_tool is not None:
+            domains.add(required_tool.domain)
+            domains.update(TOOL_DOMAIN_DEPENDENCIES.get(required_tool.domain, ()))
+
+    known_domains = {*TOOL_DOMAIN_KEYWORDS, "web"}
+    return [
+        tool
+        for tool in tools
+        if tool.domain in domains
+        or tool.name == required_tool_name
+        or tool.domain not in known_domains
+    ]
 
 
 def tool_accepts_arguments(tool: ToolSpec, arguments: dict) -> bool:

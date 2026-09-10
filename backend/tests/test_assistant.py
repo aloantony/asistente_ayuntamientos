@@ -905,7 +905,7 @@ def test_text_turn_keeps_only_first_of_two_different_mutation_confirmations(
 
     response = client.post(
         f"/assistant/conversations/{conversation['id']}/messages",
-        json={"content": "Prepara estas dos acciones"},
+        json={"content": "Prepara una necesidad y envía feedback"},
         headers=headers_for(user),
     )
 
@@ -4098,8 +4098,11 @@ def test_model_first_turn_persists_reply_and_calls_gateway_for_capabilities(
     assert messages[-1]["content"] == "Puedo ayudarte a preparar borradores y consultas."
     assert len(gateway.calls) == 1
     assert "Eres Anacleto" in gateway.calls[0]["system"]
-    assert "HERRAMIENTAS DISPONIBLES" in gateway.calls[0]["system"]
+    assert "HERRAMIENTAS DISPONIBLES" not in gateway.calls[0]["system"]
     assert "COBERTURA DE ORDENANZAS" not in gateway.calls[0]["system"]
+    assert "Ordenanzas y corpus:" not in gateway.calls[0]["system"]
+    assert gateway.calls[0]["tools"] == []
+    assert len(gateway.calls[0]["system"]) < 4_000
     assert gateway.calls[0]["messages"][-1] == {
         "role": "user",
         "content": "¿qué puedes hacer?",
@@ -4107,6 +4110,103 @@ def test_model_first_turn_persists_reply_and_calls_gateway_for_capabilities(
     stored = db.get(AssistantConversation, conversation["id"])
     assert stored is not None
     assert stored.title == "¿qué puedes hacer?"
+
+
+def test_normal_turn_selects_only_ordinance_and_web_tools_for_external_normative_query(
+    client,
+    assistant_user,
+    grant_permissions,
+    use_gateway,
+    monkeypatch,
+):
+    user, organization = assistant_user
+    grant_permissions(
+        user,
+        organization,
+        ["ordinances.compare", "assistant.web.search"],
+    )
+    monkeypatch.setattr(settings, "web_search_provider", "brave")
+    monkeypatch.setattr(settings, "brave_search_api_key", "brave-secret")
+    monkeypatch.setattr(settings, "brave_search_storage_rights_confirmed", True)
+    monkeypatch.setattr(settings, "assistant_web_reader_enabled", True)
+    gateway = use_gateway(
+        FakeGateway([fake_response("end_turn", [text_block("Respuesta final.")])])
+    )
+    conversation = client.post(
+        "/assistant/conversations",
+        json={},
+        headers=headers_for(user),
+    ).json()
+
+    response = client.post(
+        f"/assistant/conversations/{conversation['id']}/messages",
+        json={"content": "Busca y comprueba en fuentes externas la ordenanza del IBI"},
+        headers=headers_for(user),
+    )
+
+    assert response.status_code == 200
+    tool_names = {tool["name"] for tool in gateway.calls[0]["tools"]}
+    assert tool_names == {
+        "get_ordinance_corpus_manifest",
+        "list_ordinance_catalog",
+        "semantic_search_ordinances",
+        "web_search",
+        "read_web_page",
+    }
+    assert "Ordenanzas y corpus:" in gateway.calls[0]["system"]
+    assert "Fuentes web:" in gateway.calls[0]["system"]
+    assert "Necesidades municipales:" not in gateway.calls[0]["system"]
+
+
+def test_normal_turn_uses_recent_user_context_for_an_elliptical_followup(
+    client,
+    assistant_user,
+    grant_permissions,
+    use_gateway,
+):
+    user, organization = assistant_user
+    grant_permissions(user, organization, ["ordinances.compare"])
+    gateway = use_gateway(
+        FakeGateway(
+            [
+                fake_response("end_turn", [text_block("Hay varias ordenanzas.")]),
+                fake_response("end_turn", [text_block("La segunda es esta.")]),
+                fake_response("end_turn", [text_block("De nada.")]),
+            ]
+        )
+    )
+    conversation = client.post(
+        "/assistant/conversations",
+        json={},
+        headers=headers_for(user),
+    ).json()
+
+    first = client.post(
+        f"/assistant/conversations/{conversation['id']}/messages",
+        json={"content": "Lista las ordenanzas fiscales"},
+        headers=headers_for(user),
+    )
+    second = client.post(
+        f"/assistant/conversations/{conversation['id']}/messages",
+        json={"content": "¿Y la segunda?"},
+        headers=headers_for(user),
+    )
+    thanks = client.post(
+        f"/assistant/conversations/{conversation['id']}/messages",
+        json={"content": "Gracias"},
+        headers=headers_for(user),
+    )
+
+    assert first.status_code == 200
+    assert second.status_code == 200
+    assert thanks.status_code == 200
+    ordinance_tools = {
+        "get_ordinance_corpus_manifest",
+        "list_ordinance_catalog",
+        "semantic_search_ordinances",
+    }
+    assert {tool["name"] for tool in gateway.calls[1]["tools"]} == ordinance_tools
+    assert gateway.calls[2]["tools"] == []
 
 
 def test_normal_turn_hides_web_search_when_runtime_is_incomplete(
@@ -5691,7 +5791,7 @@ def test_turn_wall_clock_budget_bounds_gateway_calls_and_stops_before_overrun(
 
     response = client.post(
         f"/assistant/conversations/{conversation['id']}/messages",
-        json={"content": "Consulta todos los estados"},
+        json={"content": "Consulta todos los estados de las necesidades"},
         headers=headers_for(user),
     )
 
@@ -7270,7 +7370,14 @@ def test_system_prompt_includes_approved_memory(
         status="approved",
         sensitivity="normal",
     )
-    db.add(memory)
+    unrelated_memory = AssistantMemoryEntry(
+        organization_id=organization.id,
+        category="protocol",
+        content="El protocolo de alumbrado requiere una inspección nocturna.",
+        status="approved",
+        sensitivity="normal",
+    )
+    db.add_all([memory, unrelated_memory])
     db.commit()
     gateway = use_gateway(
         FakeGateway([fake_response("end_turn", [text_block("De acuerdo.")])])
@@ -7288,8 +7395,45 @@ def test_system_prompt_includes_approved_memory(
     )
 
     assert response.status_code == 200
-    assert "NOTAS INTERNAS APROBADAS" in gateway.calls[0]["system"]
+    assert "NOTAS INTERNAS APROBADAS RELEVANTES" in gateway.calls[0]["system"]
     assert "Prefiere respuestas con resumen ejecutivo." in gateway.calls[0]["system"]
+    assert "protocolo de alumbrado" not in gateway.calls[0]["system"]
+
+
+def test_system_prompt_includes_matching_non_preference_memory(
+    client,
+    assistant_user,
+    db,
+    use_gateway,
+):
+    user, organization = assistant_user
+    db.add(
+        AssistantMemoryEntry(
+            organization_id=organization.id,
+            category="protocol",
+            content="El protocolo de alumbrado requiere una inspección nocturna.",
+            status="approved",
+            sensitivity="normal",
+        )
+    )
+    db.commit()
+    gateway = use_gateway(
+        FakeGateway([fake_response("end_turn", [text_block("De acuerdo.")])])
+    )
+    conversation = client.post(
+        "/assistant/conversations",
+        json={},
+        headers=headers_for(user),
+    ).json()
+
+    response = client.post(
+        f"/assistant/conversations/{conversation['id']}/messages",
+        json={"content": "¿Cuál es el protocolo de alumbrado?"},
+        headers=headers_for(user),
+    )
+
+    assert response.status_code == 200
+    assert "protocolo de alumbrado" in gateway.calls[0]["system"]
 
 
 def test_history_is_capped(monkeypatch, db, assistant_user):
@@ -7311,8 +7455,13 @@ def test_history_is_capped(monkeypatch, db, assistant_user):
 
     history = build_history(conversation)
 
-    assert [message["content"] for message in history] == [
-        "mensaje 6",
+    assert len(history) == 4
+    assert history[0]["role"] == "assistant"
+    assert history[0]["content"].startswith(
+        "Resumen automático del contexto anterior:"
+    )
+    assert "mensaje 6" in history[0]["content"]
+    assert [message["content"] for message in history[1:]] == [
         "mensaje 7",
         "mensaje 8",
         "mensaje 9",

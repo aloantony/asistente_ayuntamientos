@@ -77,7 +77,7 @@ class Settings(BaseSettings):
     assistant_max_tool_calls: int = 8
     assistant_turn_timeout_seconds: float = 120.0
     assistant_gateway_timeout_seconds: float = 30.0
-    assistant_history_max_messages: int = 40
+    assistant_history_max_messages: int = 16
     assistant_max_attachments_per_message: int = 5
     assistant_attachment_max_context_chars: int = 6000
     assistant_attachment_total_context_chars: int = 12000
