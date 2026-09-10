@@ -1,352 +1,280 @@
-# Asistente Ayuntamientos
+<p align="center">
+  <img src="frontend/public/anacleto-logo.svg" width="112" alt="Anacleto">
+</p>
 
-## 1. Project overview
+<h1 align="center">Anacleto</h1>
 
-Asistente Ayuntamientos is the FastAPI + Next.js codebase for Anacleto, an operational AI agent for municipal work.
+<p align="center">
+  <strong>Agente operativo municipal.</strong><br>
+  Plataforma de gestión para ayuntamientos pequeños, con un asistente de IA
+  supervisado por personas.
+</p>
 
-The target product and its limits are defined in [docs/vision-producto.md](docs/vision-producto.md). The current codebase is transitional: its municipal modules and supervised assistant are useful foundations, but requirements intake is a capability of Anacleto rather than the product itself.
+<p align="center">
+  <a href="https://github.com/aloantony/asistente_ayuntamientos/actions/workflows/ci.yml"><img src="https://github.com/aloantony/asistente_ayuntamientos/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
+  <img src="https://img.shields.io/badge/licencia-c%C3%B3digo%20visible-orange" alt="Licencia: código visible">
+  <img src="https://img.shields.io/badge/Python-3.12-3776AB?logo=python&logoColor=white" alt="Python 3.12">
+  <img src="https://img.shields.io/badge/Node-22-339933?logo=nodedotjs&logoColor=white" alt="Node 22">
+  <img src="https://img.shields.io/badge/PostgreSQL-17-4169E1?logo=postgresql&logoColor=white" alt="PostgreSQL 17">
+</p>
 
-## 2. Product objective and direction
+<p align="center">
+  <a href="#arranque-rápido">Arranque rápido</a> ·
+  <a href="#qué-incluye">Módulos</a> ·
+  <a href="#arquitectura">Arquitectura</a> ·
+  <a href="#documentación">Documentación</a> ·
+  <a href="README.en.md">English</a>
+</p>
 
-The first user is the mayor, followed by the rest of the municipal staff. Each municipality will have its own instance and one organizational Anacleto, with private conversations and permission-scoped access to shared work and knowledge. Text and voice are the primary interface; projects, documents, requirements, ordinances and maps are contextual work surfaces.
+---
 
-Anacleto is intended to observe authorized events, plan, coordinate people and systems, and act within explicit, auditable policies and delegations. Risk determines whether it may act and notify, must ask permission, or must stop and escalate. It supports institutional municipal work, not personal, partisan or electoral activity.
+> [!IMPORTANT]
+> **Código visible, no código abierto.** Puedes leer, auditar y probar el código
+> en tu máquina. Usarlo en producción o prestar un servicio con él requiere un
+> acuerdo escrito previo. Ver [LICENSE](LICENSE).
 
-The target deployment separates each municipality's operational instance from a central platform control plane and a reviewed knowledge network. The current multi-tenant `Organization` model remains an implemented security boundary during that transition; it must not be mistaken for the final shared deployment model.
+## Qué es
 
-All AI egress continues through the internal gateway. Contractually approved external providers may eventually process the data necessary for a task under municipal policy, minimization and traceability. The current stricter controls remain in force until those policies and contracts exist. Owned models can later be introduced behind the same gateway contract.
+Un ayuntamiento de 500 habitantes tiene las mismas obligaciones legales que uno
+de 50.000 y una fracción del personal. Anacleto es la herramienta interna de
+trabajo de ese ayuntamiento: reúne en un sitio el expediente, el inventario, la
+normativa, el mantenimiento y el mapa del municipio, y pone encima un asistente
+de IA que entiende ese contexto y ayuda a completar el trabajo.
 
-## 3. Current technical stack
+El asistente **no decide solo**. Todo lo que propone —una necesidad recogida en
+conversación, una ordenanza importada, un recuerdo institucional— entra como
+borrador y necesita que una persona con permiso lo apruebe. Cada llamada a una
+herramienta deja rastro auditable.
 
-- Backend: FastAPI
-- Frontend: Next.js
-- Database: PostgreSQL
-- Redis: declared in Docker Compose and reserved for future workers/cache; no backend code consumes it yet
-- Local orchestration: Docker Compose
-- ORM: SQLAlchemy
-- Migrations: Alembic
-- Authentication: JWT
-- Authorization: RBAC permissions
+**Lo que no es:** no es un portal de atención a la ciudadanía, no es una
+herramienta de actividad política o electoral, y no sustituye el criterio del
+secretario ni del técnico municipal.
 
-## 4. Core domain concepts
+La visión completa del producto está en
+[`docs/vision-producto.md`](docs/vision-producto.md).
 
-- `Organization`: customer or client tenant using the app. Organizations scope operational data such as users, projects, documents and requirements.
-- `Municipality`: real-world municipality used for comparative and reference data. A municipality is not necessarily the same thing as the tenant using the application.
-- `Project`: expediente, work area or internal initiative inside an organization.
-- `Document`: uploaded file linked to an organization and a project.
-- `Requirement`: structured functional or product need linked to an organization and optionally to a project.
-- `Ordinance`: structured municipal ordinance linked to a municipality and optionally to a document.
-- `MunicipalProfile` and `MunicipalBlock`: an organization's editable town hall chrome — display name, shield and weather switch, plus a generic parent/position block tree that currently holds the configurable municipal menu.
-- `User`, `Group`, `Role`, `Permission`: access control model used to assign capabilities to people and groups.
+## Estado del proyecto
 
-## 5. Implemented modules
+| | |
+|---|---|
+| **Fase** | Piloto en producción con un ayuntamiento real |
+| **Multi-tenant** | Sí, por organización, como frontera de seguridad implementada |
+| **API** | Sin versionar todavía: puede cambiar sin aviso entre commits |
+| **Tests** | ~936 tests de backend (pytest) + 17 suites de frontend (vitest) |
+| **Decisiones** | 63 ADR registradas en [`docs/decisiones.md`](docs/decisiones.md) |
+| **Idiomas** | Interfaz en español; código y commits en inglés |
 
-- Authentication: JWT login issuing an httpOnly session cookie for the browser (Bearer headers remain supported for API clients), `/auth/logout`, self-service password change, admin-driven password reset, per-IP login rate limiting, `/auth/me` session restoration and first-admin bootstrap.
-- Users and groups: administrative management. Deletion is physical (hard delete) but guarded: the last active superuser and your own account cannot be deleted, and association rows are cleaned up explicitly.
-- Roles and permissions: RBAC model for administrative and functional capabilities. The permission catalog is seeded automatically and idempotently on backend startup.
-- Organizations: tenant foundation for client entities using the application.
-- Projects: organization-scoped expedientes, work areas and initiatives.
-- Documents: upload, metadata, download and archive support for project documents.
-- Requirements: structured intake for needs, product ideas and stakeholder requests.
-- Municipalities: global reference data for real-world municipalities.
-- Ordinances: structured ordinance records linked to municipalities and optionally documents.
-- Configurable town hall bar (`/ayuntamiento`): on top of the municipal workspace, each organization sets the display name, uploads its shield by dropping an image on it, enables a block with today's temperature and defines its own sections — created, renamed, reordered by drag and drop and deleted — which appear as tabs beside the fixed areas. Section content is not implemented yet. Gated by `town_hall.view`, `town_hall.edit` and `town_hall.manage`. See ADR-034.
-- Municipal map (`/mapa`, and Ayuntamiento → Mapa general): needs, projects and municipal assets placed on a plan of the municipality served, with layers derived from the items themselves, area selection, CSV export and right-click registration of new work on a point. The plan is a static file that ships with the frontend (`frontend/public/cartografia/<municipality>.json`): building footprints from the Spanish Cadastre INSPIRE service plus streets, water and land use from OpenStreetMap, reprojected to WGS84 and drawn with Leaflet. There is no map server, no external tiles and no mirror to synchronise; a municipality without a plan says so and the rest of the screen keeps working. Gated by `map.view`, `map.edit` and `map.manage`. See ADR-064.
-- Ordinance import and comparison: official-source import jobs run through a Redis/RQ worker, create pending-review ordinances, split legal text into reviewable/vectorized chunks and expose a thematic comparison matrix between municipalities.
-- AI Requirements Intake Assistant: Anacleto is a model-first Spanish assistant that captures stakeholder needs as draft requirements. It streams web turns over SSE, calls the configured LLM runtime only through the Privacy/AI Gateway (`app/assistant/gateway.py`) and executes tools with the calling user's RBAC permissions. Requirements are always created as drafts with `source_type=conversation`, `create_requirement` requires a later human confirmation turn, and every tool call leaves an auditable JSON trail. Conversations are private to their author. Gated by the `assistant.use` permission; disabled (503) unless the selected runtime is configured.
-- The capability-parity scope, security gates and phased delivery plan for web reading, attachments, code/data analysis, images, connectors, browser automation and durable agents are maintained in [docs/herramientas-asistente.md](docs/herramientas-asistente.md).
-- Web voice dialogue with Anacleto: when OpenAI Realtime is approved and enabled, the browser uses WebRTC with an ephemeral credential while every user transcript, tool call, confirmation and final turn remains server-owned and auditable. Exact safety confirmations are accepted only after their complete audio playback. The existing backend STT/TTS flow remains as a fallback: `MediaRecorder` audio is transcribed through `/assistant/audio-transcriptions` and responses are synthesized through `/assistant/speech`.
-- Controlled institutional memory: the assistant can propose organization memory, but only entries reviewed by authorized users become reusable context. Proposing, viewing and reviewing are separated by `assistant.memory.propose`, `assistant.memory.view` and `assistant.memory.review`; municipal reviewers work from `/admin/memoria` with tenant isolation and optimistic concurrency protection.
-- Local product feedback review: confirmed assistant feedback enters `/admin/producto`, a superuser-only transitional inbox. It is intentionally separate from municipal memory and does not yet anonymize or send records to a central platform.
-- Telegram assistant channel: existing users can generate a short-lived one-use link code from the account page, link a Telegram chat and use the assistant through a separate audited conversation channel with the same RBAC permissions.
+Es un proyecto en evolución activa y de un solo autor. Si te planteas usarlo,
+lee antes [Privacidad y seguridad](#privacidad-y-seguridad).
 
-## 6. Architecture principles
+## Qué incluye
 
-- Access control is tenant-aware through `Organization`.
-- Privileged platform operations are superuser-only: granting or revoking superuser status, creating organizations (tenants), and mutating the global roles/permissions catalog. `users.manage` only reaches users who share an organization where the admin holds the permission.
-- Municipalities are global reference data, separate from tenant organizations. Linking a document to an ordinance requires access to that document.
-- List endpoints for municipalities, ordinances, requirements and admin users are paginated (`limit` 1-200 default 100, `offset`) and expose the total via the `X-Total-Count` header. Ordinance listings omit `text_content`; the full legal text only travels on the detail endpoint.
-- Imported ordinances are never approved automatically: importer output enters `pending_review`, the review agent stores a checklist and score, and a user with `ordinances.review` must approve, reject or request changes.
-- Legal chunks are stored in PostgreSQL and use pgvector when available. Development uses deterministic local hash embeddings by default; production can switch to a configured OpenAI-compatible embeddings provider.
-- Assistant voice capture and playback stay in the browser. In the fallback flow, STT/TTS run only through backend endpoints in `app/assistant/speech.py`, with no browser cloud recognition or `speechSynthesis` fallback (see ADR-021). When Realtime is explicitly enabled, browser audio is sent directly to the approved provider over WebRTC using a short-lived credential; tool execution and durable conversation state never leave the backend.
-- Uploaded documents are stored outside PostgreSQL.
-- PostgreSQL stores document metadata, ownership, status and relationships, not raw file bytes.
-- Uploaded files are stored in a persistent Docker volume.
-- Important business objects should avoid hard delete where archive or status fields are available.
-- A superuser bypass exists for administration, but normal users are permission-controlled.
-- Backend and frontend should remain bound to localhost in local development unless deployment is intentionally changed.
+| Área | Ruta | Qué resuelve |
+|---|---|---|
+| **Anacleto** | `/asistente` | Conversación por texto y voz con el asistente, con herramientas municipales sujetas a los permisos de quien pregunta |
+| **Ayuntamiento** | `/ayuntamiento` | Ficha del municipio, escudo, secciones configurables, personal y puestos |
+| **Mapa** | `/mapa` | Plano del municipio con necesidades, proyectos y bienes situados sobre él; selección por área y exportación CSV |
+| **Ordenanzas** | `/ordenanzas` | Biblioteca de normativa municipal, importación desde fuentes oficiales y matriz comparativa entre municipios |
+| **Necesidades** | `/requisitos` | Recogida estructurada de necesidades y peticiones, incluidas las que captura el asistente |
+| **Proyectos** | `/proyectos` | Expedientes y áreas de trabajo, con sus documentos |
+| **Inventario** | `/inventario` | Bienes e instalaciones municipales |
+| **Mantenimiento** | `/mantenimiento` | Partes e incidencias sobre esos bienes |
+| **Sede electrónica** | `/sede` | Tablón, trámites, tributos, perfil de contratante, transparencia y plenos |
+| **Hoja de ruta** | `/hoja-de-ruta` | Planificación municipal a la vista de todos |
+| **Administración** | `/admin/*` | Usuarios, grupos, roles y permisos, municipios, memoria institucional y organizaciones |
 
-## 7. Document storage
+El detalle funcional de cada módulo está en [`docs/`](docs/README.md).
 
-Documents are stored on our own server in the current architecture. They are not stored in external S3/AWS storage.
+## Arranque rápido
 
-`DOCUMENT_STORAGE_ROOT` controls the filesystem path used by the backend to store uploaded files. In Docker Compose, the `document_storage` volume is mounted at `/var/lib/asistente_ayuntamientos/documents`, which is the default path configured in `.env.example`.
-
-The `document_storage` Docker volume persists uploaded files across container rebuilds and restarts. PostgreSQL stores metadata only, not raw file bytes.
-
-Municipal shields share this volume under `organizations/<id>/brand/`, capped by `MUNICIPAL_SHIELD_MAX_UPLOAD_BYTES` (2 MiB by default) and restricted to images. They deliberately bypass the `Document` model, which requires a project.
-
-## 8. Local development setup
-
-Requirements:
-
-- Docker
-- Docker Compose
-
-Create a local environment file:
+Necesitas **Docker** y **Docker Compose**. Nada más: PostgreSQL, Redis, el
+backend y el frontend se levantan en contenedores.
 
 ```bash
+git clone git@github.com:aloantony/asistente_ayuntamientos.git
+cd asistente_ayuntamientos
 cp .env.example .env
 ```
 
-Configure secrets and local settings in `.env`. At minimum, review `SECRET_KEY`, `BOOTSTRAP_ADMIN_TOKEN`, `CORS_ALLOWED_ORIGINS`, `NEXT_PUBLIC_API_BASE_URL`, database settings and document storage settings.
-
-To enable the AI assistant with Anthropic, keep `ASSISTANT_RUNTIME=anthropic` and set `ANTHROPIC_API_KEY` (optionally `ASSISTANT_MODEL`, default `claude-opus-4-8`). To use the OpenAI Responses API, set `ASSISTANT_RUNTIME=openai_responses`, `OPENAI_API_KEY` and, optionally, `OPENAI_RESPONSES_MODEL`, `OPENAI_RESPONSES_REASONING_EFFORT`, `OPENAI_RESPONSES_MAX_OUTPUT_TOKENS` and `OPENAI_RESPONSES_BASE_URL`. The default Responses model is `gpt-5.6`; its separate output cap defaults to 25,000 tokens so reasoning and the visible answer share sufficient headroom. Production deployments may use the approved regional API endpoint. An OpenAI API project and its separately billed API key are required: a ChatGPT subscription is not an API credential. To use Hermes Agent, run its API Server privately, set `ASSISTANT_RUNTIME=hermes_agent`, `HERMES_AGENT_BASE_URL`, `HERMES_AGENT_API_KEY` and `HERMES_AGENT_MODEL`. Hermes remains unavailable until an operator has technically verified that its main API Server exposes no native toolsets and sets `HERMES_AGENT_NATIVE_TOOLS_DISABLED_CONFIRMED=true`; an assumption or prompt instruction is not an attestation. Even then, this application omits and rejects `web_search` and `read_web_page` for the Hermes conversational runtime because their post-taint boundary cannot govern tools native to that server. Anthropic, OpenAI Responses and the development-only Codex bridge keep the controlled backend web tools. In production, Hermes Agent additionally stays disabled for real data unless `HERMES_AGENT_REAL_DATA_ALLOWED=true`. Without a complete runtime configuration, assistant endpoints return 503 and the UI shows the assistant as not configured.
-
-For local evaluation only, `ASSISTANT_RUNTIME=codex_subscription` connects through the official `codex app-server` to a separately authenticated ChatGPT/Codex subscription. It does not turn a ChatGPT subscription into an API key and it is rejected unless `ENVIRONMENT=development`; `CODEX_SUBSCRIPTION_ENABLED` and `CODEX_SUBSCRIPTION_REAL_DATA_ALLOWED` are independent mandatory opt-ins and default to `false`. The bridge keeps municipal tools in the backend: Codex pauses on a dynamic tool request, then the existing loop applies RBAC, confirmation, audit, call budgets and Brave Search before resuming the same ephemeral turn. Use an exclusive `CODEX_SUBSCRIPTION_HOME` with mode `0700`; its `auth.json` must be a regular, non-symlink file with mode `0600`, and the developer's normal `~/.codex` must never be reused or copied. The bridge is validated against `codex-cli 0.144.4`. The standard backend image does not bundle the Codex CLI, and the possible sidecar/socket isolation is not implemented, so the current evaluation runs the backend on the isolated host with only PostgreSQL and Redis in Docker. Setup, executable host-run commands, isolation requirements and the known drawbacks are documented in [docs/runtime-codex-suscripcion.md](docs/runtime-codex-suscripcion.md). The underlying dynamic-tool API is experimental; this route has no production SLA and must be reevaluated when switching to Responses.
-
-Anacleto v2 is model-first: the backend no longer runs a semantic planner/router or deterministic answer templates. Each turn calls the configured runtime through `gateway.py`, injects only the user-visible context and filtered tool list, and executes tools with backend RBAC/tenancy checks. The Responses integration is stateless at the provider (`store=false`) and intentionally supports the GPT-5.6 family: the application remains authoritative for conversations, memory, permissions, tool execution and audit. Reasoning items needed across a tool loop are encrypted by OpenAI and retained only in memory for that turn. Web clients should use `POST /assistant/conversations/{id}/messages/stream` for SSE frames (`message_start`, `text_delta`, optional `text_reset`, `tool_activity`, `done`); `text_reset` replaces speculative deltas when a continuation, refusal or upstream failure changes the canonical message. Voice playback starts only from the canonical `done` message, split into sentence-aware chunks no longer than the synthesis limit reported by `/assistant/status`. The classic `POST /assistant/conversations/{id}/messages` remains available for synchronous clients and Telegram. `ASSISTANT_HISTORY_MAX_MESSAGES` controls the recent message window sent to the model. `ASSISTANT_MAX_TOOL_ITERATIONS` limits tool rounds and `ASSISTANT_MAX_TOOL_CALLS` independently caps total calls in a turn, including parallel calls from one model response. On either limit, the backend disables tools for one final synthesis so the turn ends with an honest answer instead of another tool request. `ASSISTANT_TURN_TIMEOUT_SECONDS` adds a monotonic wall-clock budget checked between model and tool operations, while `ASSISTANT_GATEWAY_TIMEOUT_SECONDS` caps every individual model request and is reduced to the remaining turn budget. Provider retries are disabled so one request cannot silently multiply that timeout.
-
-Chat messages may explicitly reference up to `ASSISTANT_MAX_ATTACHMENTS_PER_MESSAGE` existing project documents, or upload a document through the same controlled `Document` storage first. Only bounded, valid UTF-8 from plain-text files is placed in provider context for that single turn. PDF, DOCX, XLSX and every other structured format are retained as attachments but reported as `unsupported`; images expose metadata/preview only and are never analyzed. Structured parsing requires a future dedicated non-root service with no network access, a read-only filesystem and cgroup limits—it is intentionally not performed in the API request process. The durable message relation stores document identity, authorization timestamp/actor/scope, order and extraction status/count, never extracted text. Preflight retains only an immutable identity snapshot and explicitly rolls its transaction back, which also discards any unrelated pending DML; verified TXT bytes are then read without an active database transaction or authorization/row locks. The message-and-attachment commit is the linear authorization boundary: a canonical RBAC transaction lock plus deterministic conversation/user/document/project row locks reload and revalidate access and identity. Locks are released before provider I/O, and later revocations hide metadata without rewriting history. Attachment-tainted turns have an empty tool catalog and a fail-closed execution guard. `ASSISTANT_RUNTIME=hermes_agent` rejects every attachment turn before file or gateway I/O because the backend cannot prove that Hermes' internal agent tools are disabled; an empty API tool list alone is not an isolation boundary. Extracted content is untrusted data, never instructions. Per-file, aggregate and extraction-byte limits are configured with `ASSISTANT_ATTACHMENT_MAX_CONTEXT_CHARS`, `ASSISTANT_ATTACHMENT_TOTAL_CONTEXT_CHARS` and `ASSISTANT_ATTACHMENT_MAX_EXTRACT_BYTES`; concurrent TXT preparation is bounded by `ASSISTANT_ATTACHMENT_TEXT_MAX_CONCURRENCY` and consumes the turn deadline.
-
-The turn deadline is cooperative and does not kill Python work in another thread: an already-running tool is allowed to return safely, then no further tool or model call is started. Consequently, a turn may exceed its orchestration deadline by the timeout of the in-flight tool; network-backed tools must keep their own provider timeout configured (for example `BRAVE_SEARCH_TIMEOUT_SECONDS`). Gateway stalls are bounded by the smaller gateway/remaining-turn provider timeout, continuous streams are checked between chunks, and a timeout is persisted as an explicit terminal assistant reply rather than leaving the SSE stream open. These are provider/socket I/O timeouts, not unsafe process interruption; a peer that continuously trickles a non-stream response can only be stopped once the current read returns.
-
-Controlled web search is selected explicitly with `WEB_SEARCH_PROVIDER=brave|hermes|disabled`; provider failures never trigger an automatic fallback. `.env.example` selects Brave for new configurations, while the code-level default remains Hermes so existing installations do not switch processors implicitly. Brave uses its fixed HTTPS Web Search endpoint. Configure `BRAVE_SEARCH_API_KEY` and grant `assistant.web.search` only to users who may search the public web from the assistant. Optional locale and timeout settings are documented in `.env.example`. Hermes remains available as a compatibility provider through `HERMES_WEB_*` settings and still requires a separate, web-only local instance.
-
-The backend sends only the normalized explicit query, caps it at 400 characters and 50 words, applies strict safe search, bounds the response and records the query and returned sources in the assistant action audit trail. It blocks obvious email, DNI/NIE and Spanish telephone formats, including common spacing and hyphenation, but this is not a complete DLP policy: names and postal addresses require a separately reviewed policy. Search snippets are treated as untrusted content, never as instructions. Brave documents API-query retention and requires a plan with explicit storage rights to persist any part of search results. Because the application persists those results in every environment, Brave remains unavailable unless `BRAVE_SEARCH_STORAGE_RIGHTS_CONFIRMED=true`; set that flag only after the DPA/retention review and compatible plan are confirmed. See the [Brave Search API privacy policy](https://api-dashboard.search.brave.com/privacy-policy) and [API terms](https://api-dashboard.search.brave.com/documentation/resources/terms-of-service).
-
-`read_web_page` is an experimental, independently gated second step after `web_search`; it is disabled by default and requires `ASSISTANT_WEB_READER_ENABLED=true`. It accepts only an exact normalized URL included in the search payload visible to the model during the same text turn. The authorization records query, provider and result rank, is ephemeral and is unavailable to later turns. Realtime voice intentionally exposes only `web_search` snippets: the status fields `web_page_reader_enabled` and `realtime_web_page_reader_enabled` make that distinction explicit, and no complete page body enters `conversation.state`.
-
-The reader is anonymous and read-only, sends no cookies or credentials, executes no JavaScript, accepts only bounded HTML/XHTML or plain text, and does not support remote PDF extraction. It allows only ports 80 and 443; rejects private, loopback, link-local, reserved and metadata destinations; validates every DNS answer; and pins the connection to a validated public IP while retaining hostname-based Host, SNI and certificate verification. Redirects must remain on the exact same scheme, hostname and effective port; a cross-origin target requires a new search. URL validation, DNS, connect/TLS, headers, redirects, bounded body reads and extraction all run in one disposable process. Parent and child communicate through a Unix stream socket: the parent reads incrementally with a selector and the same absolute deadline, requires EOF to complete the JSON message, and rejects more than 512 KiB. A worker that stops after a partial message is therefore terminated and reaped without a blocking framed receive.
-
-`WEB_PAGE_TIMEOUT_SECONDS` is one absolute deadline that starts before admission/process creation and covers the complete operation, while `WEB_PAGE_DNS_TIMEOUT_SECONDS` additionally caps each DNS resolution. `WEB_PAGE_MAX_CONCURRENT_READERS` (default 4) is a process-wide admission limit; a saturated server fails fast instead of creating more workers. `Process.start()` runs in a bounded launcher thread. If it returns after the request deadline, that launcher kills/reaps the late child and releases the slot only after verifying that the process is dead, reaped and closed; until then the slot remains reserved. Reaping, terminate and kill use bounded joins and may add at most 0.55 seconds after the configured deadline. If any kill, liveness, reap or close result is uncertain, the lease is permanently quarantined instead of being returned to the semaphore, the process handle is never closed while it may still be alive, and the backend emits the critical counter-style log `web_reader_quarantined_slots_total`; this deliberately degrades the bounded reader capacity rather than risking double ownership of a live worker. A kernel primitive that is itself permanently blocked cannot be forcibly cancelled from Python and remains a local host failure; the caller still returns at the request deadline for a blocked process launch and the retained slot keeps concurrent reader resource use bounded rather than allowing unbounded launches.
-
-As soon as the first successful search exposes a title or snippet, the text runtime permits only `read_web_page` calls for any of the exact URLs already present in that initial search provenance. Its post-taint input must be exactly `{"url": "<canonical URL>"}`: one key, no extra fields, and a raw URL string identical to the canonical provenance key. Fragments, userinfo, case or normalization variants and additional fields are denied even if they would otherwise resolve to the same address. It blocks further web searches, local/semantic tools, mutations and unknown tool names; reading one authorized page does not authorize new URLs or searches. Realtime exposes no page reader, so it blocks every tool after that first search. The execution boundary enforces the same rule even outside the model loop. Names and complete inputs of all post-taint denied calls are replaced with constants before events, actions or durable state are written; an allowed page read emits and persists only a freshly constructed canonical one-key input. Realtime also replaces the model-controlled call ID with a domain-separated HMAC-SHA-256 correlation ID keyed by the application secret. Legacy open Realtime turns reconstruct the taint from finalized search actions and fail closed when their result is ambiguous.
-
-The model receives the bounded text only inside the active text-tool loop and must cite the `final_url` actually downloaded while also showing the original `source_url` when it differs. The durable action audit contains no text or preview: it retains source/final URLs, search query/provider/rank, content type, byte and character lengths, SHA-256 of the extracted text, truncation state and the bounded redirect chain. The audit itself stays below 4,000 characters; for pathological long chains it stores a count and SHA-256 summary, and if necessary a bounded source prefix plus hash, while preserving the exact final URL used for citation.
-
-Ordinance import jobs use Redis/RQ. `docker compose up -d --build` starts the `worker` service; jobs can also be run inline from the admin UI in development. Search/crawl is restricted to configured official legal source domains. Configure embeddings with `EMBEDDINGS_RUNTIME`, `EMBEDDINGS_BASE_URL`, `EMBEDDINGS_API_KEY`, `EMBEDDINGS_MODEL`, `EMBEDDINGS_TIMEOUT_SECONDS` and `EMBEDDINGS_MAX_CONCURRENT_WORKERS` when moving beyond local hash embeddings. Agent Office persists the provider deadline before releasing its claim transaction; supervised embedding calls then run without a database session or row lock. Late or indeterminately cleaned workers quarantine their attempt and capacity slot instead of retrying automatically.
-
-### Voz realtime y fallback STT/TTS
-
-Voice is disabled by default in `.env.example`. Realtime voice requires a contractually approved provider because the browser sends the conversation audio directly to it. To enable it, set `ASSISTANT_REALTIME_ENABLED=true` and `OPENAI_API_KEY`. This separately billed API credential is required even when the conversational runtime is `codex_subscription`; a ChatGPT/Codex subscription does not include Realtime. Optional settings include `ASSISTANT_REALTIME_MODEL`, `ASSISTANT_REALTIME_VOICE`, the server-side transcription model/language/delay and the VAD thresholds. The backend issues only short-lived client credentials, persists the authoritative transcript and actions, executes tools with the current user's RBAC permissions, and seals interrupted turns before another workflow can continue. Realtime may use bounded `web_search` snippets but never exposes `read_web_page`; full page reading is text-chat-only until a design can guarantee that bodies never enter persisted Realtime state.
-
-The non-realtime fallback remains available. To enable transcription, set `SPEECH_TRANSCRIPTION_RUNTIME=nvidia_nim`, `NVIDIA_API_KEY` and `NVIDIA_WHISPER_FUNCTION_ID`; optional STT settings are `NVIDIA_RIVA_SERVER`, `SPEECH_TRANSCRIPTION_LANGUAGE_CODE` and `SPEECH_TRANSCRIPTION_MAX_BYTES`. With `SPEECH_TRANSCRIPTION_RUNTIME=nvidia_nim`, `NVIDIA_WHISPER_FUNCTION_ID` is required or transcription returns 503. The web microphone button is hidden unless either realtime or fallback transcription is enabled.
-
-To enable fallback synthesis, set `SPEECH_SYNTHESIS_RUNTIME=azure`, `AZURE_SPEECH_KEY` and `AZURE_SPEECH_REGION`. Optional TTS settings are `SPEECH_SYNTHESIS_VOICE` (default `es-ES-DarioNeural`), `SPEECH_SYNTHESIS_LANGUAGE_CODE`, `SPEECH_SYNTHESIS_OUTPUT_FORMAT`, `SPEECH_SYNTHESIS_RATE`, `SPEECH_SYNTHESIS_MAX_CHARS` and `SPEECH_SYNTHESIS_TIMEOUT_SECONDS`. The Azure resource used for development/evaluation may live in Azure for Students, but production or real-data use requires recreating the Speech resource in a pay-as-you-go subscription and reviewing the provider DPA/ENS position; this is an environment-only change.
-
-Telegram is disabled by default. To enable it, set `TELEGRAM_ENABLED=true`, `TELEGRAM_BOT_TOKEN` and `TELEGRAM_WEBHOOK_SECRET`, then configure the Telegram Bot API webhook to point to `/telegram/webhook` with the same secret token. Telegram text messages work without speech configuration. Telegram voice notes use the STT settings above.
-
-Expected local split:
-
-- Main assistant Hermes: `127.0.0.1:8642`; verify technically that no native `api_server` toolset remains, then record that attestation with `HERMES_AGENT_NATIVE_TOOLS_DISABLED_CONFIRMED=true`. Without it the runtime fails closed.
-- Controlled web Hermes: `127.0.0.1:8643`, only `web` enabled.
-
-Build and start the stack:
+Abre `.env` y revisa al menos `SECRET_KEY`, `BOOTSTRAP_ADMIN_TOKEN`,
+`CORS_ALLOWED_ORIGINS` y `NEXT_PUBLIC_API_BASE_URL`. Después:
 
 ```bash
 docker compose up -d --build
-```
-
-Apply database migrations:
-
-```bash
 docker compose exec backend alembic upgrade head
 ```
 
-Complete or refresh the Castilla y León municipality catalogue from the
-reviewed INE snapshots. The directory is the official relation at 1 January
-2026 (2,248 municipalities) and population is the official revision at
-1 January 2025. Always run and review the dry-run before applying:
-
-```bash
-docker compose exec -T backend \
-  python -m app.municipalities.ine_directory
-
-docker compose exec -T backend \
-  python -m app.municipalities.ine_directory --apply
-```
-
-The command creates missing official municipalities by five-digit INE code,
-normalizes their official identity, and records the directory date, control
-digit, URL and SHA-256 alongside the population provenance. It reports but does
-not delete or merge legacy rows that are absent from the official directory.
-For an offline run, pass
-`--directory-workbook /path/diccionario26.xlsx` and
-`--population-archive /path/pobmun.zip`; both reviewed checksums are still
-enforced. See [docs/catalogo-municipal-castilla-leon.md](docs/catalogo-municipal-castilla-leon.md).
-
-Load the reviewed IGN NGMEP 2026 reference geography only after the directory
-sync. The dry-run validates both ZIP and CSV hashes, all 8,132 national rows,
-the 2,248 Castilla y León codes and every provincial count:
-
-```bash
-docker compose exec -T backend \
-  python -m app.municipalities.ngmep_geography --year 2026
-
-docker compose exec -T backend \
-  python -m app.municipalities.ngmep_geography --year 2026 --apply
-```
-
-The import creates a versioned official snapshot with surface, perimeter,
-capital code/name/population, MTN25 sheet, ETRS89 coordinates, altitude, field
-origins, source hashes and CC BY 4.0 attribution. It mirrors the current
-surface to `Municipality` and derives density from the canonical INE population.
-NGMEP population is retained only for comparison because it is not identical
-to the INE population snapshot. The published point identifies the population
-nucleus of the municipal capital; it is not a centroid of the municipal term.
-For an offline run, pass `--archive /path/BD_Municipios-Entidades.zip`; the
-reviewed archive and inner CSV hashes remain mandatory.
-
-Synchronize the reviewed INE 2025 municipal population snapshot only after the
-migration is applied. The first command is a mandatory dry-run and never writes
-to the database. Review its conflicts and unmatched codes before applying:
-
-```bash
-docker compose exec -T backend \
-  python -m app.municipalities.ine_population --year 2025
-
-docker compose exec -T backend \
-  python -m app.municipalities.ine_population \
-  --year 2025 --apply --overwrite-existing
-```
-
-`--overwrite-existing` only permits replacement of figures without recorded
-provenance. It never overwrites a newer official year, a different source, or a
-different revision of the same annual source. For a controlled/offline run,
-pass the previously downloaded official ZIP with `--archive /path/pobmun.zip`;
-the inner XLSX checksum is still verified. The synchronization is intentionally
-not part of application startup.
-
-Local services:
-
-- Frontend: http://localhost:3000
-- Backend: http://localhost:8000
-- Health check: http://localhost:8000/health
-
-The frontend, backend, PostgreSQL and Redis are published on localhost only.
-
-To create the first administrator, configure `BOOTSTRAP_ADMIN_TOKEN` in `.env`, start the backend and call:
+Crea el primer administrador (sólo funciona mientras no exista ningún usuario):
 
 ```bash
 curl -X POST http://localhost:8000/auth/bootstrap-admin \
   -H "Content-Type: application/json" \
   -H "X-Bootstrap-Admin-Token: dev-bootstrap-token" \
-  -d '{"email":"admin@example.com","password":"change-me-strong","full_name":"Admin"}'
+  -d '{"email":"admin@example.com","password":"cambia-esto-ya","full_name":"Admin"}'
 ```
 
-The bootstrap endpoint only creates a superuser when no users exist yet.
+Ya puedes entrar:
 
-## 9. Useful validation commands
+| Servicio | URL |
+|---|---|
+| Frontend | http://localhost:3000 |
+| Backend | http://localhost:8000 |
+| Salud | http://localhost:8000/health |
+| API interactiva (OpenAPI) | http://localhost:8000/docs |
 
-Run the relevant checks before handing off code changes:
+Los cuatro servicios escuchan **sólo en localhost**. PostgreSQL y Redis no se
+publican nunca. La documentación interactiva de la API describe las ~132 rutas y
+por eso se sirve **únicamente con `ENVIRONMENT=development`**: en producción
+`/docs`, `/redoc` y `/openapi.json` devuelven 404 a propósito.
 
-```bash
-python3 -m compileall -q backend/app backend/alembic
-npm --prefix frontend run build
-docker compose build backend
-docker compose build frontend
-docker compose exec backend alembic current
-git diff --check
+### El asistente necesita configuración aparte
+
+Sin un runtime de IA configurado, los endpoints del asistente devuelven `503` a
+propósito: **no es un fallo**. La opción más corta es Anthropic:
+
+```dotenv
+ASSISTANT_RUNTIME=anthropic
+ANTHROPIC_API_KEY=sk-ant-...
 ```
 
-Run the backend test suite (PostgreSQL test database, fully isolated from dev data):
+Hay otros runtimes (OpenAI Responses, Hermes Agent, y un puente local de Codex
+sólo para desarrollo), voz realtime, STT/TTS de respaldo, búsqueda web
+controlada y canal de Telegram. Todo eso viene documentado opción por opción en
+[`.env.example`](.env.example) y explicado en
+[README.en.md §8](README.en.md#8-local-development-setup).
+
+## Arquitectura
+
+```mermaid
+flowchart TB
+    subgraph nav ["Navegador"]
+        UI["Next.js 15 · React 19<br/>cookie httpOnly SameSite=Lax"]
+    end
+
+    subgraph srv ["Servidor"]
+        API["FastAPI · JWT + RBAC<br/>tenancy por organización"]
+        GW["Gateway de Privacidad/IA<br/>app/assistant/gateway.py"]
+        W["Worker RQ<br/>importaciones y agentes"]
+        PG[("PostgreSQL 17<br/>PostGIS · pgvector")]
+        RD[("Redis<br/>cola y caché")]
+        FS[["Volumen de documentos<br/>bytes fuera de la BD"]]
+    end
+
+    IA(["Proveedores de IA<br/>LLM · STT/TTS · búsqueda web"])
+
+    UI -->|"fetch · cookie de sesión"| API
+    API --> PG
+    API --> FS
+    API --> RD
+    RD --> W
+    W --> PG
+    API --> GW
+    GW --> IA
+```
+
+Cuatro reglas sostienen el diseño:
+
+1. **Toda salida a IA pasa por el gateway.** Ningún otro módulo llama a un
+   proveedor externo. Se envía sólo texto de conversación, memoria institucional
+   aprobada y campos que ha escrito el usuario; nunca documentos originales ni
+   ficheros municipales. Se registran metadatos (runtime, modelo, tokens), nunca
+   contenido.
+2. **La cadena de acceso es usuario → grupo → rol → permiso**, con `Organization`
+   como frontera de tenencia. `Municipality` es dato de referencia global
+   compartido, que es otra cosa.
+3. **Los bytes no viven en la base de datos.** Los documentos van al sistema de
+   ficheros con clave de almacenamiento generada por el servidor, lista blanca
+   de tipos y tope de tamaño; PostgreSQL guarda los metadatos.
+4. **Archivar antes que borrar.** Los objetos de negocio se archivan o cambian de
+   estado en lugar de desaparecer.
+
+Detalle técnico en [`docs/arquitectura.md`](docs/arquitectura.md); el porqué de
+cada decisión, en [`docs/decisiones.md`](docs/decisiones.md).
+
+## Documentación
+
+Empieza por el [índice de `docs/`](docs/README.md). Los cuatro que más se usan:
+
+| Documento | Para qué |
+|---|---|
+| [`docs/vision-producto.md`](docs/vision-producto.md) | Qué quiere ser Anacleto y dónde están sus límites |
+| [`docs/arquitectura.md`](docs/arquitectura.md) | Estado técnico actual |
+| [`docs/decisiones.md`](docs/decisiones.md) | Las 63 ADR, con el contexto de cada decisión |
+| [`docs/despliegue.md`](docs/despliegue.md) | Runbook de producción completo |
+
+`README.en.md` conserva la referencia operativa exhaustiva en inglés: cada
+variable de entorno, cada runtime y cada garantía de seguridad del lector web y
+de los adjuntos.
+
+## Desarrollo
+
+Antes de entregar un cambio, pasa la validación completa. Los tests del backend
+corren contra PostgreSQL en una base `app_test_<uuid>` aislada que se destruye
+al terminar:
 
 ```bash
 docker compose run --rm -T -v "$(pwd)/backend:/app" backend \
   sh -c "pip install -q -r requirements-dev.txt && python -m pytest tests/ -q -o cache_dir=/tmp/pytest_cache"
 ```
 
-The runtime backend image intentionally does not include `pytest`; the command
-above installs dev-only dependencies in a disposable container. Unless
-`TEST_DATABASE_URL` is explicitly set, the test harness creates a unique
-`app_test_<uuid>` database and drops it after the run. Custom test databases
-must keep an `app_test` prefix.
+```bash
+python3 -m compileall -q backend/app backend/alembic
+npm --prefix frontend run typecheck
+npm --prefix frontend run lint
+npm --prefix frontend test
+npm --prefix frontend run build
+git diff --check
+```
 
-## 10. Production deployment
+CI ejecuta lo equivalente en cada pull request y la rama `main` exige que pase
+antes de fusionar. Cómo trabajar aquí —ramas, commits, ADR, migraciones— está en
+[CONTRIBUTING.md](CONTRIBUTING.md).
 
-The public deployment serves the frontend at `/` and the API under `/api` behind a
-single hostname, with Caddy terminating TLS. Two facts force that shape: the
-session cookie is `httpOnly`, `SameSite=Lax` and carries no `Domain`, so frontend
-and API must share a host (ADR-010); and the API cannot live at the root because
-the backend serves `/admin/roles`, `/admin/users`, `/admin/groups` and
-`/admin/permissions` while the frontend serves the pages `/admin`,
-`/admin/usuarios`, `/admin/grupos` and `/admin/roles` — `/admin/roles` collides.
+## Despliegue
 
-Full runbook (server hardening, DNS, secrets, bootstrap retirement, backups and
-restore drill): `docs/despliegue.md`. Decisions: ADR-035 (topology and TLS),
-ADR-036 (hardening), ADR-037 (backups). Data-protection posture and the gates that
-remain open before widening the pilot: `docs/proteccion-datos.md`.
-
-Production runs from a separate Compose file, so the local development workflow in
-section 8 is unchanged:
+Producción va en un fichero Compose propio, con Caddy terminando TLS y un único
+hostname: frontend en `/` y API bajo `/api`.
 
 ```bash
 docker compose --env-file .env.production -f docker-compose.prod.yml up -d --build
 docker compose --env-file .env.production -f docker-compose.prod.yml exec backend alembic upgrade head
 ```
 
-`.env.production.example` is the documented template; the real file lives only on
-the server, owned by root with mode 0600, and is gitignored. The backend refuses to
-boot in production with the placeholder `SECRET_KEY`, with non-https CORS origins,
-or with `ALLOWED_HOSTS=*`.
+El runbook completo —endurecimiento del servidor, DNS, secretos, retirada del
+bootstrap, copias de seguridad y ensayo de restauración— está en
+[`docs/despliegue.md`](docs/despliegue.md).
 
-`NEXT_PUBLIC_API_BASE_URL` is baked into the browser bundle at build time, so
-changing the domain requires rebuilding the frontend image.
+> [!WARNING]
+> Los volúmenes `postgres_data` y `document_storage` son datos de usuario. No
+> uses `docker compose down -v`, `docker volume prune` ni
+> `docker system prune -a --volumes`. Para recuperar espacio, `docker builder prune`.
 
-Backups and restore:
+## Privacidad y seguridad
 
-```bash
-sudo ops/backup.sh                                  # nightly via systemd timer
-sudo ops/restore.sh --list
-sudo ops/restore.sh --from daily/<stamp>             # drill: restores to a scratch DB
-sudo ops/restore.sh --from daily/<stamp> --production --with-documents
-```
+Esto maneja datos de administraciones públicas españolas, así que conviene ser
+explícito sobre lo que está resuelto y lo que no.
 
-Backups stay on the server, so the VPS provider's snapshots must be enabled — they
-are the only copy off the machine (ADR-037).
+**Resuelto:** cookie de sesión `httpOnly`, limitación de intentos de acceso,
+aislamiento por organización en cada endpoint, tabla `security_events`
+inmutable por trigger de PostgreSQL, contenedores sin root, subida de ficheros
+con lista blanca y clave generada por el servidor, y un lector web anónimo que
+rechaza destinos privados y fija la conexión a una IP pública validada.
 
-Production shares the VPS with development (ADR-035), which imposes two operational
-rules on **everyone working on this machine**: never `down` the production stack
-(use `stop`/`start`, so its containers keep referencing their volumes), and never
-run `docker system prune -a --volumes` (use `docker builder prune`, which is where
-the reclaimable space actually is). Details in `docs/despliegue.md` §7 bis.
+**Pendiente:** los limitadores de caudal siguen en memoria por proceso, así que
+producción va con un solo worker de uvicorn hasta que se muevan a Redis. La
+postura de protección de datos y las puertas que siguen abiertas antes de
+ampliar el piloto están en
+[`docs/proteccion-datos.md`](docs/proteccion-datos.md).
 
-## 11. Operational cautions
+¿Has encontrado un fallo de seguridad? [SECURITY.md](SECURITY.md) explica cómo
+avisar en privado.
 
-- Never commit `.env` or `.env.production`.
-- Do not use `docker compose down -v` unless intentionally deleting volumes.
-- `document_storage` contains uploaded files and must be treated as persistent user data.
-- Run migrations after pulling backend changes that include Alembic or model updates.
-- In local development keep backend and frontend bound to localhost.
-- Never publish PostgreSQL or Redis; in production they sit on an internal network with no published ports.
-- Containers run as non-root. Reusing an existing `document_storage` volume needs a one-time `chown` to uid 10001 (see `docs/despliegue.md`); never delete the volume.
-- Retire `BOOTSTRAP_ADMIN_TOKEN` from the environment file once the first superuser exists.
-- Avoid destructive database or storage actions unless the data loss is intentional and understood.
+## Licencia
 
-## 12. Current roadmap
+Código visible con todos los derechos reservados. Puedes leerlo, auditarlo y
+ejecutarlo localmente para evaluarlo. Cualquier uso real —producción, servicio a
+terceros, obra derivada, redistribución— requiere acuerdo escrito previo.
 
-The roadmap follows the transition from the current supervised assistant to the product defined in `docs/vision-producto.md`:
-
-- Consolidate product feedback and institutional-memory review without mixing platform and municipal authority.
-- Add municipal roles, competencies, delegations and a risk-based autonomy policy.
-- Generalize memory into permission-scoped information with consent and retention policies.
-- Evolve the agent office into the event, action, approval and audit substrate for proactive work.
-- Make Anacleto the persistent primary experience and expose modules as contextual work surfaces.
-- Add controlled connectors to official municipal systems.
-- Build the anonymized improvement network and central fleet control plane.
-- Add owned model runtimes and a separate citizen assistant only in later phases.
-
-## 13. Developer handoff checklist
-
-```bash
-git pull
-```
-
-1. Inspect `.env.example`.
-2. Create or update `.env` with valid local secrets and settings.
-3. Start the stack with `docker compose up -d --build`.
-4. Apply migrations with `docker compose exec backend alembic upgrade head`.
-5. Run the validation commands relevant to the change.
-6. Inspect latest commits for schema, permission, API or frontend changes.
-7. Avoid deleting volumes, uploaded files or secrets.
+Si eres un ayuntamiento o una entidad local y quieres usarlo, abre una
+incidencia contando quién eres y con qué alcance: las licencias piloto se
+estudian caso por caso. Texto completo en [LICENSE](LICENSE).

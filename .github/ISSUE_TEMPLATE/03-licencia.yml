@@ -1,0 +1,31 @@
+name: Licencia de uso
+description: Quiero usar Anacleto en un ayuntamiento o entidad
+labels: ["licencia"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        El código es visible, pero usarlo requiere un acuerdo escrito previo
+        ([LICENSE](https://github.com/aloantony/asistente_ayuntamientos/blob/main/LICENSE)).
+        Las licencias piloto para entidades locales se estudian caso por caso.
+  - type: input
+    id: entidad
+    attributes:
+      label: Quién eres
+      description: Ayuntamiento, mancomunidad, diputación, empresa o persona.
+    validations:
+      required: true
+  - type: textarea
+    id: alcance
+    attributes:
+      label: Con qué alcance
+      description: Cuántos usuarios, qué módulos te interesan y si sería con datos reales.
+    validations:
+      required: true
+  - type: input
+    id: contacto
+    attributes:
+      label: Contacto
+      description: Cómo seguir la conversación en privado.
+    validations:
+      required: true

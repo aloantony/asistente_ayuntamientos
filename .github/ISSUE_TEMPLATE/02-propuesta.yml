@@ -1,0 +1,34 @@
+name: Propuesta
+description: Una capacidad nueva o un cambio de comportamiento
+labels: ["propuesta"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Las necesidades del ayuntamiento piloto entran por el módulo de
+        Necesidades de la propia aplicación, no por aquí. Esta plantilla es para
+        propuestas técnicas o de producto desde fuera.
+  - type: textarea
+    id: problema
+    attributes:
+      label: Qué problema resuelve
+      description: Empieza por el problema real de un ayuntamiento, no por la solución.
+    validations:
+      required: true
+  - type: textarea
+    id: propuesta
+    attributes:
+      label: Qué propones
+    validations:
+      required: true
+  - type: textarea
+    id: alternativas
+    attributes:
+      label: Qué alternativas has considerado
+  - type: checkboxes
+    id: comprobaciones
+    attributes:
+      label: Antes de enviar
+      options:
+        - label: He mirado `docs/vision-producto.md` y esto cabe dentro de sus límites
+        - label: He buscado en `docs/decisiones.md` si ya se decidió lo contrario

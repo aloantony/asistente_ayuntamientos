@@ -36,3 +36,15 @@ backend/.venv/
 ops/geoserver-gwc-health/.spotless-index
 ops/geoserver-gwc-health/target/
 .claude/worktrees/
+
+# Instrucciones y configuración de agentes de codificación. Son notas de esta
+# máquina —rutas locales, puertos de Hermes, el aviso de que aquí vive también
+# la producción— y el repositorio es público. Se quedan en el árbol de trabajo,
+# fuera de git.
+CLAUDE.md
+AGENTS.md
+.mcp.json
+.claude/
+.hermes/
+.codex/
+.agents/

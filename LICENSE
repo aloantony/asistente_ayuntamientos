@@ -1,0 +1,188 @@
+Licencia de código visible — Anacleto / Asistente Ayuntamientos
+Source-available licence — Anacleto / Asistente Ayuntamientos
+
+Copyright (c) 2026 Antonio Alonso Briones. Todos los derechos reservados.
+All rights reserved.
+
+La versión en español es la única auténtica. The English text below is an
+unofficial translation provided for convenience; in case of discrepancy the
+Spanish version prevails.
+
+================================================================================
+ESPAÑOL
+================================================================================
+
+1. Qué es esto
+
+   Este repositorio es de código visible ("source-available"), no de código
+   abierto. Publicar el código permite auditarlo, evaluarlo y aprender de él.
+   No concede permiso para usarlo.
+
+2. Lo que sí se permite sin pedir nada
+
+   a) Consultar, leer y estudiar el código fuente y la documentación.
+   b) Ejecutarlo en un entorno local propio, y sólo de forma temporal, con el
+      único fin de evaluarlo técnicamente o de revisar su seguridad.
+   c) Citar fragmentos breves en análisis, artículos académicos o avisos de
+      seguridad, siempre con atribución.
+   d) Ver el repositorio y bifurcarlo ("fork") dentro de GitHub, en la medida
+      en que las Condiciones de Servicio de GitHub lo imponen a todo
+      repositorio público. Esa bifurcación no amplía los permisos de esta
+      licencia: sigue sin autorizar su uso, despliegue ni redistribución fuera
+      de GitHub.
+
+3. Lo que requiere acuerdo escrito y previo con el titular
+
+   Cualquier otro uso. En particular, y sin ánimo exhaustivo:
+
+   a) Usar el software, o cualquier parte suya, en producción o para prestar
+      un servicio real a personas, empresas o administraciones públicas.
+   b) Copiarlo, distribuirlo, publicarlo o sublicenciarlo.
+   c) Modificarlo o crear obras derivadas destinadas a algo distinto de la
+      evaluación descrita en el punto 2.b.
+   d) Ofrecerlo como servicio gestionado, alojado o de pago, con o sin marca
+      propia.
+   e) Incorporarlo, total o parcialmente, a otro producto o servicio.
+   f) Usarlo para entrenar, ajustar o evaluar modelos de aprendizaje
+      automático destinados a reproducir su funcionalidad.
+
+   "Acuerdo escrito y previo" significa un documento firmado por el titular
+   del copyright. El silencio no es autorización, y el acceso al repositorio
+   tampoco lo es.
+
+4. Aportaciones
+
+   Quien envíe una aportación (pull request, parche, sugerencia de código)
+   declara ser su autor y tener derecho a enviarla, y concede al titular una
+   licencia mundial, perpetua, irrevocable, gratuita y sublicenciable para
+   usarla, modificarla y explotarla, incluida su publicación bajo otra
+   licencia. Si esto no le encaja, no envíe la aportación: escriba antes.
+
+5. Marcas y nombres
+
+   Esta licencia no concede derecho alguno sobre los nombres, logotipos ni
+   marcas del titular ni de los ayuntamientos a los que sirve, incluidos
+   "Anacleto" y "MiConcejo". Los escudos, denominaciones oficiales y demás
+   signos de las entidades locales pertenecen a esas entidades.
+
+6. Datos de terceros
+
+   El repositorio referencia fuentes públicas (INE, IGN, Catastro,
+   OpenStreetMap, boletines oficiales) que tienen sus propias licencias y
+   obligaciones de atribución. Esta licencia no las sustituye ni las relaja.
+
+7. Sin garantía
+
+   El software se entrega "tal cual", sin garantía de ningún tipo, expresa o
+   implícita, incluidas las de comerciabilidad, idoneidad para un fin concreto
+   y ausencia de infracción.
+
+8. Limitación de responsabilidad
+
+   En la medida máxima que permita la ley aplicable, el titular no responderá
+   de ningún daño directo, indirecto, incidental, especial o consecuente
+   derivado del software o de su uso, aunque se hubiera advertido de esa
+   posibilidad.
+
+9. Terminación
+
+   Los permisos del punto 2 se extinguen automáticamente al incumplir esta
+   licencia. Al extinguirse, debe cesar todo uso y destruir las copias locales.
+
+10. Ley aplicable
+
+   Esta licencia se rige por la ley española. Para cualquier controversia, las
+   partes se someten a los juzgados y tribunales del domicilio del titular,
+   salvo norma imperativa en contrario.
+
+11. Cómo pedir una licencia de uso
+
+   Abra una incidencia en el repositorio indicando quién es, para qué
+   ayuntamiento o entidad y con qué alcance, o escriba al titular por el canal
+   indicado en SECURITY.md. Las licencias piloto para entidades locales se
+   estudian caso por caso.
+
+================================================================================
+ENGLISH (unofficial translation)
+================================================================================
+
+1. What this is
+
+   This repository is source-available, not open source. Publishing the code
+   allows auditing, evaluating and learning from it. It grants no permission
+   to use it.
+
+2. Permitted without asking
+
+   a) Viewing, reading and studying the source code and documentation.
+   b) Running it locally and temporarily, for the sole purpose of technical
+      evaluation or security review.
+   c) Quoting short excerpts in analyses, academic work or security advisories,
+      with attribution.
+   d) Viewing and forking the repository within GitHub, to the extent GitHub's
+      Terms of Service impose this on every public repository. Such a fork does
+      not widen this licence: it still does not authorise use, deployment or
+      redistribution outside GitHub.
+
+3. Requires prior written agreement with the copyright holder
+
+   Any other use, including but not limited to: production use or providing a
+   real service to individuals, companies or public administrations; copying,
+   distributing, publishing or sublicensing; modifying or creating derivative
+   works beyond the evaluation described in 2(b); offering it as a hosted,
+   managed or paid service, white-labelled or not; incorporating any part of it
+   into another product or service; and using it to train, fine-tune or
+   evaluate machine-learning models intended to reproduce its functionality.
+
+   "Prior written agreement" means a document signed by the copyright holder.
+   Silence is not authorisation, and neither is access to the repository.
+
+4. Contributions
+
+   Anyone submitting a contribution warrants that they authored it and are
+   entitled to submit it, and grants the holder a worldwide, perpetual,
+   irrevocable, royalty-free, sublicensable licence to use, modify and exploit
+   it, including publishing it under a different licence. If that does not work
+   for you, do not submit the contribution: get in touch first.
+
+5. Trademarks and names
+
+   No rights are granted over the names, logos or trademarks of the holder or
+   of the municipalities served, including "Anacleto" and "MiConcejo". Coats of
+   arms, official denominations and other signs of local authorities belong to
+   those authorities.
+
+6. Third-party data
+
+   The repository references public sources (INE, IGN, Spanish Cadastre,
+   OpenStreetMap, official gazettes) with their own licences and attribution
+   duties. This licence neither replaces nor relaxes them.
+
+7. No warranty
+
+   The software is provided "as is", without warranty of any kind, express or
+   implied, including merchantability, fitness for a particular purpose and
+   non-infringement.
+
+8. Limitation of liability
+
+   To the maximum extent permitted by applicable law, the holder shall not be
+   liable for any direct, indirect, incidental, special or consequential damages
+   arising from the software or its use, even if advised of the possibility.
+
+9. Termination
+
+   The permissions in section 2 terminate automatically upon breach of this
+   licence. Upon termination, all use must cease and local copies be destroyed.
+
+10. Governing law
+
+   This licence is governed by Spanish law. Disputes are submitted to the
+   courts of the holder's domicile, save for mandatory rules to the contrary.
+
+11. Requesting a usage licence
+
+   Open an issue stating who you are, for which municipality or entity, and the
+   intended scope, or contact the holder through the channel listed in
+   SECURITY.md. Pilot licences for local authorities are considered case by
+   case.
