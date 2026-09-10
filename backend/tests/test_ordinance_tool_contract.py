@@ -155,6 +155,27 @@ def test_system_prompt_does_not_query_corpus_without_ordinance_tools(monkeypatch
     assert "COBERTURA DE ORDENANZAS" not in prompt
 
 
+def test_system_prompt_does_not_duplicate_structured_tool_definitions(monkeypatch):
+    monkeypatch.setattr(
+        assistant_prompts,
+        "get_accessible_organizations_query",
+        lambda current_user: object(),
+    )
+    scalar_result = SimpleNamespace(all=lambda: [])
+    db = SimpleNamespace(scalars=lambda statement: scalar_result)
+    user = SimpleNamespace(full_name="Con permiso")
+    tool = SimpleNamespace(
+        name="list_projects",
+        label="Listar proyectos",
+        description="DESCRIPCION_UNICA_QUE_SOLO_DEBE_IR_EN_EL_ESQUEMA",
+    )
+
+    prompt = assistant_prompts.build_system_prompt(db, user, [tool])
+
+    assert "DESCRIPCION_UNICA_QUE_SOLO_DEBE_IR_EN_EL_ESQUEMA" not in prompt
+    assert "HERRAMIENTAS DISPONIBLES" not in prompt
+
+
 def test_refreshable_manifest_does_not_clear_other_read_deduplication():
     read_tool = SimpleNamespace(read_only=True)
     mutation = SimpleNamespace(read_only=False)

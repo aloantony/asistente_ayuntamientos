@@ -140,7 +140,6 @@ def build_system_prompt(
     system_prompt = (
         f"{ANACLETO_SYSTEM_PROMPT}\n\n"
         f"{ordinance_coverage}"
-        f"{build_tool_prompt_block(tools)}\n\n"
         f"Usuario actual: {current_user.full_name}.\n"
         f"Organizaciones del usuario:\n{organization_lines or '- (ninguna)'}"
         f"{build_approved_memory_block(db, current_user, organization_names)}"
@@ -149,31 +148,6 @@ def build_system_prompt(
         return f"{system_prompt}\n\n{VOICE_MODE_PROMPT_BLOCK}"
     return system_prompt
 
-
-def build_tool_prompt_block(tools: list[ToolSpec]) -> str:
-    lines = ["HERRAMIENTAS DISPONIBLES:"]
-    if not tools:
-        lines.append("- (ninguna)")
-        return "\n".join(lines)
-
-    for tool in tools:
-        mode = "solo lectura" if tool.read_only else "puede modificar datos"
-        approval = (
-            "; confirmación explícita"
-            if tool.requires_confirmation
-            else "; sin confirmación"
-        )
-        permission = (
-            f"; permiso: {tool.required_permission}"
-            if tool.required_permission
-            else ""
-        )
-        lines.append(
-            f"- {tool.name} ({tool.label}; {mode}{approval}; "
-            f"dominio: {tool.domain}{permission}): "
-            f"{tool.description}"
-        )
-    return "\n".join(lines)
 
 
 def build_approved_memory_block(
