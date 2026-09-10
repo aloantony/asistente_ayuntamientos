@@ -842,7 +842,8 @@ def seed_town_hall_structure(
 
     Bajo petición y no al arrancar: la estructura es un punto de partida que
     cada ayuntamiento adapta, no un catálogo del producto. Repetir la llamada no
-    deshace nada — sólo se crea lo que falte. No siembra contenido municipal.
+    deshace nada — sólo se crea lo que falte. El contenido inicial específico
+    sólo se aplica a municipios identificados expresamente por su código INE.
     """
     organization = resolve_organization(db, current_user, organization_id)
     require_town_hall_edit(db, current_user, organization.id)

@@ -30,9 +30,9 @@ la fase B6 del plan).
 
 El seed es **por organización y bajo petición**, como el del inventario
 (`app/assets/seed.py`): la estructura es un punto de partida que cada
-ayuntamiento adapta, no un catálogo del producto. No siembra contenido —ni un
-teléfono, ni un concejal, ni un dato del padrón—: eso es información municipal
-que sólo tiene el ayuntamiento.
+ayuntamiento adapta, no un catálogo del producto. El contenido inicial sólo se
+añade cuando está asociado de forma explícita al código INE del municipio; así
+los datos de Fuentelcésped nunca aparecen en otro ayuntamiento.
 """
 
 import json
@@ -40,6 +40,8 @@ import json
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from app.municipalities.models import Municipality
+from app.organizations.models import Organization
 from app.town_hall.models import MunicipalBlock
 
 # La pestaña «Información», con sus epígrafes y los apartados de cada uno. Los
@@ -112,6 +114,34 @@ INITIAL_TOWN_HALL_STRUCTURE: tuple[dict, ...] = (
 # con su módulo tiene que sobrevivir al cambio.
 EPIGRAPH_MODULES: dict[str, str] = {
     "informacion/estructura": "government",
+}
+
+
+# Contenido de partida verificado para municipios concretos. La clave INE evita
+# que una ficha de cliente se copie por accidente a cualquier otra organización.
+# Cada elemento conserva una marca de seed propia: editarlo, renombrarlo o
+# archivarlo impide que una segunda llamada lo sobrescriba o lo duplique.
+INITIAL_TOWN_HALL_CONTENT_BY_INE_CODE: dict[
+    str,
+    dict[str, tuple[tuple[str, str, str], ...]],
+] = {
+    "09137": {
+        "informacion/datos/general": (
+            ("superficie", "Superficie", "22 kilómetros cuadrados"),
+            (
+                "distancia-burgos",
+                "Distancia a Burgos por carretera",
+                "93 kilómetros",
+            ),
+            ("comarca", "Comarca", "Ribera del Duero"),
+            ("partido-judicial", "Partido judicial", "Aranda de Duero"),
+            (
+                "altitud",
+                "Altitud",
+                "926 metros sobre el nivel del mar",
+            ),
+        ),
+    },
 }
 
 
@@ -206,6 +236,15 @@ def ensure_initial_town_hall_structure(
     ayuntamiento haya decidido.
     """
     created: list[str] = []
+    ine_code = db.scalar(
+        select(Municipality.ine_code)
+        .join(Organization, Organization.municipality_id == Municipality.id)
+        .where(Organization.id == organization_id)
+    )
+    initial_content = INITIAL_TOWN_HALL_CONTENT_BY_INE_CODE.get(
+        ine_code or "",
+        {},
+    )
 
     # Se cargan de una vez, archivados incluidos: un apartado que el
     # ayuntamiento archivó no debe volver a aparecer en la siguiente llamada.
@@ -228,6 +267,7 @@ def ensure_initial_town_hall_structure(
         block_type: str,
         parent: MunicipalBlock | None,
         layout: str | None = None,
+        body: str | None = None,
     ) -> MunicipalBlock:
         """Devuelve el bloque, creándolo sólo si falta."""
         parent_id = parent.id if parent is not None else None
@@ -246,6 +286,7 @@ def ensure_initial_town_hall_structure(
             parent_id=parent_id,
             block_type=block_type,
             title=title,
+            body=body,
             position=next_position(parent_id),
             created_by_id=created_by_id,
             updated_by_id=created_by_id,
@@ -276,13 +317,25 @@ def ensure_initial_town_hall_structure(
             )
 
             for item_key, item_title, layout in epigraph["sections"]:
-                ensure(
-                    seed_key=f"{epigraph_key}/{item_key}",
+                section_key = f"{epigraph_key}/{item_key}"
+                section_block = ensure(
+                    seed_key=section_key,
                     title=item_title,
                     block_type="nav_item",
                     parent=epigraph_block,
                     layout=layout,
                 )
+                for content_key, content_title, content_body in initial_content.get(
+                    section_key,
+                    (),
+                ):
+                    ensure(
+                        seed_key=f"{section_key}/{content_key}",
+                        title=content_title,
+                        block_type="item",
+                        parent=section_block,
+                        body=content_body,
+                    )
 
     if created:
         db.commit()

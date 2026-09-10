@@ -1,3 +1,4 @@
+from app.municipalities.models import Municipality
 from app.town_hall.schemas import SECTION_LAYOUTS
 from app.town_hall.seed import INITIAL_TOWN_HALL_STRUCTURE
 from tests.conftest import headers_for
@@ -169,6 +170,68 @@ def test_the_seed_creates_no_municipal_content(
                 ).json()
                 # Los teléfonos y los concejales los pone el ayuntamiento.
                 assert content["items"] == []
+
+
+def test_fuentelcesped_seed_includes_its_verified_general_data(
+    client,
+    db,
+    make_user,
+    make_organization,
+    grant_permissions,
+):
+    municipality = Municipality(
+        name="Fuentelcésped",
+        province="Burgos",
+        autonomous_community="Castilla y León",
+        ine_code="09137",
+    )
+    db.add(municipality)
+    db.commit()
+    user = make_user()
+    organization = make_organization(
+        name="Ayuntamiento de Fuentelcésped",
+        municipality_id=municipality.id,
+    )
+    grant_permissions(user, organization, ["town_hall.edit", "town_hall.view"])
+    auth = headers_for(user)
+
+    first = seed(client, auth)
+    nav = read_nav(client, auth)
+    municipal_data = find_epigraph(nav, "Datos del municipio")
+    general = next(
+        item
+        for item in municipal_data["items"]
+        if item["title"] == "Información general"
+    )
+    content = client.get(
+        f"/town-hall/blocks/{general['id']}/content",
+        headers=auth,
+    ).json()
+
+    assert first.status_code == 201
+    assert [(item["title"], item["body"]) for item in content["items"]] == [
+        ("Superficie", "22 kilómetros cuadrados"),
+        ("Distancia a Burgos por carretera", "93 kilómetros"),
+        ("Comarca", "Ribera del Duero"),
+        ("Partido judicial", "Aranda de Duero"),
+        ("Altitud", "926 metros sobre el nivel del mar"),
+    ]
+
+    edited = content["items"][0]
+    client.patch(
+        f"/town-hall/blocks/{edited['id']}",
+        json={"body": "22,4 kilómetros cuadrados"},
+        headers=auth,
+    )
+    second = seed(client, auth)
+    after = client.get(
+        f"/town-hall/blocks/{general['id']}/content",
+        headers=auth,
+    ).json()
+
+    assert second.json()["created"] == []
+    assert len(after["items"]) == 5
+    assert after["items"][0]["body"] == "22,4 kilómetros cuadrados"
 
 
 def test_seeding_twice_creates_nothing_new(
