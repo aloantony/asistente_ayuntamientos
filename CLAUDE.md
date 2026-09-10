@@ -4,7 +4,7 @@ Guidance for Claude Code when working in this repository.
 
 ## Project
 
-Asistente Ayuntamientos: FastAPI + Next.js platform for municipal management (documentation, requirements intake, ordinances, internal processes) with progressive, human-supervised AI support. Full context lives in `README.md` (English); architecture, decisions (ADRs) and requirements live in `docs/` (Spanish).
+Asistente Ayuntamientos: FastAPI + Next.js platform for municipal management (documentation, requirements intake, ordinances, internal processes) with progressive, human-supervised AI support. The repository is public and source-available under a proprietary `LICENSE`: readable and locally testable, but any real use needs a written agreement. `README.md` is the Spanish landing page (what it is, quick start, modules, architecture, docs map); `README.en.md` keeps the exhaustive operational reference in English; architecture, decisions (ADRs) and requirements live in `docs/`, indexed by `docs/README.md` (Spanish). `CONTRIBUTING.md` and `SECURITY.md` are the outward-facing process docs.
 
 ## Stack
 
@@ -33,7 +33,7 @@ database.
 
 Fresh database: create the first superuser via `POST /auth/bootstrap-admin` (header `X-Bootstrap-Admin-Token`; only works while no users exist). Without a complete assistant runtime configuration (`ANTHROPIC_API_KEY` for `ASSISTANT_RUNTIME=anthropic`, `OPENAI_API_KEY` for `ASSISTANT_RUNTIME=openai_responses`, `HERMES_AGENT_*` for `ASSISTANT_RUNTIME=hermes_agent`, or a dedicated authenticated Codex home plus both `CODEX_SUBSCRIPTION_*` opt-ins for development-only `ASSISTANT_RUNTIME=codex_subscription`) the assistant endpoints return 503 by design — not a bug. A ChatGPT subscription is not an OpenAI API credential; the Codex bridge is a separate local evaluation path, validated against CLI 0.144.4, and is forbidden in production (ADR-024).
 
-Pre-handoff validation (README §9 "Useful validation commands"), packaged as the `/validar` skill. The backend test suite above is part of it; the remaining commands are:
+Pre-handoff validation (README.en.md §9 "Useful validation commands", summarized in `CONTRIBUTING.md`), packaged as the `/validar` skill. The backend test suite above is part of it; the remaining commands are:
 
 ```bash
 python3 -m compileall -q backend/app backend/alembic
@@ -78,6 +78,7 @@ docker compose --env-file .env.production -f docker-compose.prod.yml up -d --bui
 ## Hard rules
 
 - Never commit or edit `.env`. `.env.example` is the documented template.
+- The repository is public: no real server addresses, hostnames, credentials or municipal data in tracked files. `docs/despliegue.md` uses `<IPV4_DEL_SERVIDOR>` / `<IPV6_DEL_SERVIDOR>` placeholders on purpose — do not fill them in.
 - Never delete the `postgres_data` or `document_storage` volumes by any means (`docker compose down -v`/`--volumes`, `docker volume rm`, `prune`, ...); they are persistent user data.
 - **This machine also hosts the public production stack** (Compose project `anacleto`, deployed from a separate clone in `/opt/anacleto`) alongside development. Two rules follow, and they are not optional:
   - **Never run `docker system prune -a --volumes` or `docker volume prune`.** To reclaim disk use `docker builder prune` (the build cache is what actually grows). Prune only deletes volumes no container references, so production data is safe *while its containers exist* — which is exactly why the next rule matters.
@@ -105,6 +106,6 @@ docker compose --env-file .env.production -f docker-compose.prod.yml up -d --bui
 
 - Migrations: `backend/alembic/versions/`, named `YYYYMMDD_NNNN_description.py`, always with both `upgrade()` and `downgrade()`.
 - Commits: English, imperative subject, no conventional-commit prefixes; detailed body that references ADRs ("See ADR-012") when relevant. Module milestones follow the pattern "Add <module> v1".
-- Docs: `docs/` is written in Spanish; the living docs (`arquitectura.md`, `requisitos.md`) carry `Actualizado: <fecha>` headers. Decisions are recorded as numbered ADRs in `docs/decisiones.md`. Documentation is synced in dedicated docs commits after feature commits; `README.md` is the source of operational detail.
+- Docs: `docs/` is written in Spanish; the living docs (`arquitectura.md`, `requisitos.md`) carry `Actualizado: <fecha>` headers. Decisions are recorded as numbered ADRs in `docs/decisiones.md`. Documentation is synced in dedicated docs commits after feature commits; `README.en.md` is the source of exhaustive operational detail (every environment variable and runtime), while `README.md` is the Spanish landing page and must stay short enough to read in one sitting. A new doc in `docs/` also gets a row in `docs/README.md`.
 - `docs/requisitos.md` describes the current state only; new product requirements enter via the Requirements Intake module as drafts, not by editing the doc.
 - UI text is Spanish; backend API error details are English and translated for the UI in `frontend/app/lib/api.ts` (`translateApiDetail`).

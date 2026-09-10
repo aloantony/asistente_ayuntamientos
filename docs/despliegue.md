@@ -10,6 +10,12 @@ Se asume un **piloto cerrado con datos municipales reales y pocos usuarios**. Lo
 requisitos formales que quedan pendientes antes de abrir a más ayuntamientos están
 en `proteccion-datos.md`.
 
+> **Marcadores.** Este repositorio es público, así que las direcciones reales del
+> servidor no viajan en él: donde pone `<IPV4_DEL_SERVIDOR>` e
+> `<IPV6_DEL_SERVIDOR>`, sustituye por las de tu VPS (`ip -brief address` en la
+> máquina, o el panel del proveedor). El dominio `miconcejo.es` aparece como
+> ejemplo del despliegue existente; cámbialo por el tuyo.
+
 ---
 
 ## 0. Antes de empezar: lo que hace falta
@@ -37,7 +43,7 @@ paso es **verificar y endurecer**, no instalar. Lo comprobado el 2026-07-30:
 - Puertos 80 y 443 libres. ✔
 - Único servicio expuesto al exterior: SSH (22). Todo lo demás escucha en
   loopback. ✔
-- IPv4 `178.105.228.93` e IPv6 `2a01:4f8:1c0c:5ccb::1` directas en la interfaz. ✔
+- IPv4 `<IPV4_DEL_SERVIDOR>` e IPv6 `<IPV6_DEL_SERVIDOR>` directas en la interfaz. ✔
 
 Lo que queda por endurecer:
 
@@ -381,8 +387,8 @@ Caddy emite un certificado para cada uno.
 
 Datos de este servidor:
 
-- IPv4: `178.105.228.93`
-- IPv6: `2a01:4f8:1c0c:5ccb::1`
+- IPv4: `<IPV4_DEL_SERVIDOR>`
+- IPv6: `<IPV6_DEL_SERVIDOR>`
 
 ### Primero: quitar el aparcamiento
 
@@ -406,10 +412,10 @@ zona se edita en su propio panel; no hace falta delegar a ningún sitio.
 
 | Tipo | Nombre | Valor | TTL |
 |---|---|---|---|
-| `A` | `@` | `178.105.228.93` | 300 durante el cambio, luego 3600 |
-| `AAAA` | `@` | `2a01:4f8:1c0c:5ccb::1` | 300 → 3600 |
-| `A` | `www` | `178.105.228.93` | 300 → 3600 |
-| `AAAA` | `www` | `2a01:4f8:1c0c:5ccb::1` | 300 → 3600 |
+| `A` | `@` | `<IPV4_DEL_SERVIDOR>` | 300 durante el cambio, luego 3600 |
+| `AAAA` | `@` | `<IPV6_DEL_SERVIDOR>` | 300 → 3600 |
+| `A` | `www` | `<IPV4_DEL_SERVIDOR>` | 300 → 3600 |
+| `AAAA` | `www` | `<IPV6_DEL_SERVIDOR>` | 300 → 3600 |
 | `CAA` | `@` | `0 issue "letsencrypt.org"` | 3600 |
 
 El `CAA` declara que sólo Let's Encrypt puede emitir certificados para el dominio;
@@ -441,9 +447,9 @@ rehacerlos con los datos del proveedor.
 ### Comprobación de que el DNS ya está bien
 
 ```bash
-dig +short A     miconcejo.es          # -> 178.105.228.93
-dig +short A     www.miconcejo.es      # -> 178.105.228.93 (y NINGÚN CNAME de parking)
-dig +short AAAA  www.miconcejo.es      # -> 2a01:4f8:1c0c:5ccb::1
+dig +short A     miconcejo.es          # -> <IPV4_DEL_SERVIDOR>
+dig +short A     www.miconcejo.es      # -> <IPV4_DEL_SERVIDOR> (y NINGÚN CNAME de parking)
+dig +short AAAA  www.miconcejo.es      # -> <IPV6_DEL_SERVIDOR>
 dig +short CNAME www.miconcejo.es      # -> vacío
 dig +short CAA   miconcejo.es          # -> 0 issue "letsencrypt.org"
 ```

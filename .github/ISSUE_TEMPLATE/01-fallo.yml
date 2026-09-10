@@ -1,0 +1,66 @@
+name: Fallo
+description: Algo no funciona como debería
+labels: ["fallo"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Si el fallo tiene impacto de seguridad, **no lo cuentes aquí**: usa el
+        aviso privado descrito en [SECURITY.md](https://github.com/aloantony/asistente_ayuntamientos/blob/main/SECURITY.md).
+  - type: textarea
+    id: que-pasa
+    attributes:
+      label: Qué pasa
+      description: Qué esperabas y qué ocurre en su lugar.
+    validations:
+      required: true
+  - type: textarea
+    id: reproducir
+    attributes:
+      label: Cómo reproducirlo
+      description: Pasos concretos. Si es del backend, la petición; si es de la interfaz, la ruta y qué hiciste.
+      placeholder: |
+        1. Entro como usuario con permiso `projects.view`
+        2. Voy a /proyectos y filtro por ...
+        3. ...
+    validations:
+      required: true
+  - type: textarea
+    id: registros
+    attributes:
+      label: Registros o error
+      description: Salida de `docker compose logs backend`, traza de Python o error de consola del navegador.
+      render: text
+  - type: input
+    id: commit
+    attributes:
+      label: Commit
+      description: Salida de `git rev-parse --short HEAD`.
+      placeholder: 057ecba
+    validations:
+      required: true
+  - type: dropdown
+    id: entorno
+    attributes:
+      label: Entorno
+      options:
+        - Desarrollo (docker-compose.yml)
+        - Producción (docker-compose.prod.yml)
+        - Otro
+    validations:
+      required: true
+  - type: input
+    id: runtime
+    attributes:
+      label: Runtime del asistente
+      description: Sólo si el fallo toca a Anacleto. Valor de `ASSISTANT_RUNTIME`.
+      placeholder: anthropic
+  - type: checkboxes
+    id: comprobaciones
+    attributes:
+      label: Antes de enviar
+      options:
+        - label: He aplicado las migraciones (`docker compose exec backend alembic upgrade head`)
+        - label: He buscado si ya está descrito en las ADR o en una incidencia abierta
+        - label: No he incluido secretos, datos personales ni contenido municipal real
+          required: true

@@ -125,7 +125,7 @@ and do not require the runtime lease.
 
 - Keep branches short-lived and scoped to one task.
 - Prefer stacked PRs for large features instead of one large PR.
-- Use Conventional Commits, for example `fix: normalize assistant tool calls` or `feat: add geolocated information model`.
+- Write commit subjects in English, imperative and **without conventional-commit prefixes**, matching the recent history (`Retire the cartographic mirror`). Branch names do use `feat/`, `fix/` and `codex/` prefixes. See `CONTRIBUTING.md`.
 - Stage only files that belong to the current task. Avoid `git add .` when unrelated changes exist.
 - Review `git diff --cached` before committing.
 - Do not commit `.hermes/` plans by default. Move durable team documentation to `docs/` if it should be versioned.
