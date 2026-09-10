@@ -5,11 +5,14 @@ porque el asistente responde por SSE: `BaseHTTPMiddleware` se interpone en el
 streaming y arruinaría el turno conversacional en directo. Ver ADR-036.
 """
 
+from urllib.parse import urlsplit
+
 from starlette.datastructures import Headers, MutableHeaders
 from starlette.responses import JSONResponse
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 SAFE_METHODS = frozenset({"GET", "HEAD", "OPTIONS", "TRACE"})
+LOOPBACK_HOSTS = frozenset({"localhost", "127.0.0.1", "::1"})
 
 # Rutas de la documentación interactiva: solo existen en desarrollo y Swagger UI
 # no puede cargar con la CSP restrictiva de la API.
@@ -56,6 +59,25 @@ class SecurityHeadersMiddleware:
         await self.app(scope, receive, send_with_headers)
 
 
+def is_http_loopback_origin(origin: str) -> bool:
+    """Reconoce un origen HTTP local sin aceptar nombres parecidos."""
+    try:
+        parsed = urlsplit(origin)
+        parsed.port  # Fuerza la validación del puerto.
+    except ValueError:
+        return False
+
+    return (
+        parsed.scheme == "http"
+        and parsed.hostname in LOOPBACK_HOSTS
+        and parsed.username is None
+        and parsed.password is None
+        and parsed.path == ""
+        and parsed.query == ""
+        and parsed.fragment == ""
+    )
+
+
 class OriginCsrfMiddleware:
     """Rechaza escrituras cuyo `Origin` no sea uno de los nuestros.
 
@@ -69,9 +91,16 @@ class OriginCsrfMiddleware:
     ataque y su presencia con valor ajeno sí lo es.
     """
 
-    def __init__(self, app: ASGIApp, *, allowed_origins: list[str]) -> None:
+    def __init__(
+        self,
+        app: ASGIApp,
+        *,
+        allowed_origins: list[str],
+        allow_loopback_origins: bool = False,
+    ) -> None:
         self.app = app
         self.allowed_origins = frozenset(allowed_origins)
+        self.allow_loopback_origins = allow_loopback_origins
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         if scope["type"] != "http" or scope["method"] in SAFE_METHODS:
@@ -80,7 +109,12 @@ class OriginCsrfMiddleware:
 
         headers = Headers(scope=scope)
         origin = headers.get("origin")
-        if origin is not None and origin not in self.allowed_origins:
+        origin_is_allowed = origin in self.allowed_origins or (
+            self.allow_loopback_origins
+            and origin is not None
+            and is_http_loopback_origin(origin)
+        )
+        if origin is not None and not origin_is_allowed:
             await self._reject(scope, receive, send)
             return
         if origin is None and headers.get("sec-fetch-site") == "cross-site":

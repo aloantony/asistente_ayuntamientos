@@ -1,10 +1,13 @@
 """Cobertura del endurecimiento para el despliegue público (ADR-035, ADR-036)."""
 
 import pytest
+from fastapi import FastAPI
+from fastapi.testclient import TestClient
 from pydantic import ValidationError
 from sqlalchemy.exc import OperationalError
 
 from app.core.config import Settings, settings
+from app.core.middleware import OriginCsrfMiddleware
 from app.db.session import get_db
 from app.main import app
 
@@ -154,6 +157,64 @@ def test_cross_site_hint_without_an_origin_is_rejected(client):
         "/auth/login",
         json={"email": "someone@example.com", "password": "irrelevant"},
         headers={"Sec-Fetch-Site": "cross-site"},
+    )
+
+    assert response.status_code == 403
+
+
+def csrf_test_client(*, allow_loopback_origins: bool) -> TestClient:
+    test_app = FastAPI()
+
+    @test_app.post("/write")
+    def write():
+        return {"ok": True}
+
+    test_app.add_middleware(
+        OriginCsrfMiddleware,
+        allowed_origins=["http://localhost:3000"],
+        allow_loopback_origins=allow_loopback_origins,
+    )
+    return TestClient(test_app)
+
+
+@pytest.mark.parametrize(
+    "origin",
+    [
+        "http://localhost:58235",
+        "http://127.0.0.1:58235",
+        "http://[::1]:58235",
+    ],
+)
+def test_development_allows_loopback_origins_on_dynamic_ports(origin):
+    response = csrf_test_client(allow_loopback_origins=True).post(
+        "/write",
+        headers={"Origin": origin},
+    )
+
+    assert response.status_code == 200
+
+
+@pytest.mark.parametrize(
+    "origin",
+    [
+        "https://localhost:58235",
+        "http://localhost.evil.example:58235",
+        "http://127.0.0.2:58235",
+    ],
+)
+def test_development_rejects_non_http_loopback_lookalikes(origin):
+    response = csrf_test_client(allow_loopback_origins=True).post(
+        "/write",
+        headers={"Origin": origin},
+    )
+
+    assert response.status_code == 403
+
+
+def test_production_rejects_unconfigured_loopback_ports():
+    response = csrf_test_client(allow_loopback_origins=False).post(
+        "/write",
+        headers={"Origin": "http://localhost:58235"},
     )
 
     assert response.status_code == 403

@@ -100,7 +100,11 @@ app.add_middleware(
     expose_headers=["X-Total-Count"],
 )
 
-app.add_middleware(OriginCsrfMiddleware, allowed_origins=settings.cors_origins)
+app.add_middleware(
+    OriginCsrfMiddleware,
+    allowed_origins=settings.cors_origins,
+    allow_loopback_origins=settings.environment == "development",
+)
 
 for app_router in (
     auth_router,
