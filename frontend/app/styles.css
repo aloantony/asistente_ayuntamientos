@@ -4802,39 +4802,37 @@ html.dark .assistant-conversation-menu-button:focus-visible {
 }
 
 /* ---------------------------------------------------------------------------
- * App shell (barra lateral + contenido)
+ * App shell (cabecera global + contenido)
  * ------------------------------------------------------------------------ */
 
 .app-shell {
-  display: grid;
-  grid-template-columns: 232px 1fr;
+  display: flex;
+  flex-direction: column;
   min-height: 100vh;
-  transition: grid-template-columns 180ms ease;
+  min-height: 100dvh;
 }
 
 /* Columna principal: el contenido ocupa toda la altura disponible. */
 .app-main {
   display: flex;
+  flex: 1;
   flex-direction: column;
   min-width: 0;
 }
 
-.app-sidebar {
-  display: flex;
-  flex-direction: column;
-  gap: 24px;
-  border-right: 1px solid var(--border-strong);
-  padding: 12px 20px 28px;
-  background: var(--surface-muted);
+.app-header {
   position: sticky;
   top: 0;
-  height: 100vh;
-  height: 100dvh;
-
-  /* En ventanas bajas la barra hace scroll interno para que "Cerrar sesión"
-   * (anclado abajo) siga siendo alcanzable. */
-  overflow-y: auto;
-  transition: padding 180ms ease;
+  z-index: 1000;
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 18px;
+  min-width: 0;
+  border-bottom: 1px solid var(--border-strong);
+  padding: 10px clamp(16px, 2.5vw, 32px);
+  background: var(--surface-muted);
+  box-shadow: 0 1px 0 color-mix(in srgb, var(--border) 65%, transparent);
 }
 
 .app-brand {
@@ -4877,33 +4875,8 @@ html.dark .assistant-conversation-menu-button:focus-visible {
   white-space: nowrap;
 }
 
-.app-sidebar-collapse {
-  width: 30px;
-  height: 30px;
-  flex: none;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  border: 1px solid var(--border-strong);
-  border-radius: 8px;
-  padding: 0;
-  color: var(--text-secondary);
-  background: var(--surface);
-  cursor: pointer;
-}
-
-.app-sidebar-collapse:hover:not(:disabled) {
-  border-color: var(--accent);
-  color: var(--accent);
-  background: var(--surface-raised);
-}
-
-.app-sidebar-collapse svg {
-  transition: transform 180ms ease;
-}
-
 .app-theme-toggle {
-  width: 100%;
+  width: auto;
   display: inline-flex;
   align-items: center;
   gap: 10px;
@@ -4936,33 +4909,34 @@ html.dark .assistant-conversation-menu-button:focus-visible {
 
 .app-nav {
   display: flex;
-  min-height: 0;
-  flex: 1 0 auto;
-  flex-direction: column;
-  gap: 14px;
+  align-items: center;
+  flex: 1;
+  gap: 6px;
+  min-width: 0;
+  overflow-x: auto;
+  overscroll-behavior-inline: contain;
+  scrollbar-width: none;
+}
+
+.app-nav::-webkit-scrollbar {
+  display: none;
 }
 
 .app-nav-group {
   display: flex;
-  flex-direction: column;
-  gap: 2px;
+  gap: 4px;
 }
 
 .app-nav-section {
-  padding: 0 12px 4px;
-  color: var(--text-faint);
-  font-family: var(--font-ibm-plex-mono), "IBM Plex Mono", monospace;
-  font-size: 10px;
-  font-weight: 600;
-  letter-spacing: 0.14em;
-  text-transform: uppercase;
+  display: none;
 }
 
 .app-nav-link {
   display: flex;
   align-items: center;
+  flex: none;
   gap: 11px;
-  width: 100%;
+  width: auto;
   border: 0;
   padding: 9px 12px;
   border-radius: 8px;
@@ -4972,6 +4946,7 @@ html.dark .assistant-conversation-menu-button:focus-visible {
   text-align: left;
   font-size: 14px;
   line-height: 1.3;
+  white-space: nowrap;
   cursor: pointer;
 }
 
@@ -4988,7 +4963,7 @@ html.dark .assistant-conversation-menu-button:focus-visible {
   color: var(--text);
   background: var(--fill-strong);
   font-weight: 600;
-  box-shadow: inset 2px 0 0 var(--accent);
+  box-shadow: inset 0 -2px 0 var(--accent);
 }
 
 .app-nav-link--primary {
@@ -5021,9 +4996,9 @@ html.dark .assistant-conversation-menu-button:focus-visible {
 }
 
 .app-nav-utility {
-  margin-top: auto;
-  padding-top: 8px;
-  border-top: 1px solid var(--border);
+  margin-left: 2px;
+  border-left: 1px solid var(--border);
+  padding-left: 6px;
 }
 
 .app-nav-label {
@@ -5071,16 +5046,18 @@ html.dark .assistant-conversation-menu-button:focus-visible {
 
 .app-content-assistant {
   padding: 0;
-  height: 100vh;
-  height: 100dvh;
+  height: calc(100vh - 59px);
+  height: calc(100dvh - 59px);
   min-height: 0;
   overflow: hidden;
 }
 
 .app-session {
-  margin-top: auto;
-  display: grid;
-  gap: 10px;
+  display: flex;
+  align-items: center;
+  flex: none;
+  gap: 8px;
+  min-width: 0;
 }
 
 .app-session .muted {
@@ -5097,7 +5074,7 @@ html.dark .assistant-conversation-menu-button:focus-visible {
 }
 
 .app-session-logout-icon {
-  display: none;
+  display: block;
   flex: none;
 }
 
@@ -5464,103 +5441,11 @@ html.dark .assistant-conversation-menu-button:focus-visible {
   gap: 7px;
 }
 
-@media (min-width: 901px) {
-  .app-shell--sidebar-collapsed {
-    grid-template-columns: 72px 1fr;
-  }
-
-  .app-shell--sidebar-collapsed .app-sidebar {
-    align-items: stretch;
-    gap: 20px;
-    padding: 12px 14px 20px;
-  }
-
-  .app-shell--sidebar-collapsed .app-brand {
-    flex-direction: column;
-    justify-content: center;
-    gap: 8px;
-  }
-
-  .app-shell--sidebar-collapsed .app-brand-name,
-  .app-shell--sidebar-collapsed .app-nav-section,
-  .app-shell--sidebar-collapsed .app-nav-label,
-  .app-shell--sidebar-collapsed .app-nav-beta,
-  .app-shell--sidebar-collapsed .app-nav-badge,
-  .app-shell--sidebar-collapsed .app-nav-empty,
-  .app-shell--sidebar-collapsed .app-session-user,
-  .app-shell--sidebar-collapsed .app-session-logout-label {
-    display: none;
-  }
-
-  .app-shell--sidebar-collapsed .app-sidebar-collapse svg {
-    transform: rotate(180deg);
-  }
-
-  .app-shell--sidebar-collapsed .app-nav {
-    gap: 12px;
-  }
-
-  .app-shell--sidebar-collapsed .app-nav-group {
-    gap: 4px;
-  }
-
-  .app-shell--sidebar-collapsed .app-nav-link {
-    position: relative;
-    justify-content: center;
-    min-height: 40px;
-    padding: 10px;
-  }
-
-  .app-shell--sidebar-collapsed .app-session {
-    justify-items: center;
-  }
-
-  .app-shell--sidebar-collapsed .app-theme-toggle {
-    width: 40px;
-    height: 40px;
-    justify-content: center;
-    padding: 0;
-  }
-
-  .app-shell--sidebar-collapsed .app-theme-toggle span {
-    display: none;
-  }
-
-  .app-shell--sidebar-collapsed .app-session-logout {
-    width: 40px;
-    height: 40px;
-    padding: 0;
-  }
-
-  .app-shell--sidebar-collapsed .app-session-logout-icon {
-    display: block;
-  }
-}
-
-@media (prefers-reduced-motion: reduce) {
-  .app-shell,
-  .app-sidebar,
-  .app-sidebar-collapse svg {
-    transition: none;
-  }
-}
-
 @media (max-width: 900px) {
-  .app-shell {
-    grid-template-columns: minmax(0, 1fr);
-  }
-
-  .app-sidebar {
-    /* "relative" en lugar de "static" para anclar el menú desplegable. */
-    position: relative;
-    height: auto;
-    flex-direction: row;
-    align-items: center;
-    justify-content: flex-start;
-    gap: 16px;
-    border-right: none;
-    border-bottom: 1px solid var(--border);
-    padding: 14px 20px;
+  .app-header {
+    grid-template-columns: minmax(0, 1fr) auto auto;
+    gap: 10px;
+    padding: 10px 12px;
     min-width: 0;
     overflow: visible;
   }
@@ -5568,10 +5453,6 @@ html.dark .assistant-conversation-menu-button:focus-visible {
   .app-brand {
     min-width: 0;
     flex: 1 1 auto;
-  }
-
-  .app-sidebar-collapse {
-    display: none;
   }
 
   .menu-toggle {
@@ -5607,7 +5488,11 @@ html.dark .assistant-conversation-menu-button:focus-visible {
     left: 0;
     right: 0;
     z-index: 40;
+    align-items: stretch;
+    flex-direction: column;
+    gap: 14px;
     max-height: calc(100dvh - 67px);
+    overflow-x: hidden;
     overflow-y: auto;
     overscroll-behavior: contain;
     background: var(--surface);
@@ -5616,16 +5501,33 @@ html.dark .assistant-conversation-menu-button:focus-visible {
     box-shadow: 0 18px 36px rgba(11, 18, 28, 0.16);
   }
 
+  .app-nav-group {
+    flex-direction: column;
+    gap: 2px;
+  }
+
+  .app-nav-section {
+    display: block;
+  }
+
+  .app-nav-link {
+    width: 100%;
+  }
+
   .app-nav-utility {
     margin-top: 0;
+    margin-left: 0;
+    border-top: 1px solid var(--border);
+    border-left: 0;
+    padding-top: 8px;
+    padding-left: 0;
   }
 
   .app-session {
-    margin-top: 0;
     display: flex;
     align-items: center;
     flex: none;
-    gap: 12px;
+    gap: 8px;
   }
 
   .app-session .app-theme-toggle {
@@ -5634,7 +5536,12 @@ html.dark .assistant-conversation-menu-button:focus-visible {
     display: inline-flex;
   }
 
-  .app-theme-toggle span {
+  .app-theme-toggle span,
+  .app-session-logout-label {
+    display: none;
+  }
+
+  .app-session-user {
     display: none;
   }
 
@@ -5708,7 +5615,7 @@ html.dark .assistant-conversation-menu-button:focus-visible {
     border-top: 1px solid var(--border);
     padding-top: 5px;
   }
-  .app-sidebar {
+  .app-header {
     gap: 10px;
     padding: 10px 12px;
   }

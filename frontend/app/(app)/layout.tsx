@@ -28,7 +28,6 @@ import {
 } from "../lib/session";
 
 const ONBOARDING_STORAGE_PREFIX = "anacleto:onboarding:v1";
-const SIDEBAR_STORAGE_KEY = "anacleto:sidebar:v1";
 
 type OnboardingStepId = "theme" | "assistant" | "account";
 
@@ -98,7 +97,6 @@ export default function AppLayout({
   const menuButtonRef = useRef<HTMLButtonElement>(null);
   const navigationRef = useRef<HTMLElement>(null);
   const [isMenuOpen, setIsMenuOpen] = useState(false);
-  const [isSidebarCollapsed, setIsSidebarCollapsed] = useState(true);
   const [requirementsTotal, setRequirementsTotal] = useState<number | null>(
     null,
   );
@@ -110,16 +108,6 @@ export default function AppLayout({
   const [showOnboarding, setShowOnboarding] = useState(false);
   const [activeOnboardingIndex, setActiveOnboardingIndex] = useState(0);
   const { dark, toggle: toggleTheme } = useDarkMode();
-
-  useEffect(() => {
-    try {
-      const storedPreference = window.localStorage.getItem(SIDEBAR_STORAGE_KEY);
-      setIsSidebarCollapsed(storedPreference !== "expanded");
-    } catch {
-      // La barra permanece plegada por defecto si el almacenamiento no está
-      // disponible (modo privado o políticas restrictivas del navegador).
-    }
-  }, []);
 
   // Conteo real de necesidades para el badge del menú. El layout (app) no se
   // desmonta al navegar entre secciones, así que se pide una sola vez por
@@ -339,7 +327,7 @@ export default function AppLayout({
       id: "theme",
       eyebrow: "Tema",
       title: "Claro u oscuro",
-      body: "Cambia el modo visual desde el control situado al pie del menú lateral. Lo recordaremos en este navegador.",
+      body: "Cambia el modo visual desde el control de la cabecera. Lo recordaremos en este navegador.",
     },
     ...(canUseAssistant
       ? [
@@ -347,7 +335,7 @@ export default function AppLayout({
             id: "assistant" as const,
             eyebrow: "Anacleto",
             title: "Asistente municipal",
-            body: "Abre Anacleto desde la sección Principal del menú lateral para consultar información, organizar trabajo o preparar borradores supervisados.",
+            body: "Abre Anacleto desde la navegación superior para consultar información, organizar trabajo o preparar borradores supervisados.",
           },
         ]
       : []),
@@ -355,7 +343,7 @@ export default function AppLayout({
       id: "account",
       eyebrow: "Cuenta",
       title: "Tu perfil",
-      body: "Entra en Mi cuenta, fijada al final del menú lateral, para revisar tus datos, organización y permisos.",
+      body: "Entra en Mi cuenta desde la navegación superior para revisar tus datos, organización y permisos.",
     },
   ];
 
@@ -382,22 +370,6 @@ export default function AppLayout({
     toggleTheme();
   }
 
-  function toggleSidebar() {
-    setIsSidebarCollapsed((collapsed) => {
-      const nextCollapsed = !collapsed;
-      try {
-        window.localStorage.setItem(
-          SIDEBAR_STORAGE_KEY,
-          nextCollapsed ? "collapsed" : "expanded",
-        );
-      } catch {
-        // La interacción sigue funcionando durante la sesión aunque no pueda
-        // persistirse la preferencia.
-      }
-      return nextCollapsed;
-    });
-  }
-
   function goToPreviousOnboardingStep() {
     setActiveOnboardingIndex((index) => Math.max(0, index - 1));
   }
@@ -409,25 +381,20 @@ export default function AppLayout({
   }
 
   const themeToggleLabel = dark ? "Cambiar a modo claro" : "Cambiar a modo oscuro";
-  const sidebarToggleLabel = isSidebarCollapsed
-    ? "Desplegar menú lateral"
-    : "Plegar menú lateral";
 
   const contentClassName =
     pathname === "/asistente"
       ? "app-content app-content-assistant"
       : "app-content app-content-wide";
 
-  // La barra superior municipal sólo acompaña a las pantallas institucionales
-  // (ADR-048); el resto del producto se navega desde el menú lateral.
+  // La barra municipal acompaña a las pantallas institucionales (ADR-048); la
+  // navegación global vive ahora en la cabecera y deja libre todo el ancho.
   const showTopNav = shouldShowTopNav(pathname);
   const activeTopNavSectionId = activeTopNavSectionFor(pathname);
 
   return (
-    <div
-      className={`app-shell${isSidebarCollapsed ? " app-shell--sidebar-collapsed" : ""}`}
-    >
-      <aside className="app-sidebar">
+    <div className="app-shell">
+      <header className="app-header">
         <div className="app-brand">
           <span className="app-brand-star" aria-hidden="true">
             <img alt="" src="/brand/logo-principal.svg" />
@@ -435,28 +402,6 @@ export default function AppLayout({
           <span className="app-brand-name" title={brandName}>
             {brandName}
           </span>
-          <button
-            aria-label={sidebarToggleLabel}
-            aria-expanded={!isSidebarCollapsed}
-            className="app-sidebar-collapse"
-            onClick={toggleSidebar}
-            title={sidebarToggleLabel}
-            type="button"
-          >
-            <svg
-              aria-hidden="true"
-              fill="none"
-              height="16"
-              stroke="currentColor"
-              strokeLinecap="round"
-              strokeLinejoin="round"
-              strokeWidth="1.8"
-              viewBox="0 0 24 24"
-              width="16"
-            >
-              <path d="m15 6-6 6 6 6" />
-            </svg>
-          </button>
         </div>
         <button
           aria-controls="app-primary-navigation"
@@ -490,7 +435,7 @@ export default function AppLayout({
           }
         >
           <SidebarNavigation
-            isCollapsed={isSidebarCollapsed}
+            isCollapsed={false}
             isMenuOpen={isMenuOpen}
             navigationRef={navigationRef}
             onNavigate={() => closeMobileMenu(false)}
@@ -561,7 +506,7 @@ export default function AppLayout({
             <span className="app-session-logout-label">Cerrar sesión</span>
           </button>
         </div>
-      </aside>
+      </header>
       {showOnboarding ? (
         <div
           aria-labelledby="app-onboarding-title"
