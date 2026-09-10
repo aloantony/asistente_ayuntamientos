@@ -1,5 +1,5 @@
 import { Suspense } from "react";
-import { OrdinanceLibrary } from "../../components/OrdinanceLibrary";
+import { OrdinanceWorkspace } from "../../components/OrdinanceWorkspace";
 
 export default function OrdenanzasPage() {
   return (
@@ -12,7 +12,7 @@ export default function OrdenanzasPage() {
         </section>
       }
     >
-      <OrdinanceLibrary />
+      <OrdinanceWorkspace />
     </Suspense>
   );
 }

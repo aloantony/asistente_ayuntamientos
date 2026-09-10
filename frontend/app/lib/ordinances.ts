@@ -5,9 +5,30 @@ import type {
   OrdinanceResultScope,
   OrdinanceSearchPage,
 } from "../components/types";
-import { adminRequest } from "./api";
+import { adminRequest, adminRequestWithTotal } from "./api";
 
 export const ORDINANCE_LIBRARY_PAGE_SIZE = 12;
+
+export function fetchOrdinanceCatalog(
+  municipalityId?: number,
+  signal?: AbortSignal,
+) {
+  const params = new URLSearchParams({
+    include_archived: "false",
+    limit: "200",
+  });
+  if (municipalityId) {
+    params.set("municipality_id", String(municipalityId));
+  }
+
+  return adminRequestWithTotal<Ordinance[]>(
+    `/ordinances?${params.toString()}`,
+    "",
+    "No se pudo cargar el catálogo normativo.",
+    { signal },
+  );
+}
+
 
 export type OrdinanceSearchFilters = {
   query: string;
