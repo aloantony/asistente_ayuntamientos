@@ -167,7 +167,7 @@ def test_telegram_webhook_transcribes_voice_message_for_linked_user(
     ):
         agent_inputs.append(content)
         input_modes.append(input_mode)
-        return SimpleNamespace(content="Respuesta desde Anacleto")
+        return SimpleNamespace(content="Respuesta desde iConcejo")
 
     monkeypatch.setattr(telegram_routes, "run_agent_turn", fake_run_agent_turn)
 
@@ -186,7 +186,7 @@ def test_telegram_webhook_transcribes_voice_message_for_linked_user(
     assert response.status_code == 200
     assert agent_inputs == ["Necesito revisar la ordenanza de terrazas"]
     assert input_modes == ["voice"]
-    assert sent_messages == [("12345", "Respuesta desde Anacleto")]
+    assert sent_messages == [("12345", "Respuesta desde iConcejo")]
 
 
 def test_telegram_webhook_reports_voice_transcription_unavailable(

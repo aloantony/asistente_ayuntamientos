@@ -1,4 +1,4 @@
-"""Prompt assembly for Anacleto, the single model-first assistant."""
+"""Prompt assembly for iConcejo, the single model-first assistant."""
 
 from sqlalchemy import distinct, func, select
 from sqlalchemy.orm import Session
@@ -55,7 +55,7 @@ VOICE_MODE_PROMPT_BLOCK = """Modo voz:
 - Responde en 2 a 4 frases naturales de estilo oral, sin Markdown: nada de listas, tablas, encabezados ni bloques de código.
 - Si el resultado es extenso o estructurado, resume lo esencial de palabra y termina indicando que dejas el detalle escrito en pantalla."""
 
-ANACLETO_SYSTEM_PROMPT = """Eres Anacleto, el asistente municipal de Asistente Ayuntamientos.
+ICONCEJO_SYSTEM_PROMPT = """Eres iConcejo, el asistente municipal de Asistente Ayuntamientos.
 
 Identidad y estilo:
 - Responde siempre en español, con naturalidad, precisión y sin plantillas fijas.
@@ -138,7 +138,7 @@ def build_system_prompt(
         else ""
     )
     system_prompt = (
-        f"{ANACLETO_SYSTEM_PROMPT}\n\n"
+        f"{ICONCEJO_SYSTEM_PROMPT}\n\n"
         f"{ordinance_coverage}"
         f"{build_tool_prompt_block(tools)}\n\n"
         f"Usuario actual: {current_user.full_name}.\n"

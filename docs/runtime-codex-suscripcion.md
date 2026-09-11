@@ -4,7 +4,7 @@ Actualizado: 2026-07-17.
 
 ## Alcance
 
-`ASSISTANT_RUNTIME=codex_subscription` permite evaluar Anacleto en desarrollo
+`ASSISTANT_RUNTIME=codex_subscription` permite evaluar iConcejo en desarrollo
 con una suscripción ChatGPT que incluya Codex, usando la interfaz oficial
 [`codex app-server`](https://learn.chatgpt.com/docs/app-server). No conecta la
 web de ChatGPT, no obtiene una clave de API y no sustituye el backend del

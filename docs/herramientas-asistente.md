@@ -1,10 +1,10 @@
-# Herramientas de Anacleto: alcance y hoja de ruta
+# Herramientas de iConcejo: alcance y hoja de ruta
 
 Estado de referencia: 2026-07-16.
 
 ## Objetivo
 
-Anacleto debe ofrecer, dentro del producto municipal, las capacidades públicas
+iConcejo debe ofrecer, dentro del producto municipal, las capacidades públicas
 que el usuario reconoce en una sesión moderna de ChatGPT. No se pretende copiar
 la interfaz privada de ChatGPT ni delegar en ella la aplicación: PostgreSQL,
 RBAC, tenancy, memoria, confirmaciones, auditoría y retención continúan siendo

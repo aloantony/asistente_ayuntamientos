@@ -19,7 +19,7 @@ en `/admin/ordenanzas`.
    `review_status=approved`, `embedding_status=ready` y el modelo de embedding
    configurado actualmente.
 3. `repealed`, `superseded` y `archived` se excluyen de búsquedas, comparación y
-   cobertura de Anacleto salvo petición explícita. `unknown` y
+   cobertura de iConcejo salvo petición explícita. `unknown` y
    `partially_repealed` siguen siendo recuperables, pero la UI y el prompt deben
    advertir que hace falta comprobar la vigencia.
 4. Cambiar texto o metadatos jurídicamente sensibles invalida la aprobación. Si
@@ -212,6 +212,6 @@ Antes de considerar utilizable un corpus:
 7. verificar una comparación con un municipio sin cobertura;
 8. contrastar una muestra contra el boletín oficial.
 
-La cobertura que Anacleto recibe en su prompt cuenta solo ordenanzas realmente
+La cobertura que iConcejo recibe en su prompt cuenta solo ordenanzas realmente
 recuperables bajo estas reglas. Si no hay cobertura, el asistente debe decirlo en
 vez de inventar normativa.

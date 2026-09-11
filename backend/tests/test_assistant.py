@@ -4079,7 +4079,7 @@ def test_model_first_turn_persists_reply_and_calls_gateway_for_capabilities(
     assert messages[-1]["routing"] is None
     assert messages[-1]["content"] == "Puedo ayudarte a preparar borradores y consultas."
     assert len(gateway.calls) == 1
-    assert "Eres Anacleto" in gateway.calls[0]["system"]
+    assert "Eres iConcejo" in gateway.calls[0]["system"]
     assert "HERRAMIENTAS DISPONIBLES" in gateway.calls[0]["system"]
     assert "COBERTURA DE ORDENANZAS" not in gateway.calls[0]["system"]
     assert gateway.calls[0]["messages"][-1] == {

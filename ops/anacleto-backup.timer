@@ -1,5 +1,5 @@
 [Unit]
-Description=Lanza la copia de seguridad de Anacleto a diario
+Description=Lanza la copia de seguridad de iConcejo a diario
 
 [Timer]
 # 03:30 hora del servidor, con dispersión para no coincidir con otras tareas.

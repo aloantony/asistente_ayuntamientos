@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024" role="img" aria-labelledby="title desc">
   <title id="title">Logo principal en verde turquesa sin fondo</title>
-  <desc id="desc">Símbolo geométrico tipo A en verde turquesa, sin borde y con fondo transparente.</desc>
+  <desc id="desc">Monograma iC de iConcejo en verde turquesa, sin borde y con fondo transparente.</desc>
   <defs>
     <linearGradient id="turquoiseMain" x1="512" y1="180" x2="280" y2="760" gradientUnits="userSpaceOnUse">
       <stop offset="0" stop-color="#6FFFE2"/>
@@ -14,68 +14,33 @@
       <stop offset="0.48" stop-color="#3CAF8C" stop-opacity="0"/>
       <stop offset="1" stop-color="#006F62" stop-opacity="0.32"/>
     </linearGradient>
+
+    <path id="marca" fill-rule="evenodd" d="
+      M 717.7 266.9
+      A 320 320 0 1 0 717.7 757.1
+      L 666.3 695.8
+      A 240 240 0 1 1 666.3 328.2
+      Z
+
+      M 558 370
+      A 46 46 0 1 1 466 370
+      A 46 46 0 1 1 558 370
+      Z
+
+      M 472 472
+      A 28 28 0 0 1 500 444
+      L 524 444
+      A 28 28 0 0 1 552 472
+      L 552 644
+      A 28 28 0 0 1 524 672
+      L 500 672
+      A 28 28 0 0 1 472 644
+      Z
+    "/>
   </defs>
 
   <g>
-    <path fill="url(#turquoiseMain)" fill-rule="evenodd" d="
-      M 819 753
-      C 796 716 770 671 736 618
-      C 697 552 648 480 607 419
-      C 579 374 557 335 545 311
-      L 512 180
-      L 479 250
-      C 456 304 427 360 394 415
-      C 347 493 289 576 232 639
-      C 214 670 199 699 188 726
-      C 227 713 264 697 303 680
-      C 382 645 459 585 525 507
-      C 579 561 639 616 708 664
-      C 750 694 790 722 819 753
-      Z
-
-      M 512 290
-      C 528 325 545 357 554 386
-      C 548 416 519 463 484 505
-      C 425 572 352 629 284 660
-      C 318 610 357 560 397 504
-      C 437 447 475 373 512 290
-      Z
-
-      M 570 412
-      C 611 488 669 571 740 644
-      C 669 614 610 564 541 495
-      C 551 469 560 441 570 412
-      Z
-    "/>
-    <path fill="url(#turquoiseShade)" fill-rule="evenodd" opacity="0.65" d="
-      M 819 753
-      C 796 716 770 671 736 618
-      C 697 552 648 480 607 419
-      C 579 374 557 335 545 311
-      L 512 180
-      L 479 250
-      C 456 304 427 360 394 415
-      C 347 493 289 576 232 639
-      C 214 670 199 699 188 726
-      C 227 713 264 697 303 680
-      C 382 645 459 585 525 507
-      C 579 561 639 616 708 664
-      C 750 694 790 722 819 753
-      Z
-
-      M 512 290
-      C 528 325 545 357 554 386
-      C 548 416 519 463 484 505
-      C 425 572 352 629 284 660
-      C 318 610 357 560 397 504
-      C 437 447 475 373 512 290
-      Z
-
-      M 570 412
-      C 611 488 669 571 740 644
-      C 669 614 610 564 541 495
-      C 551 469 560 441 570 412
-      Z
-    "/>
+    <use href="#marca" fill="url(#turquoiseMain)"/>
+    <use href="#marca" fill="url(#turquoiseShade)" opacity="0.65"/>
   </g>
 </svg>

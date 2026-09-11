@@ -34,7 +34,7 @@ function makeUser(
 describe("sidebar navigation catalog", () => {
   it("defines the fixed, utility, default and complete optional catalogs", () => {
     expect(FIXED_SIDEBAR_ITEMS.map(({ label, href }) => [label, href])).toEqual([
-      ["Anacleto", "/asistente"],
+      ["iConcejo", "/asistente"],
       ["Inicio", "/"],
       ["Ayuntamiento", "/ayuntamiento"],
       ["Mapa", "/mapa"],

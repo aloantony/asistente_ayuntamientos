@@ -4,9 +4,9 @@ Actualizado: 2026-07-29. Este documento enumera principalmente capacidades ya im
 
 ## Visión de producto
 
-Anacleto es un agente operativo interno para cada ayuntamiento. Conversa primero con el alcalde y después con el resto de trabajadores, coordina personas y sistemas y puede actuar de forma proactiva dentro de competencias, políticas y delegaciones auditables.
+iConcejo es un agente operativo interno para cada ayuntamiento. Conversa primero con el alcalde y después con el resto de trabajadores, coordina personas y sistemas y puede actuar de forma proactiva dentro de competencias, políticas y delegaciones auditables.
 
-La captura de requisitos no es el propósito principal del asistente. Es una capacidad de evolución del producto: Anacleto dialoga y contrasta la necesidad antes de generar una propuesta estructurada que el usuario pueda corregir y validar.
+La captura de requisitos no es el propósito principal del asistente. Es una capacidad de evolución del producto: iConcejo dialoga y contrasta la necesidad antes de generar una propuesta estructurada que el usuario pueda corregir y validar.
 
 ## Requisitos funcionales implementados
 
@@ -18,8 +18,8 @@ La captura de requisitos no es el propósito principal del asistente. Es una cap
 - Requirements Intake: captura estructurada de necesidades con flujo de estados, prioridades e hilo de mensajes.
 - Municipios: datos de referencia globales de municipios reales.
 - Ordenanzas: registros estructurados vinculados a municipio y opcionalmente a un documento.
-- Asistente de IA conversacional Anacleto v2: el usuario conversa en español con un único asistente model-first, con streaming web y Markdown. El asistente consulta datos visibles, usa herramientas filtradas por permisos y puede crear requisitos solo como borradores supervisables. `create_requirement` exige confirmación humana en un turno posterior mediante guarda backend, no solo por prompt. Toda llamada a IA externa o runtime privado pasa por el gateway interno (ver restricciones). Puede ejecutarse con Anthropic o con Hermes Agent como aplicación/runtime privado. Permiso de acceso: `assistant.use`.
-- Diálogo por voz web con Anacleto: si STT y TTS están configurados, el usuario puede activar `Modo voz`, hablar al micrófono, enviar automáticamente la transcripción como turno de voz y escuchar la respuesta en español. El modo manos libres añade parada por silencio, síntesis por frases durante el streaming, re-escucha automática configurable (`assistant.voice.handsfree`) y pausa al ocultar la pestaña. Sin configuración de voz, la web conserva el flujo de texto.
+- Asistente de IA conversacional iConcejo v2: el usuario conversa en español con un único asistente model-first, con streaming web y Markdown. El asistente consulta datos visibles, usa herramientas filtradas por permisos y puede crear requisitos solo como borradores supervisables. `create_requirement` exige confirmación humana en un turno posterior mediante guarda backend, no solo por prompt. Toda llamada a IA externa o runtime privado pasa por el gateway interno (ver restricciones). Puede ejecutarse con Anthropic o con Hermes Agent como aplicación/runtime privado. Permiso de acceso: `assistant.use`.
+- Diálogo por voz web con iConcejo: si STT y TTS están configurados, el usuario puede activar `Modo voz`, hablar al micrófono, enviar automáticamente la transcripción como turno de voz y escuchar la respuesta en español. El modo manos libres añade parada por silencio, síntesis por frases durante el streaming, re-escucha automática configurable (`assistant.voice.handsfree`) y pausa al ocultar la pestaña. Sin configuración de voz, la web conserva el flujo de texto.
 - Memoria institucional controlada: el agente puede proponer conocimiento de organización, pero un responsable debe aprobarlo, editarlo, rechazarlo o bloquearlo antes de que sea reutilizable. La memoria oficial reside en PostgreSQL y se gobierna desde el backend propio, no en Hermes Agent. La revisión municipal se realiza en `/admin/memoria`, aislada por organización y protegida frente a ediciones concurrentes. Permisos: `assistant.memory.propose`, `assistant.memory.view`, `assistant.memory.review`.
 - Feedback de producto confirmado: el envío exige una confirmación explícita ligada al contenido exacto. El desarrollador lo revisa en la bandeja local `/admin/producto`, reservada a superusuarios. Esta bandeja piloto no anonimiza ni transmite todavía la información a un control central.
 

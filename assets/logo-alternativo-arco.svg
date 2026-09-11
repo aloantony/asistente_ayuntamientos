@@ -1,0 +1,74 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="318" height="318" viewBox="3 5 318 318" role="img" aria-labelledby="title desc">
+  <title id="title">Logo alternativo de iConcejo: la i bajo el arco</title>
+  <desc id="desc">Propuesta no adoptada. La i bajo el pórtico del concejo, en verde turquesa sobre disco oscuro con aro blanco.</desc>
+  <defs>
+    <radialGradient id="bgGrad" cx="50%" cy="48%" r="72%">
+      <stop offset="0" stop-color="#101112"/>
+      <stop offset="0.72" stop-color="#151719"/>
+      <stop offset="1" stop-color="#1f2226"/>
+    </radialGradient>
+
+    <linearGradient id="turquoiseMain" x1="200" y1="60" x2="110" y2="250" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#6FFFE2"/>
+      <stop offset="0.32" stop-color="#3CAF8C"/>
+      <stop offset="0.68" stop-color="#10B89D"/>
+      <stop offset="1" stop-color="#008874"/>
+    </linearGradient>
+
+    <linearGradient id="turquoiseShade" x1="240" y1="100" x2="100" y2="250" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#58EED1" stop-opacity="0.78"/>
+      <stop offset="0.48" stop-color="#3CAF8C" stop-opacity="0"/>
+      <stop offset="1" stop-color="#006F62" stop-opacity="0.32"/>
+    </linearGradient>
+
+    <filter id="softGlow" x="-10%" y="-10%" width="120%" height="120%">
+      <feGaussianBlur in="SourceAlpha" stdDeviation="0.55" result="blur"/>
+      <feColorMatrix in="blur" type="matrix" values="0 0 0 0 0.235  0 0 0 0 0.686  0 0 0 0 0.549  0 0 0 0.52 0" result="glow"/>
+      <feMerge>
+        <feMergeNode in="glow"/>
+        <feMergeNode in="SourceGraphic"/>
+      </feMerge>
+    </filter>
+
+    <clipPath id="circleClip">
+      <circle cx="162" cy="164" r="156"/>
+    </clipPath>
+
+    <path id="marca" fill-rule="evenodd" d="
+      M 74 246
+      L 74 168
+      A 88 88 0 0 1 250 168
+      L 250 246
+      L 224 246
+      L 224 168
+      A 62 62 0 0 0 100 168
+      L 100 246
+      Z
+
+      M 175 140
+      A 13 13 0 1 1 149 140
+      A 13 13 0 1 1 175 140
+      Z
+
+      M 151 170
+      A 8 8 0 0 1 159 162
+      L 165 162
+      A 8 8 0 0 1 173 170
+      L 173 228
+      A 8 8 0 0 1 165 236
+      L 159 236
+      A 8 8 0 0 1 151 228
+      Z
+    "/>
+  </defs>
+
+  <g clip-path="url(#circleClip)">
+    <circle cx="162" cy="164" r="156" fill="url(#bgGrad)"/>
+  </g>
+  <circle cx="162" cy="164" r="156" fill="none" stroke="#F5F6F6" stroke-width="4.5"/>
+
+  <g filter="url(#softGlow)">
+    <use href="#marca" fill="url(#turquoiseMain)"/>
+    <use href="#marca" fill="url(#turquoiseShade)" opacity="0.65"/>
+  </g>
+</svg>

@@ -45,7 +45,7 @@ const newsreader = Newsreader({
 });
 
 export const metadata: Metadata = {
-  title: "Anacleto",
+  title: "iConcejo",
   description: "Plataforma privada para asistencia municipal y administrativa",
   icons: {
     icon: "/brand/logo-principal.svg",

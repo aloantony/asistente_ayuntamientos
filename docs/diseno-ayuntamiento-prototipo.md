@@ -309,7 +309,7 @@ Y no está sola. El diseño tiene **trece pantallas de primer nivel**, no tres:
 | `isNecesidades` | Necesidades |
 | `isMapa` | Mapa |
 | `isProyectos` | Proyectos |
-| `isAnacleto` | Anacleto |
+| `isiConcejo` | iConcejo |
 | `isCuenta` | Mi cuenta |
 | `isGroupView` | Vista de grupo (dentro de Instalaciones) |
 

@@ -93,7 +93,7 @@ class AgentOfficeAgentSpec:
 OFFICE_AGENTS: dict[str, AgentOfficeAgentSpec] = {
     "front_desk": AgentOfficeAgentSpec(
         key="front_desk",
-        name="Anacleto Recepción",
+        name="iConcejo Recepción",
         department="front_desk",
         description=(
             "Recibe peticiones, las convierte en tareas supervisadas y las "

@@ -297,7 +297,7 @@ _TOOL_DEFINITIONS: list[dict] = [
     {
         "name": "create_agent_office_task",
         "description": (
-            "Crea una tarea supervisada en la oficina interna de Anacleto para "
+            "Crea una tarea supervisada en la oficina interna de iConcejo para "
             "trabajo diferido, multi-paso o que requiera aprobación humana. "
             "Úsala cuando el usuario pida encargar, preparar o dejar para "
             "revisión un trabajo que no deba ejecutarse como una consulta inmediata."

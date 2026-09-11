@@ -1,4 +1,4 @@
-"""Voice turn orchestration for Anacleto."""
+"""Voice turn orchestration for iConcejo."""
 
 from collections.abc import Generator
 

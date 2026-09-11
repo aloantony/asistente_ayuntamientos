@@ -4,7 +4,7 @@ import threading
 import pytest
 from app.agent_office import service as agent_office_service
 from app.assistant import tools as assistant_tools
-from app.assistant.prompts import ANACLETO_SYSTEM_PROMPT
+from app.assistant.prompts import ICONCEJO_SYSTEM_PROMPT
 from app.core.config import settings
 from app.municipalities.models import Municipality
 from app.ordinances import catalog as ordinance_catalog
@@ -704,10 +704,10 @@ def test_semantic_search_supports_autonomous_community_filter(db, monkeypatch):
 def test_prompt_separates_inventory_from_semantic_retrieval():
     assert (
         "La búsqueda semántica nunca demuestra que se haya enumerado todo el corpus"
-        in ANACLETO_SYSTEM_PROMPT
+        in ICONCEJO_SYSTEM_PROMPT
     )
-    assert "get_ordinance_corpus_manifest" in ANACLETO_SYSTEM_PROMPT
-    assert "complete_against_official_sources=false" in ANACLETO_SYSTEM_PROMPT
+    assert "get_ordinance_corpus_manifest" in ICONCEJO_SYSTEM_PROMPT
+    assert "complete_against_official_sources=false" in ICONCEJO_SYSTEM_PROMPT
 
 
 def test_agent_office_routes_inventory_as_local_ordinance_reads():

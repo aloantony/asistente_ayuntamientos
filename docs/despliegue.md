@@ -2,7 +2,7 @@
 
 Actualizado: 2026-08-31
 
-Procedimiento para publicar Anacleto en un dominio propio sobre un VPS con Docker.
+Procedimiento para publicar iConcejo en un dominio propio sobre un VPS con Docker.
 Decisiones de fondo en ADR-035 (topología y TLS), ADR-036 (endurecimiento) y
 ADR-037 (copias). Este documento es la receta; los ADR explican el por qué.
 

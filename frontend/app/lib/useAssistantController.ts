@@ -1343,7 +1343,7 @@ export function useAssistantController({
 
   async function transcribeAudio(audio: Blob) {
     const formData = new FormData();
-    formData.append("file", audio, "anacleto-audio.webm");
+    formData.append("file", audio, "iconcejo-audio.webm");
     const transcription = await adminRequest<AssistantAudioTranscription>(
       "/assistant/audio-transcriptions",
       getStoredToken(),

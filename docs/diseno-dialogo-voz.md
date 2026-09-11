@@ -1,4 +1,4 @@
-# Especificación de implementación — Diálogo por voz con Anacleto
+# Especificación de implementación — Diálogo por voz con iConcejo
 
 Actualizado: 2026-07-08 · Estado: **implementado** · Ejecutor: agente Codex · Aprobación del alcance: Anthony
 
@@ -23,7 +23,7 @@ Orden de ejecución: PT-0 → PT-1 → PT-2. **PT-3 queda explícitamente fuera 
 
 ## 1. Contexto
 
-Requisito indispensable del alcalde (usuario primario, no técnico, en español): dialogar por voz con Anacleto en la web. Restricción de infraestructura: **sin autoalojado; pipeline de voz 100% nube gestionada.**
+Requisito indispensable del alcalde (usuario primario, no técnico, en español): dialogar por voz con iConcejo en la web. Restricción de infraestructura: **sin autoalojado; pipeline de voz 100% nube gestionada.**
 
 Ya existe en el código: grabación con `MediaRecorder` en `AssistantPanel.tsx`, transcripción en servidor `POST /assistant/audio-transcriptions` → `app/assistant/speech.py` (runtime NVIDIA NIM/Whisper, commit 79ecd0a), notas de voz en Telegram, y streaming SSE de respuestas (v2). Falta: síntesis de voz (TTS), auto-envío del transcript, estilo de respuesta oral y regularización de gobernanza (el egreso de audio a NVIDIA no está cubierto por ningún ADR y contradice ADR-012).
 

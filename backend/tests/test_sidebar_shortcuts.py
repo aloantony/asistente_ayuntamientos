@@ -101,7 +101,7 @@ def test_delete_sidebar_shortcuts_resets_preference_to_null(client, db, make_use
     [
         ["requirements", "requirements"],
         ["unknown_section"],
-        ["anacleto"],
+        ["iconcejo"],
         ["home"],
         ["municipality"],
         ["map"],

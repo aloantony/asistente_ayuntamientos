@@ -4,17 +4,17 @@ Actualizado: 2026-06-29.
 
 ## Alcance
 
-La oficina de agentes v1 añade una capa interna de tareas delegables para Anacleto. Obsidian queda fuera del diseño.
+La oficina de agentes v1 añade una capa interna de tareas delegables para iConcejo. Obsidian queda fuera del diseño.
 
 El objetivo es una cola auditable de trabajo: cada acción usa permisos del usuario, queda registrada y puede exigir aprobación humana.
 
-Anacleto sigue siendo el único interlocutor visible. Los departamentos de la oficina son capacidades internas para enrutar, aprobar y ejecutar trabajo; no deben presentarse como voces separadas ante el usuario.
+iConcejo sigue siendo el único interlocutor visible. Los departamentos de la oficina son capacidades internas para enrutar, aprobar y ejecutar trabajo; no deben presentarse como voces separadas ante el usuario.
 
 ## Capacidades internas v1
 
 | Departamento | Capacidad interna | Alcance |
 | --- | --- | --- |
-| `front_desk` | Anacleto Recepción | Recibir peticiones, convertirlas en tareas y derivarlas. |
+| `front_desk` | iConcejo Recepción | Recibir peticiones, convertirlas en tareas y derivarlas. |
 | `requirements` | Necesidades | Consultar, crear y actualizar necesidades como borradores supervisados. |
 | `ordinances` | Ordenanzas | Buscar normativa ya importada, aprobada y vectorizada. |
 | `documents` | Documental | Preparar planes de trabajo documental; lectura automática de documentos queda fuera de v1. |
@@ -65,7 +65,7 @@ La rutina v1 es `daily_briefing`. Puede crear una tarea aprobada de informe diar
 - Sin Obsidian.
 - Hermes Agent o el modelo no deciden permisos.
 - Las herramientas reales siguen en el backend propio.
-- El texto libre no debe activar rutas de producto por marcadores como “ordenanza”, “mapa” o “necesidad”; esa decisión pertenece al modelo de Anacleto dentro del motor conversacional o a una acción estructurada.
+- El texto libre no debe activar rutas de producto por marcadores como “ordenanza”, “mapa” o “necesidad”; esa decisión pertenece al modelo de iConcejo dentro del motor conversacional o a una acción estructurada.
 - El usuario solicitante es el contexto de ejecución RBAC.
 - Las acciones que modifican datos requieren aprobación humana por defecto.
 - Los documentos originales siguen fuera de llamadas a IA.

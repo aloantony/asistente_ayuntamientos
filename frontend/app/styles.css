@@ -1,7 +1,7 @@
 @import "leaflet/dist/leaflet.css";
 
 /*
- * Anacleto — hoja de estilos
+ * iConcejo — hoja de estilos
  * Paleta cálida con modo claro (crema) y oscuro (carbón), sobre tokens CSS.
  *
  * Los colores viven en variables (:root para claro, html.dark para oscuro);
@@ -3678,7 +3678,7 @@ html.dark .assistant-conversation-menu-button:focus-visible {
   text-transform: uppercase;
 }
 
-/* La estrella de Anacleto viaja sobre el acento, como en el resto del shell. */
+/* La estrella de iConcejo viaja sobre el acento, como en el resto del shell. */
 .assistant-message.assistant .assistant-message-avatar {
   border-color: transparent;
   color: var(--accent-contrast);
@@ -3702,7 +3702,7 @@ html.dark .assistant-conversation-menu-button:focus-visible {
   max-width: min(76%, 680px);
 }
 
-/* Burbujas con esquinas asimétricas (Anacleto): la asistente, panel con borde
+/* Burbujas con esquinas asimétricas (iConcejo): la asistente, panel con borde
  * sobre superficie; la del usuario, relleno suave alineado a la derecha. */
 .assistant-message-bubble {
   max-width: 100%;
@@ -6118,14 +6118,14 @@ html.dark .dashboard-ask input {
   font-size: 12.5px;
 }
 
-.dashboard-anacleto {
+.dashboard-iconcejo {
   border: 1px solid var(--accent);
   border-radius: 13px;
   background: var(--surface);
   overflow: hidden;
 }
 
-.dashboard-anacleto-head {
+.dashboard-iconcejo-head {
   display: flex;
   align-items: center;
   gap: 10px;
@@ -6136,18 +6136,18 @@ html.dark .dashboard-ask input {
   font-weight: 600;
 }
 
-.dashboard-anacleto-body {
+.dashboard-iconcejo-body {
   display: flex;
   flex-direction: column;
   gap: 12px;
   padding: 16px 18px;
 }
 
-.dashboard-anacleto-body .small-muted {
+.dashboard-iconcejo-body .small-muted {
   margin: 0;
 }
 
-.dashboard-anacleto-suggestions {
+.dashboard-iconcejo-suggestions {
   display: flex;
   flex-direction: column;
   gap: 8px;
@@ -6181,7 +6181,7 @@ html.dark .dashboard-ask input {
   background: var(--surface);
 }
 
-.dashboard-anacleto-cta {
+.dashboard-iconcejo-cta {
   display: inline-flex;
   align-items: center;
   gap: 7px;
@@ -6195,12 +6195,12 @@ html.dark .dashboard-ask input {
   text-decoration: none;
 }
 
-.dashboard-anacleto-cta:hover {
+.dashboard-iconcejo-cta:hover {
   color: var(--surface);
   background: var(--text);
 }
 
-.dashboard-anacleto-note {
+.dashboard-iconcejo-note {
   display: flex;
   align-items: center;
   gap: 6px;
@@ -6211,7 +6211,7 @@ html.dark .dashboard-ask input {
   font-size: 11.5px;
 }
 
-.dashboard-anacleto-note svg {
+.dashboard-iconcejo-note svg {
   flex: none;
 }
 
