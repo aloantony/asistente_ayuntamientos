@@ -34,7 +34,7 @@ describe("modelo de navegación municipal", () => {
   it("muestra la barra sólo en las rutas institucionales", () => {
     expect(shouldShowTopNav("/ayuntamiento")).toBe(true);
     expect(shouldShowTopNav("/sede")).toBe(true);
-    expect(shouldShowTopNav("/hoja-de-ruta")).toBe(true);
+    expect(shouldShowTopNav("/hoja-de-ruta")).toBe(false);
     expect(shouldShowTopNav("/")).toBe(false);
     expect(shouldShowTopNav("/asistente")).toBe(false);
     expect(shouldShowTopNav("/proyectos")).toBe(false);
@@ -56,6 +56,8 @@ describe("TopBar", () => {
     expect(screen.getByText("AYUNTAMIENTO")).toBeTruthy();
     // La sede ya tiene pantalla propia (ADR-042).
     expect(screen.getByText("SEDE ELECTRÓNICA")).toBeTruthy();
+    expect(screen.queryByText("PERSONAL")).toBeNull();
+    expect(screen.queryByText("HOJA DE RUTA")).toBeNull();
   });
 
   it("abre y cierra el desplegable de una sección con el teclado", () => {
@@ -106,12 +108,9 @@ describe("TopBar", () => {
   });
 
   it("marca la sección activa", () => {
-    render(
-      <TopBar activeSectionId="hoja-de-ruta" municipalityName="Fuentelcésped" />,
-    );
+    render(<TopBar activeSectionId="sede" municipalityName="Fuentelcésped" />);
 
-    // "Hoja de ruta" no tiene submenú: se renderiza como enlace marcado.
-    const link = screen.getByRole("link", { name: "HOJA DE RUTA" });
-    expect(link.getAttribute("aria-current")).toBe("page");
+    const trigger = screen.getByRole("button", { name: /SEDE ELECTRÓNICA/ });
+    expect(trigger.className).toContain("sectionButtonActive");
   });
 });

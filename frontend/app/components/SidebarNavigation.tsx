@@ -35,6 +35,21 @@ type SidebarNavigationProps = {
   user: User;
 };
 
+// Estas rutas ya tienen una entrada clara dentro de Ayuntamiento. Repetirlas
+// en la cabecera ocupa el ancho disponible y obliga a desplazar una navegación
+// que debe poder leerse de un vistazo. Se conservan en el catálogo completo:
+// esto sólo decide qué accesos rápidos merecen sitio en la cabecera.
+const TOWN_HALL_REDUNDANT_HEADER_ITEMS = new Set<SidebarNavItem["id"]>([
+  "fixed_map",
+  "ordinance_library",
+  "inventory",
+  "maintenance",
+  "municipal_ordinances",
+  "municipal_facilities",
+  "municipal_people",
+  "municipal_roadmap",
+]);
+
 export function SidebarNavigation({
   isCollapsed,
   isMenuOpen,
@@ -54,8 +69,18 @@ export function SidebarNavigation({
   const optionalItems = getAuthorizedOptionalItems(user);
   const personalItems = getVisiblePersonalSidebarItems(user);
   const utilityItems = getAuthorizedUtilityItems(user);
+  const headerFixedItems = fixedItems.filter(
+    (item) => !TOWN_HALL_REDUNDANT_HEADER_ITEMS.has(item.id),
+  );
+  const headerPersonalItems = personalItems.filter(
+    (item) => !TOWN_HALL_REDUNDANT_HEADER_ITEMS.has(item.id),
+  );
   const effectiveShortcutIds = getEffectiveSidebarShortcutIds(user);
-  const renderedItems = [...fixedItems, ...personalItems, ...utilityItems];
+  const renderedItems = [
+    ...headerFixedItems,
+    ...headerPersonalItems,
+    ...utilityItems,
+  ];
   const activeItemId = getActiveSidebarItemId(
     renderedItems,
     pathname,
@@ -140,18 +165,19 @@ export function SidebarNavigation({
       >
         <div className="app-nav-group">
           <span className="app-nav-section">Principal</span>
-          {fixedItems.map(renderLink)}
+          {headerFixedItems.map(renderLink)}
         </div>
 
         <div className="app-nav-group">
           <span className="app-nav-section">Mis accesos</span>
-          {personalItems.length > 0 ? (
-            personalItems.map(renderLink)
-          ) : (
+          {headerPersonalItems.length > 0
+            ? headerPersonalItems.map(renderLink)
+            : null}
+          {personalItems.length === 0 ? (
             <p className="app-nav-empty">
               Añade aquí las secciones que usas a diario.
             </p>
-          )}
+          ) : null}
           <button
             className="app-nav-link app-nav-catalog-button"
             onClick={() => openCatalog("browse")}

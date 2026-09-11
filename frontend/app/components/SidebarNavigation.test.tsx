@@ -116,13 +116,15 @@ describe("SidebarNavigation", () => {
       .getAllByRole("link")
       .map((link) => link.textContent?.replace("BETA", "").trim());
 
-    expect(linkLabels.slice(0, 4)).toEqual([
+    expect(linkLabels.slice(0, 3)).toEqual([
       "Anacleto",
       "Inicio",
       "Ayuntamiento",
-      "Mapa municipal",
     ]);
-    expect(linkLabels).toContain("Ordenanzas");
+    expect(linkLabels).not.toContain("Mapa municipal");
+    expect(linkLabels).not.toContain("Ordenanzas");
+    expect(linkLabels).not.toContain("Inventario");
+    expect(linkLabels).not.toContain("Mantenimiento");
     expect(linkLabels).toContain("Necesidades4");
     expect(linkLabels.at(-1)).toBe("Mi cuenta");
     expect(
@@ -142,7 +144,7 @@ describe("SidebarNavigation", () => {
     ).toBeTruthy();
   });
 
-  it("marks only the most specific rendered query shortcut as current", () => {
+  it("keeps Ayuntamiento current when a redundant municipal shortcut is hidden", () => {
     mocks.pathname = "/ayuntamiento";
     mocks.searchParams = new URLSearchParams("tab=administration");
     renderSidebar({
@@ -150,16 +152,15 @@ describe("SidebarNavigation", () => {
       sidebar_shortcut_ids: ["municipal_facilities"],
     });
 
+    expect(screen.queryByRole("link", { name: "Instalaciones" })).toBeNull();
     expect(
-      screen.getByRole("link", { name: "Instalaciones" }).getAttribute(
-        "aria-current",
-      ),
-    ).toBe("page");
+      screen.queryByText("Añade aquí las secciones que usas a diario."),
+    ).toBeNull();
     expect(
       screen.getByRole("link", { name: "Ayuntamiento" }).getAttribute(
         "aria-current",
       ),
-    ).toBeNull();
+    ).toBe("page");
   });
 
   it("opens the full catalog and exposes fixed and pinned states", () => {
@@ -173,6 +174,12 @@ describe("SidebarNavigation", () => {
     ).toBeTruthy();
     expect(screen.getAllByText("Fijado").length).toBeGreaterThan(0);
     expect(screen.getAllByText(/En Mis accesos/).length).toBeGreaterThan(0);
+    expect(screen.getByRole("link", { name: /Mapa municipal/ })).toBeTruthy();
+    expect(
+      screen
+        .getAllByRole("link", { name: /Ordenanzas/ })
+        .some((link) => link.getAttribute("href") === "/ordenanzas"),
+    ).toBe(true);
   });
 
   it("reorders with buttons and saves the full explicit list", async () => {

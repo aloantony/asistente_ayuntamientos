@@ -192,8 +192,9 @@
   }
 }
 
-/* Cuando el municipio no cabe en una fila, la barra se apila y la navegación
- * pasa a poder desplazarse en horizontal en lugar de desbordar la página. */
+/* Cuando el municipio no cabe en una fila, la barra se apila. Las dos entradas
+ * institucionales pueden partirse en varias líneas sin introducir un scroll
+ * horizontal dentro de la página. */
 @media (max-width: 1000px) {
   .row {
     grid-template-columns: 1fr;
@@ -210,8 +211,14 @@
     width: 100%;
     min-width: 0;
     max-width: 100%;
+    flex-wrap: wrap;
     justify-content: flex-start;
-    overflow-x: auto;
-    overscroll-behavior-inline: contain;
+  }
+}
+
+@media (max-width: 480px) {
+  .nav {
+    gap: 10px;
+    padding-inline: 12px;
   }
 }

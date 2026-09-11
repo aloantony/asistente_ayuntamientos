@@ -70,57 +70,10 @@ export const TOP_NAV_SECTIONS: TopNavSection[] = [
       { label: "Normativa", href: "/ordenanzas", enabled: true },
     ],
   },
-  {
-    id: "personal",
-    label: "PERSONAL",
-    href: "/ayuntamiento?tab=people",
-    enabled: true,
-    items: [
-      // Puestos del municipio de referencia. `?puesto=` abre la ficha del
-      // puesto cuyo rótulo coincide con el slug; si el ayuntamiento no tiene
-      // ese puesto en su plantilla, la pantalla muestra la plantilla completa
-      // en lugar de dejar un enlace roto.
-      {
-        label: "Secretario",
-        href: "/ayuntamiento?tab=people&puesto=secretario",
-        enabled: true,
-      },
-      {
-        label: "Arquitecto",
-        href: "/ayuntamiento?tab=people&puesto=arquitecto",
-        enabled: true,
-      },
-      {
-        label: "Administrativo",
-        href: "/ayuntamiento?tab=people&puesto=administrativo",
-        enabled: true,
-      },
-      {
-        label: "Técnico",
-        href: "/ayuntamiento?tab=people&puesto=tecnico",
-        enabled: true,
-      },
-      {
-        label: "Alguacil",
-        href: "/ayuntamiento?tab=people&puesto=alguacil",
-        enabled: true,
-      },
-    ],
-  },
-  {
-    id: "hoja-de-ruta",
-    label: "HOJA DE RUTA",
-    // Deja de ser una pestaña del ayuntamiento y pasa a pantalla propia: la
-    // hoja de ruta cruza tareas, proyectos y corporación, y no cabe dentro de
-    // la ficha del municipio.
-    href: "/hoja-de-ruta",
-    enabled: true,
-    items: [],
-  },
 ];
 
 /** Rutas donde se muestra la barra superior municipal. */
-export const TOP_NAV_ROUTES = ["/ayuntamiento", "/sede", "/hoja-de-ruta"];
+export const TOP_NAV_ROUTES = ["/ayuntamiento", "/sede"];
 
 export function shouldShowTopNav(pathname: string) {
   return TOP_NAV_ROUTES.some(
@@ -136,9 +89,6 @@ export function shouldShowTopNav(pathname: string) {
 export function activeTopNavSectionFor(pathname: string): string | null {
   if (pathname === "/sede" || pathname.startsWith("/sede/")) {
     return "sede";
-  }
-  if (pathname === "/hoja-de-ruta" || pathname.startsWith("/hoja-de-ruta/")) {
-    return "hoja-de-ruta";
   }
   if (pathname === "/ayuntamiento" || pathname.startsWith("/ayuntamiento/")) {
     return "ayuntamiento";

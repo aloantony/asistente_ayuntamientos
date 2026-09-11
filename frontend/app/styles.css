@@ -4931,13 +4931,7 @@ html.dark .assistant-conversation-menu-button:focus-visible {
   flex: 1;
   gap: 6px;
   min-width: 0;
-  overflow-x: auto;
-  overscroll-behavior-inline: contain;
-  scrollbar-width: none;
-}
-
-.app-nav::-webkit-scrollbar {
-  display: none;
+  overflow: hidden;
 }
 
 .app-nav-group {
@@ -5459,7 +5453,7 @@ html.dark .assistant-conversation-menu-button:focus-visible {
   gap: 7px;
 }
 
-@media (max-width: 900px) {
+@media (max-width: 1200px) {
   .app-header {
     grid-template-columns: minmax(0, 1fr) auto auto;
     gap: 10px;
