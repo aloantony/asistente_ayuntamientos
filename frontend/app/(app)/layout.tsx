@@ -211,7 +211,7 @@ export default function AppLayout({
       return;
     }
 
-    const isMobile = window.matchMedia("(max-width: 1200px)").matches;
+    const isMobile = window.matchMedia("(max-width: 1900px)").matches;
     const previousBodyOverflow = document.body.style.overflow;
     const backgroundElements = isMobile
       ? Array.from(
