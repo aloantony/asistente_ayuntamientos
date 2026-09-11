@@ -6,7 +6,7 @@ body:
     attributes:
       value: |
         El código es visible, pero usarlo requiere un acuerdo escrito previo
-        ([LICENSE](https://github.com/aloantony/asistente_ayuntamientos/blob/main/LICENSE)).
+        ([LICENSE](https://github.com/aloantony/iconcejo/blob/main/LICENSE)).
         Las licencias piloto para entidades locales se estudian caso por caso.
   - type: input
     id: entidad

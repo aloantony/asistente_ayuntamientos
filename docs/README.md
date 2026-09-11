@@ -28,7 +28,7 @@ es [`../README.en.md`](../README.en.md).
 | Documento | Qué contiene | Estado |
 |---|---|---|
 | [arquitectura.md](arquitectura.md) | Estado técnico actual: modelo de datos, control de acceso, módulos, colas y almacenamiento. | Vivo · 2026-09-04 |
-| [decisiones.md](decisiones.md) | Las 64 ADR del proyecto, numeradas hasta la ADR-065 y con su contexto. Es el fichero más grande de la carpeta y el que hay que leer antes de discutir un diseño. | Vivo |
+| [decisiones.md](decisiones.md) | Todas las ADR del proyecto, numeradas y con su contexto. Es el fichero más grande de la carpeta y el que hay que leer antes de discutir un diseño. | Vivo |
 | [diseno-multiagente.md](diseno-multiagente.md) | Especificación cerrada de la estructura multi-agente del asistente. | Especificación |
 | [investigacion-api-ia.md](investigacion-api-ia.md) | Informe que sustentó la elección de LLM y de voz. Material histórico: los precios y modelos han cambiado. | Histórico · 2026-06 |
 

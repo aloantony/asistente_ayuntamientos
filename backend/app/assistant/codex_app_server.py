@@ -722,8 +722,8 @@ class CodexSubscriptionRuntime:
                 "initialize",
                 {
                     "clientInfo": {
-                        "name": "asistente_ayuntamientos",
-                        "title": "Asistente Ayuntamientos",
+                        "name": "iconcejo",
+                        "title": "iConcejo",
                         "version": "0.1.0",
                     },
                     "capabilities": {"experimentalApi": True},

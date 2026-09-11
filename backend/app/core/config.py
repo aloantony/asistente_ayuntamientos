@@ -27,7 +27,7 @@ MINIMUM_SECRET_KEY_LENGTH = 32
 
 
 class Settings(BaseSettings):
-    app_name: str = "Asistente Ayuntamientos"
+    app_name: str = "iConcejo"
     app_version: str = "0.1.0"
     environment: str = "development"
     database_url: str = "postgresql+psycopg://app:app@postgres:5432/app"

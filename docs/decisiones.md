@@ -1487,3 +1487,50 @@ Conservan el nombre antiguo, y no es un descuido:
 El nombre heredado «Asistente Ayuntamientos» sobrevive como nombre del
 repositorio y en `app_name`. Unificarlo es una decisión pendiente, no parte de
 esta.
+
+## ADR-066: Un solo nombre, iConcejo (2026-09-11)
+
+Resuelve lo que ADR-065 dejó pendiente. El producto se llama **iConcejo** y nada
+más: `app_name`, el prompt del sistema, la licencia, la portada y el propio
+repositorio, renombrado de `asistente_ayuntamientos` a `iconcejo` antes de que
+existiera un solo enlace externo que mantener.
+
+Se descartó la alternativa de sostener dos marcas —una plataforma «MiConcejo» y
+un asistente «iConcejo» dentro de ella—. Se diferencian en una letra y son
+indistinguibles habladas: eso no es una jerarquía de marca, es una confusión
+institucionalizada. Además el supuesto era falso: `miconcejo.es` es una web de un
+socio del titular donde el piloto está alojado, no una marca de este producto.
+
+De ahí una corrección en la licencia: reclamaba «MiConcejo» entre las marcas del
+titular. No lo es, y afirmarlo en un documento legal era incorrecto. Queda solo
+«iConcejo».
+
+`app_name` no era decorativo: viaja como `User-Agent` en cada llamada a los
+proveedores de IA (`gateway.py`). Hasta ahora les decíamos que la aplicación se
+llamaba «Asistente Ayuntamientos».
+
+### El directorio local no se renombra
+
+El `docker-compose.yml` de desarrollo no fija `name:`, así que Compose toma el
+nombre del proyecto del directorio que lo contiene. Los volúmenes de desarrollo
+son hoy `asistente_ayuntamientos_postgres_data` y
+`asistente_ayuntamientos_document_storage`. **Renombrar la carpeta local crearía
+una base de datos vacía y dejaría huérfana la existente**, que es el mismo
+accidente que ADR-065 evita en producción, en versión desarrollo. El
+repositorio remoto se llama `iconcejo`; la carpeta de trabajo puede seguir
+llamándose como quiera. Un clon nuevo sí se llamará `iconcejo`, y por eso el
+arranque rápido del README dice `cd iconcejo`.
+
+### La ruta de los documentos tampoco se renombra
+
+`DOCUMENT_STORAGE_ROOT` vale `/var/lib/asistente_ayuntamientos/documents` y ahí
+se monta el volumen `document_storage` en los dos ficheros de Compose, en el
+`Dockerfile`, en CI y en las dos plantillas de entorno. Esa ruta es el punto de
+montaje de datos reales: cambiarla haría que el backend mirase en un directorio
+nuevo y vacío mientras los documentos siguen donde estaban. Se queda, y quien
+venga después no debe «terminar el renombrado» ahí.
+
+El nombre heredado «Asistente Ayuntamientos» sobrevive a propósito en dos
+documentos históricos —el informe de selección de LLM y la propia ADR-037, que lo
+cita como ejemplo de valor con espacios— porque describen un momento concreto y
+reescribirlos sería falsear el registro.

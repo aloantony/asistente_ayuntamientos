@@ -11,7 +11,7 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/aloantony/asistente_ayuntamientos/actions/workflows/ci.yml"><img src="https://github.com/aloantony/asistente_ayuntamientos/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
+  <a href="https://github.com/aloantony/iconcejo/actions/workflows/ci.yml"><img src="https://github.com/aloantony/iconcejo/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
   <img src="https://img.shields.io/badge/licencia-c%C3%B3digo%20visible-orange" alt="Licencia: código visible">
   <img src="https://img.shields.io/badge/Python-3.12-3776AB?logo=python&logoColor=white" alt="Python 3.12">
   <img src="https://img.shields.io/badge/Node-22-339933?logo=nodedotjs&logoColor=white" alt="Node 22">
@@ -61,7 +61,7 @@ La visión completa del producto está en
 | **Multi-tenant** | Sí, por organización, como frontera de seguridad implementada |
 | **API** | Sin versionar todavía: puede cambiar sin aviso entre commits |
 | **Tests** | 1.151 tests de backend (pytest) + 146 de frontend en 17 suites (vitest) |
-| **Decisiones** | 64 ADR registradas en [`docs/decisiones.md`](docs/decisiones.md) |
+| **Decisiones** | Registradas como ADR numeradas en [`docs/decisiones.md`](docs/decisiones.md) |
 | **Idiomas** | Interfaz en español; código y commits en inglés |
 
 Es un proyecto en evolución activa y de un solo autor. Si te planteas usarlo,
@@ -91,8 +91,8 @@ Necesitas **Docker** y **Docker Compose**. Nada más: PostgreSQL, Redis, el
 backend y el frontend se levantan en contenedores.
 
 ```bash
-git clone git@github.com:aloantony/asistente_ayuntamientos.git
-cd asistente_ayuntamientos
+git clone git@github.com:aloantony/iconcejo.git
+cd iconcejo
 cp .env.example .env
 ```
 
@@ -199,7 +199,7 @@ Empieza por el [índice de `docs/`](docs/README.md). Los cuatro que más se usan
 |---|---|
 | [`docs/vision-producto.md`](docs/vision-producto.md) | Qué quiere ser iConcejo y dónde están sus límites |
 | [`docs/arquitectura.md`](docs/arquitectura.md) | Estado técnico actual |
-| [`docs/decisiones.md`](docs/decisiones.md) | Las 64 ADR, con el contexto de cada decisión |
+| [`docs/decisiones.md`](docs/decisiones.md) | Todas las ADR, con el contexto de cada decisión |
 | [`docs/despliegue.md`](docs/despliegue.md) | Runbook de producción completo |
 
 `README.en.md` conserva la referencia operativa exhaustiva en inglés: cada

@@ -55,7 +55,7 @@ VOICE_MODE_PROMPT_BLOCK = """Modo voz:
 - Responde en 2 a 4 frases naturales de estilo oral, sin Markdown: nada de listas, tablas, encabezados ni bloques de código.
 - Si el resultado es extenso o estructurado, resume lo esencial de palabra y termina indicando que dejas el detalle escrito en pantalla."""
 
-ICONCEJO_SYSTEM_PROMPT = """Eres iConcejo, el asistente municipal de Asistente Ayuntamientos.
+ICONCEJO_SYSTEM_PROMPT = """Eres iConcejo, el asistente municipal.
 
 Identidad y estilo:
 - Responde siempre en español, con naturalidad, precisión y sin plantillas fijas.
