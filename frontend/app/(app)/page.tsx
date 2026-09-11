@@ -153,24 +153,6 @@ function StatIcon({ name }: { name: StatIconName }) {
   }
 }
 
-function ShieldIcon() {
-  return (
-    <svg
-      aria-hidden="true"
-      fill="none"
-      height="13"
-      stroke="currentColor"
-      strokeLinecap="round"
-      strokeLinejoin="round"
-      strokeWidth="1.7"
-      viewBox="0 0 24 24"
-      width="13"
-    >
-      <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10Z" />
-      <path d="m9 12 2 2 4-4" />
-    </svg>
-  );
-}
 
 type StatCard = {
   key: string;
@@ -448,40 +430,77 @@ export default function HomePage() {
 
   const greeting = greetingForHour(now.getHours());
   const firstName = firstNameOf(user.full_name);
+  const scopeLabel = municipalOrganization?.municipality?.name
+    ? `Municipio: ${municipalOrganization.municipality.name}`
+    : (user.organizations?.length ?? 0) > 1
+      ? "Tus organizaciones"
+      : "Espacio de trabajo";
+  const primaryStats = stats.filter((stat) =>
+    ["projects", "requirements", "maintenance", "assets"].includes(stat.key),
+  );
+  const secondaryStats = stats.filter((stat) =>
+    ["municipalities", "ordinances"].includes(stat.key),
+  );
 
   return (
     <div className="dashboard">
       <header className="dashboard-head">
-        <h1>
-          {greeting}
-          {firstName ? `, ${firstName}` : ""}
-        </h1>
-        <p className="dashboard-date">{dateLabel}</p>
+        <div>
+          <p className="eyebrow">Espacio de trabajo</p>
+          <h1>
+            {greeting}
+            {firstName ? `, ${firstName}` : ""}
+          </h1>
+          <p className="dashboard-date">{dateLabel}</p>
+        </div>
+        <span className="dashboard-scope">{scopeLabel}</span>
       </header>
 
       {error ? <p className="error-message">{error}</p> : null}
 
       {canUseAssistant ? (
-        <form className="dashboard-ask" onSubmit={handleAsk}>
-          <span className="dashboard-ask-icon" aria-hidden="true">
-            <StarIcon />
-          </span>
-          <input
-            aria-label="Preguntar a Anacleto"
-            onChange={(event) => setAskText(event.target.value)}
-            placeholder="Cuéntale a Anacleto qué quieres mejorar o implementar…"
-            value={askText}
-          />
-          <button className="accent-button" type="submit">
-            Preguntar
-            <ArrowIcon />
-          </button>
-        </form>
+        <section className="dashboard-assistant" aria-labelledby="dashboard-assistant-title">
+          <div className="dashboard-assistant-heading">
+            <span className="dashboard-assistant-mark" aria-hidden="true">
+              <StarIcon />
+            </span>
+            <div>
+              <p className="eyebrow">Asistente municipal</p>
+              <h2 id="dashboard-assistant-title">¿En qué te ayuda Anacleto?</h2>
+              <p>Escribe una tarea y abriré una conversación con el contexto preparado.</p>
+            </div>
+          </div>
+          <form className="dashboard-ask" onSubmit={handleAsk}>
+            <input
+              aria-label="Preguntar a Anacleto"
+              onChange={(event) => setAskText(event.target.value)}
+              placeholder="Ej.: redacta una necesidad a partir de estas notas…"
+              value={askText}
+            />
+            <button className="accent-button" type="submit">
+              Abrir en Anacleto
+              <ArrowIcon />
+            </button>
+          </form>
+          <div className="dashboard-assistant-suggestions" aria-label="Sugerencias">
+            {ANACLETO_SUGGESTIONS.map((suggestion) => (
+              <button
+                className="dashboard-suggestion"
+                key={suggestion}
+                onClick={() => askAnacleto(suggestion)}
+                type="button"
+              >
+                <span aria-hidden="true">→</span>
+                <span>{suggestion}</span>
+              </button>
+            ))}
+          </div>
+        </section>
       ) : null}
 
-      {stats.length > 0 ? (
+      {primaryStats.length > 0 ? (
         <div className="dashboard-stats">
-          {stats.map((stat) => (
+          {primaryStats.map((stat) => (
             <Link className="stat-card" href={stat.href} key={stat.key}>
               <div className="stat-card-top">
                 <span className="stat-label">{stat.label}</span>
@@ -493,6 +512,21 @@ export default function HomePage() {
                 {isLoading ? "…" : (stat.value ?? "—")}
               </span>
               {stat.hint ? <span className="stat-hint">{stat.hint}</span> : null}
+            </Link>
+          ))}
+        </div>
+      ) : null}
+
+      {secondaryStats.length > 0 ? (
+        <div className="dashboard-secondary-links" aria-label="Consultas secundarias">
+          {secondaryStats.map((stat) => (
+            <Link className="dashboard-secondary-link" href={stat.href} key={stat.key}>
+              <StatIcon name={stat.icon} />
+              <span>
+                <strong>{stat.label}</strong>
+                <small>Consultar datos</small>
+              </span>
+              <ArrowIcon />
             </Link>
           ))}
         </div>
@@ -513,7 +547,10 @@ export default function HomePage() {
             <ul className="dashboard-recent-list">
               {recentProjects.map((project) => (
                 <li key={project.id}>
-                  <Link href="/proyectos">
+                  <Link
+                    href={`/proyectos?id=${project.id}`}
+                    aria-label={`Continuar con ${project.name}`}
+                  >
                     <span className="dashboard-recent-name">
                       {project.name}
                     </span>
@@ -533,40 +570,7 @@ export default function HomePage() {
         </section>
         ) : null}
 
-        <aside className="dashboard-anacleto">
-          <div className="dashboard-anacleto-head">
-            <StarIcon />
-            <span>Anacleto</span>
-          </div>
-          <div className="dashboard-anacleto-body">
-            {canUseAssistant ? (
-              <>
-                <p className="small-muted">Sugerencias para empezar:</p>
-                <div className="dashboard-anacleto-suggestions">
-                  {ANACLETO_SUGGESTIONS.map((suggestion) => (
-                    <button
-                      className="dashboard-suggestion"
-                      key={suggestion}
-                      onClick={() => askAnacleto(suggestion)}
-                      type="button"
-                    >
-                      <span aria-hidden="true">→</span>
-                      <span>{suggestion}</span>
-                    </button>
-                  ))}
-                </div>
-              </>
-            ) : (
-              <p className="field-helper">
-                No tienes acceso al asistente en esta cuenta.
-              </p>
-            )}
-            <p className="dashboard-anacleto-note">
-              <ShieldIcon />
-              Supervisado por humanos · datos pseudonimizados
-            </p>
-          </div>
-        </aside>
+
       </div>
     </div>
   );

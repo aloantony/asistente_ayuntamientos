@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useState } from "react";
+import { useCallback, useRef, useState } from "react";
 import type {
   TownHall,
   TownHallBlockPlacement,
@@ -73,6 +73,10 @@ export function useTownHallController({
   const [isLoadingTownHall, setIsLoadingTownHall] = useState(false);
   const [townHallError, setTownHallError] = useState("");
   const [isSavingTownHall, setIsSavingTownHall] = useState(false);
+  const [saveStatus, setSaveStatus] = useState<
+    "idle" | "saving" | "saved" | "error" | "refresh-error"
+  >("idle");
+  const lastFailedMutationRef = useRef<(() => Promise<boolean>) | null>(null);
   // Se incrementa al sustituir el escudo para invalidar la caché del <img>.
   const [shieldVersion, setShieldVersion] = useState(0);
   const [weather, setWeather] = useState<TownHallWeather | null>(null);
@@ -84,6 +88,8 @@ export function useTownHallController({
   const loadTownHall = useCallback(async () => {
     setIsLoadingTownHall(true);
     setTownHallError("");
+    setSaveStatus("idle");
+    lastFailedMutationRef.current = null;
 
     try {
       // El árbol nuevo puede ser de otra organización: lo cargado deja de valer.
@@ -104,15 +110,35 @@ export function useTownHallController({
   // editor, y releer evita divergencias entre cliente y servidor.
   async function runMutation(mutation: () => Promise<unknown>, fallback: string) {
     setIsSavingTownHall(true);
+    setSaveStatus("saving");
     setTownHallError("");
 
     try {
-      await mutation();
-      setTownHall(await fetchTownHall(organizationId));
+      try {
+        await mutation();
+      } catch (requestError) {
+        handleRequestError(requestError, setTownHallError, fallback);
+        lastFailedMutationRef.current = () => runMutation(mutation, fallback);
+        setSaveStatus("error");
+        return false;
+      }
+
+      try {
+        setTownHall(await fetchTownHall(organizationId));
+      } catch (requestError) {
+        handleRequestError(
+          requestError,
+          setTownHallError,
+          "El cambio se guardó, pero no se pudo actualizar la vista. Recarga la página.",
+        );
+        lastFailedMutationRef.current = null;
+        setSaveStatus("refresh-error");
+        return true;
+      }
+
+      lastFailedMutationRef.current = null;
+      setSaveStatus("saved");
       return true;
-    } catch (requestError) {
-      handleRequestError(requestError, setTownHallError, fallback);
-      return false;
     } finally {
       setIsSavingTownHall(false);
     }
@@ -229,16 +255,37 @@ export function useTownHallController({
     fallback: string,
   ) {
     setIsSavingTownHall(true);
+    setSaveStatus("saving");
     setTownHallError("");
 
     try {
-      await mutation();
-      const reloaded = await fetchTownHallContent(blockId);
-      setContents((current) => ({ ...current, [blockId]: reloaded }));
+      try {
+        await mutation();
+      } catch (requestError) {
+        handleRequestError(requestError, setTownHallError, fallback);
+        lastFailedMutationRef.current = () =>
+          runContentMutation(blockId, mutation, fallback);
+        setSaveStatus("error");
+        return false;
+      }
+
+      try {
+        const reloaded = await fetchTownHallContent(blockId);
+        setContents((current) => ({ ...current, [blockId]: reloaded }));
+      } catch (requestError) {
+        handleRequestError(
+          requestError,
+          setTownHallError,
+          "El cambio se guardó, pero no se pudo actualizar la vista. Recarga la página.",
+        );
+        lastFailedMutationRef.current = null;
+        setSaveStatus("refresh-error");
+        return true;
+      }
+
+      lastFailedMutationRef.current = null;
+      setSaveStatus("saved");
       return true;
-    } catch (requestError) {
-      handleRequestError(requestError, setTownHallError, fallback);
-      return false;
     } finally {
       setIsSavingTownHall(false);
     }
@@ -346,10 +393,14 @@ export function useTownHallController({
     }
 
     setTownHall({ ...previous, nav });
+    setIsSavingTownHall(true);
+    setSaveStatus("saving");
     setTownHallError("");
 
     try {
       await reorderTownHallBlocks(toPlacements(nav), organizationId);
+      lastFailedMutationRef.current = null;
+      setSaveStatus("saved");
       return true;
     } catch (requestError) {
       setTownHall(previous);
@@ -358,14 +409,23 @@ export function useTownHallController({
         setTownHallError,
         "No se pudo reordenar el menú.",
       );
+      lastFailedMutationRef.current = () => reorderNav(nav);
+      setSaveStatus("error");
       return false;
+    } finally {
+      setIsSavingTownHall(false);
     }
+  }
+
+  function retryLastMutation() {
+    return lastFailedMutationRef.current?.() ?? Promise.resolve(false);
   }
 
   return {
     townHall,
     isLoadingTownHall,
     isSavingTownHall,
+    saveStatus,
     townHallError,
     shieldVersion,
     weather,
@@ -390,5 +450,6 @@ export function useTownHallController({
     renameBlock,
     archiveBlock,
     reorderNav,
+    retryLastMutation,
   };
 }

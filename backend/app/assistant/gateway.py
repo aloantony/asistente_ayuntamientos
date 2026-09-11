@@ -91,12 +91,19 @@ class AIGateway:
 
     @property
     def enabled(self) -> bool:
+        if settings.assistant_runtime == "groq":
+            return bool(settings.groq_api_key)
         if settings.assistant_runtime == "anthropic":
             return bool(settings.anthropic_api_key)
         if settings.assistant_runtime == "hermes_agent":
             return hermes_agent_enabled()
         if settings.assistant_runtime == "openai_responses":
             return bool(settings.openai_api_key)
+        if settings.assistant_runtime == "groq_responses":
+            return bool(
+                settings.groq_api_key
+                and settings.groq_zero_data_retention_confirmed
+            )
         if settings.assistant_runtime == "codex_subscription":
             if (
                 settings.environment != "development"
@@ -109,10 +116,14 @@ class AIGateway:
 
     @property
     def model(self) -> str:
+        if settings.assistant_runtime == "groq":
+            return settings.groq_model
         if settings.assistant_runtime == "hermes_agent":
             return settings.hermes_agent_model
         if settings.assistant_runtime == "openai_responses":
             return settings.openai_responses_model
+        if settings.assistant_runtime == "groq_responses":
+            return settings.groq_responses_model
         if settings.assistant_runtime == "codex_subscription":
             return settings.codex_subscription_model or "codex-subscription-default"
         return settings.assistant_model
@@ -178,6 +189,11 @@ class AIGateway:
         timeout_seconds: float | None = None,
         safety_identifier: str | None = None,
     ) -> AICompletion:
+        if settings.assistant_runtime == "groq":
+            from app.assistant.groq import complete_groq
+
+            return complete_groq(system=system, messages=messages, tools=tools,
+                                 timeout=_bounded_gateway_timeout(timeout_seconds))
         if settings.assistant_runtime == "anthropic":
             return self._complete_anthropic(
                 system=system,
@@ -192,7 +208,7 @@ class AIGateway:
                 tools=tools,
                 timeout_seconds=timeout_seconds,
             )
-        if settings.assistant_runtime == "openai_responses":
+        if settings.assistant_runtime in {"openai_responses", "groq_responses"}:
             return self._complete_openai_responses(
                 system=system,
                 messages=messages,
@@ -219,6 +235,13 @@ class AIGateway:
         timeout_seconds: float | None = None,
         safety_identifier: str | None = None,
     ) -> Generator[AITextDelta, None, AICompletion]:
+        if settings.assistant_runtime == "groq":
+            from app.assistant.groq import complete_groq_stream
+
+            return (yield from complete_groq_stream(
+                system=system, messages=messages, tools=tools,
+                timeout=_bounded_gateway_timeout(timeout_seconds),
+            ))
         if settings.assistant_runtime == "anthropic":
             completion = yield from self._complete_stream_anthropic(
                 system=system,
@@ -235,7 +258,7 @@ class AIGateway:
                 timeout_seconds=timeout_seconds,
             )
             return completion
-        if settings.assistant_runtime == "openai_responses":
+        if settings.assistant_runtime in {"openai_responses", "groq_responses"}:
             completion = yield from self._complete_stream_openai_responses(
                 system=system,
                 messages=messages,
@@ -584,9 +607,16 @@ def _raise_codex_subscription_gateway_error(error: Exception) -> None:
         logger.error("Assistant API timeout: runtime=codex_subscription")
         raise AssistantTimeoutError("Assistant request timed out") from error
     if isinstance(error, CodexSubscriptionError):
+        failure_site = "unknown"
+        traceback = error.__traceback__
+        while traceback is not None:
+            code = traceback.tb_frame.f_code
+            failure_site = f"{code.co_name}:{traceback.tb_lineno}"
+            traceback = traceback.tb_next
         logger.error(
-            "Assistant runtime failed: runtime=codex_subscription error_type=%s",
+            "Assistant runtime failed: runtime=codex_subscription error_type=%s failure_site=%s",
             type(error).__name__,
+            failure_site,
         )
         raise AssistantUnavailableError("Assistant runtime failed") from error
     raise error
@@ -643,8 +673,8 @@ def complete_openai_responses(
     timeout: float,
     safety_identifier: str | None,
 ) -> AICompletion:
-    if not settings.openai_api_key:
-        raise AssistantUnavailableError("OpenAI Responses is not configured")
+    if not _responses_api_key():
+        raise AssistantUnavailableError("Responses runtime is not configured")
 
     payload = _openai_responses_payload(
         system=system,
@@ -707,8 +737,8 @@ def complete_openai_responses_stream(
     timeout: float,
     safety_identifier: str | None,
 ) -> Generator[AITextDelta, None, AICompletion]:
-    if not settings.openai_api_key:
-        raise AssistantUnavailableError("OpenAI Responses is not configured")
+    if not _responses_api_key():
+        raise AssistantUnavailableError("Responses runtime is not configured")
 
     payload = _openai_responses_payload(
         system=system,
@@ -804,37 +834,72 @@ def _openai_responses_payload(
     safety_identifier: str | None,
 ) -> dict[str, Any]:
     payload: dict[str, Any] = {
-        "model": settings.openai_responses_model,
+        "model": _responses_model(),
         "instructions": system,
         "input": _to_openai_responses_input(messages),
-        "max_output_tokens": settings.openai_responses_max_output_tokens,
-        "store": False,
-        "include": ["reasoning.encrypted_content"],
+        "max_output_tokens": _responses_max_output_tokens(),
         "reasoning": {
-            "effort": settings.openai_responses_reasoning_effort,
+            "effort": _responses_reasoning_effort(),
         },
         "parallel_tool_calls": True,
-        "truncation": "auto",
     }
+    if settings.assistant_runtime == "openai_responses":
+        payload.update(
+            {
+                "store": False,
+                "include": ["reasoning.encrypted_content"],
+                "truncation": "auto",
+            }
+        )
     response_tools = _to_openai_responses_tools(tools)
     if response_tools:
         payload["tools"] = response_tools
         payload["tool_choice"] = "auto"
-    if safety_identifier:
+    if safety_identifier and settings.assistant_runtime == "openai_responses":
         if len(safety_identifier) > 64:
             raise ValueError("safety identifier exceeds 64 characters")
         payload["safety_identifier"] = safety_identifier
     return payload
 
 
+def _responses_api_key() -> str | None:
+    if settings.assistant_runtime == "groq_responses":
+        return settings.groq_api_key
+    return settings.openai_api_key
+
+
+def _responses_base_url() -> str:
+    if settings.assistant_runtime == "groq_responses":
+        return settings.groq_responses_base_url
+    return settings.openai_responses_base_url
+
+
+def _responses_model() -> str:
+    if settings.assistant_runtime == "groq_responses":
+        return settings.groq_responses_model
+    return settings.openai_responses_model
+
+
+def _responses_reasoning_effort() -> str:
+    if settings.assistant_runtime == "groq_responses":
+        return settings.groq_responses_reasoning_effort
+    return settings.openai_responses_reasoning_effort
+
+
+def _responses_max_output_tokens() -> int:
+    if settings.assistant_runtime == "groq_responses":
+        return settings.groq_responses_max_output_tokens
+    return settings.openai_responses_max_output_tokens
+
+
 def _openai_responses_url() -> str:
-    return f"{settings.openai_responses_base_url.rstrip('/')}/responses"
+    return f"{_responses_base_url().rstrip('/')}/responses"
 
 
 def _openai_responses_headers(*, accept: str) -> dict[str, str]:
     return {
         "Accept": accept,
-        "Authorization": f"Bearer {settings.openai_api_key}",
+        "Authorization": f"Bearer {_responses_api_key()}",
         "Content-Type": "application/json",
         "User-Agent": f"{settings.app_name}/{settings.app_version}",
     }
@@ -931,8 +996,9 @@ def _set_openai_response_read_timeout(response, timeout: float) -> None:
 
 def _log_openai_responses_completion(completion: AICompletion) -> None:
     logger.info(
-        "Assistant completion: runtime=openai_responses model=%s "
+        "Assistant completion: runtime=%s model=%s "
         "stop_reason=%s input_tokens=%s output_tokens=%s",
+        settings.assistant_runtime,
         completion.model,
         completion.stop_reason,
         completion.usage.input_tokens,
@@ -1312,7 +1378,7 @@ def _to_openai_responses_input(messages: list[dict]) -> list[dict]:
             converted.extend(provider_state)
         elif isinstance(content, str):
             input_message = {"role": role, "content": content}
-            if role == "assistant":
+            if role == "assistant" and settings.assistant_runtime == "openai_responses":
                 # Persisted assistant messages are completed replies. GPT-5.6
                 # uses this label to avoid treating tool preambles as answers.
                 input_message["phase"] = "final_answer"
@@ -1360,13 +1426,15 @@ def _assistant_blocks_to_openai_responses_items(content: list) -> list[dict]:
 
     items: list[dict] = []
     if text_parts:
-        items.append(
-            {
-                "role": "assistant",
-                "content": "\n\n".join(text_parts),
-                "phase": "commentary" if function_calls else "final_answer",
-            }
-        )
+        message_item = {
+            "role": "assistant",
+            "content": "\n\n".join(text_parts),
+        }
+        if settings.assistant_runtime == "openai_responses":
+            message_item["phase"] = (
+                "commentary" if function_calls else "final_answer"
+            )
+        items.append(message_item)
     items.extend(function_calls)
     return items
 

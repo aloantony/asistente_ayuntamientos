@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import { useSearchParams } from "next/navigation";
 import { ProjectsPanel } from "../../components/ProjectsPanel";
 import type {
   Group,
@@ -18,6 +19,11 @@ import { useProjectsController } from "../../lib/useProjectsController";
 
 export default function ProyectosPage() {
   const { user, getStoredToken, handleRequestError } = useSession();
+  const searchParams = useSearchParams();
+  const requestedProjectId = Number(searchParams.get("id"));
+  const selectedProjectId = Number.isInteger(requestedProjectId) && requestedProjectId > 0
+    ? requestedProjectId
+    : null;
   const projectsController = useProjectsController({
     getStoredToken,
     handleRequestError,
@@ -109,6 +115,7 @@ export default function ProyectosPage() {
         organizations={
           organizations.length > 0 ? organizations : user.organizations ?? []
         }
+        selectedProjectId={selectedProjectId}
         isLoadingProjects={projectsController.isLoadingProjects}
         projectError={projectsController.projectError}
         newProjectName={projectsController.newProjectName}

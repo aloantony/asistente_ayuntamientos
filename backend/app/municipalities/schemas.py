@@ -18,6 +18,7 @@ OPTIONAL_TEXT_FIELDS = (
 
 
 class MunicipalitySummary(BaseModel):
+    ine_code: str | None = None
     id: int
     name: str
     province: str

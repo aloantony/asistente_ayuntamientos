@@ -51,6 +51,7 @@ import type {
 } from "./types";
 import { userHasPermission } from "./types";
 import styles from "./AssetInventory.module.css";
+import { AssetDetailPanel } from "./AssetDetailPanel";
 
 const PAGE_SIZE = 40;
 
@@ -322,9 +323,11 @@ function inventoryErrorMessage(error: unknown, fallback: string) {
 export function AssetInventory({
   user,
   initialOrganizationId,
+  initialAssetId,
 }: {
   user: User;
   initialOrganizationId?: number | null;
+  initialAssetId?: number | null;
 }) {
   const { getStoredToken, handleRequestError } = useSession();
   const organizations = useMemo(
@@ -1460,6 +1463,12 @@ export function AssetInventory({
         </section>
       ) : null}
 
+      {initialAssetId && organizationId === initialOrganizationId ? (
+        <AssetDetailPanel key={`${user.id}:${organizationId}:${initialAssetId}:${reloadVersion}`}
+          assetId={initialAssetId} organizationId={organizationId} canViewMap={canViewMap}
+          onEdit={canEdit ? openAssetEdit : undefined} />
+      ) : null}
+
       {assetEditor ? (
         <section className={styles.editor} ref={assetEditorRef}>
           <div className={styles.editorHeading}>
@@ -1918,7 +1927,7 @@ export function AssetInventory({
                   {assets.map((asset) => (
                     <tr key={asset.id}>
                       <td data-label="Elemento">
-                        <strong>{asset.name}</strong>
+                        <Link href={`/inventario?organization_id=${organizationId}&asset_id=${asset.id}`}><strong>{asset.name}</strong></Link>
                         <span>{asset.code || "Sin código"}</span>
                       </td>
                       <td data-label="Clasificación">

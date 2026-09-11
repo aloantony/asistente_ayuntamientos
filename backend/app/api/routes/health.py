@@ -53,3 +53,18 @@ def readiness_check(
         return {"status": "unavailable", **checks}
 
     return {"status": "ready", **checks}
+
+
+@router.get('/ready/worker')
+def worker_readiness_check(response: Response) -> dict[str, str]:
+    """Queue execution readiness, separate from HTTP and DB readiness."""
+    from app.core.jobs import worker_is_available
+    try:
+        available = worker_is_available()
+    except Exception:
+        logger.warning('Worker readiness check failed')
+        available = False
+    if not available:
+        response.status_code = status.HTTP_503_SERVICE_UNAVAILABLE
+    return {'status': 'ready' if available else 'unavailable',
+            'worker': 'ok' if available else 'unavailable'}

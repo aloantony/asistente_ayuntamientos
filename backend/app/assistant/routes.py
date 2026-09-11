@@ -133,10 +133,14 @@ def require_assistant_use(db: Session, current_user: User) -> None:
 
 
 def configured_assistant_model() -> str:
+    if settings.assistant_runtime == "groq":
+        return settings.groq_model
     if settings.assistant_runtime == "hermes_agent":
         return settings.hermes_agent_model
     if settings.assistant_runtime == "openai_responses":
         return settings.openai_responses_model
+    if settings.assistant_runtime == "groq_responses":
+        return settings.groq_responses_model
     if settings.assistant_runtime == "codex_subscription":
         return settings.codex_subscription_model or "codex-subscription-default"
     return settings.assistant_model

@@ -190,7 +190,7 @@ def get_visible_entity(
             subtitle=build_asset_subtitle(asset),
             status=asset.status,
             priority=None,
-            detail_path="/ayuntamiento",
+            detail_path=f"/inventario?organization_id={asset.organization_id}&asset_id={asset.id}",
         )
 
     raise HTTPException(

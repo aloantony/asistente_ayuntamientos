@@ -3,6 +3,8 @@ from typing import Annotated
 from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
 from sqlalchemy import or_, select
 from sqlalchemy.exc import IntegrityError
+
+from app.core.transactions import flush_or_conflict
 from sqlalchemy.orm import Session, selectinload
 
 from app.assets.access import (
@@ -380,6 +382,10 @@ def create_asset(
     db: Annotated[Session, Depends(get_db)],
     current_user: Annotated[User, Depends(get_current_user)],
 ) -> MunicipalAsset:
+    return create_asset_record(payload, db, current_user)
+
+
+def create_asset_record(payload: MunicipalAssetCreate, db: Session, current_user: User, *, commit: bool = True) -> MunicipalAsset:
     organization = get_asset_organization_for_write(db, payload.organization_id)
     require_asset_permission(
         db,
@@ -409,7 +415,10 @@ def create_asset(
         updated_by_id=current_user.id,
     )
     db.add(asset)
-    commit_or_conflict(db, "Asset code already exists")
+    if commit:
+        commit_or_conflict(db, "Asset code already exists")
+    else:
+        flush_or_conflict(db)
     return get_existing_asset(db, asset.id)
 
 
@@ -427,6 +436,17 @@ def get_asset(
 
 @router.patch("/{asset_id}", response_model=MunicipalAssetRead)
 def update_asset(
+    asset_id: int,
+    payload: MunicipalAssetUpdate,
+    db: Annotated[Session, Depends(get_db)],
+    current_user: Annotated[User, Depends(get_current_user)],
+) -> MunicipalAsset:
+    result = update_asset_record(asset_id, payload, db, current_user)
+    commit_or_conflict(db, "Municipal operation could not be saved")
+    return result
+
+
+def update_asset_record(
     asset_id: int,
     payload: MunicipalAssetUpdate,
     db: Annotated[Session, Depends(get_db)],
@@ -478,7 +498,7 @@ def update_asset(
     for field, value in updates.items():
         setattr(asset, field, value)
     asset.updated_by_id = current_user.id
-    commit_or_conflict(db, "Asset code already exists")
+    flush_or_conflict(db)
     return get_existing_asset(db, asset.id)
 
 

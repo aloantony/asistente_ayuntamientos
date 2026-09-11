@@ -1,7 +1,7 @@
 from datetime import datetime
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 GeoEntityType = Literal["requirement", "project", "asset"]
 GeoLocationRole = Literal["primary", "affected_area", "reference"]
@@ -40,8 +40,9 @@ class GeoLocationCreate(BaseModel):
     organization_id: int | None = None
     municipality_id: int | None = None
     label: str = Field(min_length=1, max_length=255)
-    latitude: float
-    longitude: float
+    latitude: float | None = Field(default=None, ge=-90, le=90, allow_inf_nan=False)
+    longitude: float | None = Field(default=None, ge=-180, le=180, allow_inf_nan=False)
+    geometry: dict | None = None
     address_text: str | None = Field(default=None, max_length=500)
     place_name: str | None = Field(default=None, max_length=255)
     cadastral_reference: str | None = Field(default=None, max_length=100)
@@ -50,6 +51,19 @@ class GeoLocationCreate(BaseModel):
     review_status: GeoReviewStatus = "proposed"
 
     model_config = ConfigDict(str_strip_whitespace=True)
+
+    @model_validator(mode="after")
+    def normalize_geometry(self):
+        from app.geo.geometry import validated_geometry
+        if self.geometry is not None:
+            _, self.geometry, self.latitude, self.longitude = validated_geometry(self.geometry)
+        elif self.latitude is None or self.longitude is None:
+            raise ValueError("A point needs latitude and longitude")
+        return self
+
+    @property
+    def geometry_type(self) -> str:
+        return {"Point": "point", "LineString": "line", "Polygon": "polygon"}.get((self.geometry or {}).get("type"), "point")
 
 
 class EntityLocationCreate(BaseModel):
@@ -84,3 +98,14 @@ class GeoMapItem(BaseModel):
     organization_name: str
     detail_path: str
     location: GeoLocationRead
+
+
+class MapRegistrationCreate(BaseModel):
+    request_key: str = Field(min_length=36, max_length=36, pattern=r"^[0-9a-fA-F-]{36}$")
+    entity_type: GeoEntityType
+    organization_id: int = Field(gt=0)
+    title: str = Field(min_length=1, max_length=255)
+    description: str | None = Field(default=None, max_length=10000)
+    asset_type_id: int | None = Field(default=None, gt=0)
+    location: GeoLocationCreate
+    model_config = ConfigDict(str_strip_whitespace=True, extra="forbid")

@@ -70,3 +70,16 @@ class EntityLocation(Base):
 
     location: Mapped[GeoLocation] = relationship("GeoLocation", back_populates="attachments")
     created_by: Mapped["User | None"] = relationship("User")
+
+
+class MapRegistration(Base):
+    """One atomic map creation per actor/request key, including lost responses."""
+    __tablename__ = "map_registrations"
+    __table_args__ = (UniqueConstraint("actor_id", "request_key", name="uq_map_registration_request"),)
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    actor_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
+    request_key: Mapped[str] = mapped_column(String(36), nullable=False)
+    payload_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    entity_type: Mapped[str] = mapped_column(String(30), nullable=False)
+    entity_id: Mapped[int] = mapped_column(Integer, nullable=False)

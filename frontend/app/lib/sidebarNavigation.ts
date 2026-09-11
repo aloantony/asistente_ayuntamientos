@@ -175,7 +175,7 @@ const FIXED_DEFINITIONS = [
   },
   {
     id: "fixed_map",
-    label: "Mapa",
+    label: "Mapa municipal",
     href: "/mapa",
     icon: "map",
     group: "Principal",
@@ -278,7 +278,7 @@ const OPTIONAL_DEFINITIONS = [
   },
   {
     id: "map_municipalities",
-    label: "Municipios y normativa",
+    label: "Explorar municipios",
     href: "/mapa?view=municipalities",
     icon: "map",
     group: "Mapa",

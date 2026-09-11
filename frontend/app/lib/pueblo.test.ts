@@ -26,13 +26,13 @@ describe("normalizarNombre", () => {
 
 describe("buscarPueblo", () => {
   it("encuentra el municipio por su código INE", () => {
-    expect(buscarPueblo({ name: "Otro nombre", ine_code: "09140" })?.nombre).toBe(
+    expect(buscarPueblo({ name: "Otro nombre", ine_code: "09137" })?.nombre).toBe(
       "Fuentelcésped",
     );
   });
 
   it("cae al nombre cuando no hay código, aunque venga sin acentuar", () => {
-    expect(buscarPueblo({ name: "fuentelcesped" })?.ine).toBe("09140");
+    expect(buscarPueblo({ name: "fuentelcesped" })?.ine).toBe("09137");
   });
 
   it("un municipio sin cartografía no devuelve nada", () => {
@@ -48,10 +48,20 @@ describe("buscarPueblo", () => {
 });
 
 describe("cargarCartografia", () => {
+  it("rechaza un plano de otro municipio y permite reintentar", async () => {
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce({ ok: true, json: async () => ({ ine: "09140" }) })
+      .mockResolvedValueOnce({ ok: true, json: async () => ({ ine: "09137" }) });
+    vi.stubGlobal("fetch", fetchMock);
+    await expect(cargarCartografia(PUEBLOS[0])).rejects.toThrow();
+    await expect(cargarCartografia(PUEBLOS[0])).resolves.toEqual({ ine: "09137" });
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
   it("descarga una sola vez aunque se pida dos veces", async () => {
     const fetchMock = vi
       .fn()
-      .mockResolvedValue({ ok: true, json: async () => ({ ine: "09140" }) });
+      .mockResolvedValue({ ok: true, json: async () => ({ ine: "09137" }) });
     vi.stubGlobal("fetch", fetchMock);
 
     const [primera, segunda] = await Promise.all([
@@ -67,14 +77,14 @@ describe("cargarCartografia", () => {
     const fetchMock = vi
       .fn()
       .mockResolvedValueOnce({ ok: false })
-      .mockResolvedValueOnce({ ok: true, json: async () => ({ ine: "09140" }) });
+      .mockResolvedValueOnce({ ok: true, json: async () => ({ ine: "09137" }) });
     vi.stubGlobal("fetch", fetchMock);
 
     await expect(cargarCartografia(PUEBLOS[0])).rejects.toThrow(
       /No se pudo cargar el mapa/,
     );
     await expect(cargarCartografia(PUEBLOS[0])).resolves.toEqual({
-      ine: "09140",
+      ine: "09137",
     });
     expect(fetchMock).toHaveBeenCalledTimes(2);
   });
@@ -179,5 +189,13 @@ describe("vialVisible", () => {
   it("una clase desconocida no se dibuja nunca", () => {
     expect(vialVisible("teleférico", "calle")).toBe(false);
     expect(vialVisible(undefined, "calle")).toBe(false);
+  });
+});
+
+
+describe("Identidad municipal del plano", () => {
+  it("no usa el nombre para ignorar un código INE de otro municipio", () => {
+    expect(buscarPueblo({ name: "Fuentelcésped", ine_code: "09140" })).toBeNull();
+    expect(buscarPueblo({ name: "Fuentelcésped", ine_code: "09137" })?.ine).toBe("09137");
   });
 });

@@ -202,6 +202,90 @@
   font-size: 0.82rem;
 }
 
+.editBar {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 12px 14px;
+  border: 1px solid var(--border);
+  border-radius: 11px;
+  background: var(--surface-muted);
+}
+
+.editBarCopy {
+  display: grid;
+  flex: 1;
+  min-width: 0;
+  gap: 2px;
+}
+
+.editBarCopy strong {
+  color: var(--text);
+  font-size: 0.84rem;
+  font-weight: 650;
+}
+
+.editBarCopy span {
+  color: var(--text-secondary);
+  font-size: 0.76rem;
+  line-height: 1.4;
+}
+
+.editStatus {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--success-fg);
+  font-size: 0.76rem;
+  font-weight: 650;
+}
+
+.editStatusError {
+  color: var(--danger-fg);
+}
+
+.editStatus button {
+  min-height: 32px;
+  padding: 5px 9px;
+  border: 1px solid currentColor;
+  border-radius: 7px;
+  color: inherit;
+  background: transparent;
+  cursor: pointer;
+  font: inherit;
+}
+
+.editToggle {
+  min-height: 38px;
+  flex: none;
+  padding: 8px 13px;
+  border: 1px solid var(--border-strong);
+  border-radius: 8px;
+  color: var(--text);
+  background: var(--surface-raised);
+  cursor: pointer;
+  font-family: inherit;
+  font-size: 0.78rem;
+  font-weight: 650;
+}
+
+.editToggle:hover:not(:disabled) {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.editToggle[aria-pressed="true"] {
+  border-color: var(--text);
+  color: var(--surface-raised);
+  background: var(--text);
+}
+
+.editToggle:disabled,
+.editStatus button:disabled {
+  cursor: wait;
+  opacity: 0.62;
+}
+
 .metricsGrid,
 .compactMetrics {
   display: grid;
@@ -1066,6 +1150,20 @@
 @media (max-width: 640px) {
   .workspace {
     gap: 13px;
+  }
+
+  .editBar {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .editStatus {
+    align-items: flex-start;
+    justify-content: space-between;
+  }
+
+  .editToggle {
+    width: 100%;
   }
 
   .masthead {

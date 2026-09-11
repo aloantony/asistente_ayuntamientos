@@ -29,12 +29,12 @@ const { MapaGeneral, buildLayers, itemKey, matchesSearch } = await import(
 const { _vaciarCacheCartografia } = await import("../../lib/pueblo");
 
 /** El municipio que hoy tiene plano preparado. */
-const FUENTELCESPED = { name: "Fuentelcésped", ine_code: "09140" };
+const FUENTELCESPED = { name: "Fuentelcésped", ine_code: "09137" };
 
 const CARTOGRAFIA = {
   municipio: "Fuentelcésped",
   provincia: "Burgos",
-  ine: "09140",
+  ine: "09137",
   centro: [-3.64, 41.59],
   limite: { type: "Polygon", coordinates: [[[-3.65, 41.58], [-3.63, 41.58], [-3.63, 41.6], [-3.65, 41.58]]] },
   edificios: { type: "FeatureCollection", features: [] },
@@ -195,6 +195,31 @@ describe("MapaGeneral", () => {
     );
     // Filtrar es local: el mapa ya está cargado entero.
     expect(fetchAllGeoMapItems).toHaveBeenCalledTimes(1);
+  });
+
+  it("distingue un filtro sin resultados y permite limpiarlo", async () => {
+    fetchAllGeoMapItems.mockResolvedValue([item()]);
+
+    render(
+      <MapaGeneral
+        canViewMap
+        municipality={FUENTELCESPED}
+        organizationId={1}
+      />,
+    );
+    const search = await screen.findByRole("searchbox", {
+      name: "Buscar en el mapa",
+    });
+
+    fireEvent.change(search, { target: { value: "cementerio" } });
+
+    await waitFor(() =>
+      expect(screen.getByText("Sin elementos con estos filtros.")).toBeTruthy(),
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Limpiar filtros" }));
+
+    expect((search as HTMLInputElement).value).toBe("");
+    expect(screen.getByText("1 de 1 elementos")).toBeTruthy();
   });
 
   it("ofrece reintentar cuando la carga falla", async () => {

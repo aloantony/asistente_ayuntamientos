@@ -1,14 +1,14 @@
 "use client";
 import type { MunicipalCollection } from "../../lib/municipalWorkspace";
 
-import { BookOpen, ClipboardList, CloudSun, Droplets, Users, Wrench } from "lucide-react";
+import { BookOpen, ClipboardList, Users, Wrench } from "lucide-react";
 import type { ReactNode } from "react";
 import styles from "../MunicipalWorkspace.module.css";
 import {
   type Ordinance,
   type Organization,
 } from "../types";
-import { NotConfigured, SectionHeading } from "./shared";
+import { SectionHeading } from "./shared";
 import type { WorkspaceTab } from "./types";
 
 export function InformacionMunicipio({
@@ -68,26 +68,6 @@ export function InformacionMunicipio({
               <small>Planificación municipal y trabajo pendiente</small>
             </span>
           </button>
-        </div>
-      </section>
-
-      <section>
-        <SectionHeading
-          description="El diseño contempla estas áreas, pero todavía no existe un modelo persistente que permita mostrarlas con garantías."
-          eyebrow="Siguiente capa de datos"
-          title="Pendiente de configuración"
-        />
-        <div className={styles.notConfiguredGrid}>
-          <NotConfigured
-            description="No existe una serie meteorológica municipal conectada y trazable."
-            icon={CloudSun}
-            title="Clima"
-          />
-          <NotConfigured
-            description="Analíticas, depósitos y red de abastecimiento requieren un módulo propio."
-            icon={Droplets}
-            title="Agua"
-          />
         </div>
       </section>
     </div>

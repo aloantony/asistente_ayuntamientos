@@ -48,11 +48,8 @@ from app.assistant.web_search import (
 )
 from app.core.config import settings
 from app.geo.access import (
-    get_visible_entity,
     has_any_map_view_permission,
-    has_map_view_permission,
 )
-from app.geo.models import EntityLocation, GeoLocation
 from app.organizations.access import (
     get_accessible_organizations_query,
     get_user_organization_ids,
@@ -215,7 +212,7 @@ _TOOL_DEFINITIONS: list[dict] = [
         "name": "get_map_items",
         "description": (
             "Consulta ubicaciones visibles del mapa municipal para necesidades "
-            "o proyectos. Úsala cuando el usuario pida ver algo en el mapa, "
+            "activos o proyectos. Úsala cuando el usuario pida ver algo en el mapa, "
             "pregunte dónde está un proyecto/necesidad o necesites preparar un "
             "enlace al mapa centrado en una ubicación. Devuelve coordenadas y "
             "una map_url interna para abrir /mapa con foco y zoom."
@@ -225,12 +222,12 @@ _TOOL_DEFINITIONS: list[dict] = [
             "properties": {
                 "entity_type": {
                     "type": "string",
-                    "enum": ["requirement", "project"],
+                    "enum": ["requirement", "project", "asset"],
                     "description": "Tipo de entidad a buscar (opcional)",
                 },
                 "entity_id": {
                     "type": "integer",
-                    "description": "ID concreto de la necesidad o proyecto (opcional)",
+                    "description": "ID concreto de la necesidad, activo o proyecto (opcional)",
                 },
                 "organization_id": {
                     "type": "integer",
@@ -1311,84 +1308,26 @@ def _build_map_url(
     return "/mapa?" + "&".join(params)
 
 
-def _get_map_items(
-    db: Session,
-    current_user: User,
-    tool_input: dict,
-    context: ToolContext,
-) -> dict:
-    if not has_any_map_view_permission(db, current_user):
-        raise HTTPException(status_code=403, detail="Permission required: map.view")
+def _get_map_items(db: Session, current_user: User, tool_input: dict, context: ToolContext) -> dict:
+    from app.geo.routes import list_map_items
 
-    limit = int(tool_input.get("limit") or 5)
+    limit = min(int(tool_input.get("limit") or 5), 10)
     if limit < 1:
         raise ValueError("limit debe ser mayor o igual que 1")
-    limit = min(limit, 10)
-
     entity_type = tool_input.get("entity_type")
-    if entity_type is not None and entity_type not in {"requirement", "project"}:
-        raise ValueError("entity_type debe ser 'requirement' o 'project'")
-    entity_id = tool_input.get("entity_id")
-    organization_id = tool_input.get("organization_id")
-
-    query = (
-        select(EntityLocation)
-        .join(EntityLocation.location)
-        .where(GeoLocation.review_status != "rejected")
-        .order_by(EntityLocation.id.desc())
-        .limit(100)
-    )
-    if entity_type is not None:
-        query = query.where(EntityLocation.entity_type == entity_type)
-    if entity_id is not None:
-        query = query.where(EntityLocation.entity_id == int(entity_id))
-    if organization_id is not None:
-        query = query.where(GeoLocation.organization_id == int(organization_id))
-
-    results: list[dict] = []
-    for attachment in db.scalars(query):
-        visible = get_visible_entity(
-            db,
-            current_user,
-            attachment.entity_type,
-            attachment.entity_id,
-        )
-        if visible is None:
-            continue
-        if organization_id is not None and visible.organization_id != int(organization_id):
-            continue
-        if not has_map_view_permission(db, current_user, visible.organization_id):
-            continue
-        location = attachment.location
-        results.append(
-            {
-                "entity_type": visible.entity_type,
-                "entity_id": attachment.entity_id,
-                "title": visible.title,
-                "subtitle": visible.subtitle,
-                "status": visible.status,
-                "organization_id": visible.organization_id,
-                "organization_name": visible.organization_name,
-                "detail_path": visible.detail_path,
-                "location": {
-                    "id": location.id,
-                    "label": location.label,
-                    "latitude": location.latitude,
-                    "longitude": location.longitude,
-                    "review_status": location.review_status,
-                },
-                "map_url": _build_map_url(
-                    entity_type=visible.entity_type,
-                    entity_id=attachment.entity_id,
-                    latitude=location.latitude,
-                    longitude=location.longitude,
-                    label=location.label,
-                ),
-            }
-        )
-        if len(results) >= limit:
-            break
-
+    if entity_type is not None and entity_type not in {"requirement", "project", "asset"}:
+        raise ValueError("entity_type debe ser requirement, project o asset")
+    items = list_map_items(db, current_user, entity_type=entity_type,
+                          entity_id=tool_input.get("entity_id"),
+                          organization_id=tool_input.get("organization_id"), limit=limit)
+    results = []
+    for item in items:
+        data = item.model_dump(mode="json", exclude={"location"})
+        data["location"] = item.location.model_dump(include={"id", "label", "latitude", "longitude", "review_status", "geometry_type"})
+        data["map_url"] = _build_map_url(entity_type=item.entity_type, entity_id=item.entity_id,
+                                         latitude=item.location.latitude, longitude=item.location.longitude,
+                                         label=item.location.label)
+        results.append(data)
     return {"limit": limit, "results": results}
 
 
@@ -3124,6 +3063,21 @@ def _validate_tool_policy(name: str, metadata: dict) -> None:
         return
     raise ValueError(f"Tool {name} must declare read_only as a boolean")
 
+
+# Municipal domains use the same confirmation and authorization machinery.
+from app.assistant.municipal_tools import MUNICIPAL_TOOLS
+
+for _municipal_tool in MUNICIPAL_TOOLS:
+    _name = _municipal_tool["name"]
+    _writes = "normalizer" in _municipal_tool
+    _TOOL_DEFINITIONS.append({"name": _name, "description": _municipal_tool["description"],
+                              "input_schema": _municipal_tool["schema"].model_json_schema()})
+    _EXECUTORS[_name] = _municipal_tool["executor"]
+    _TOOL_METADATA[_name] = {"label": _municipal_tool["label"], "domain": _municipal_tool["domain"],
+        "read_only": not _writes, "side_effect": "database_write" if _writes else "none",
+        "approval_policy": "explicit" if _writes else "never"}
+    if _writes:
+        _TOOL_INPUT_NORMALIZERS[_name] = _municipal_tool["normalizer"]
 
 TOOL_CATALOG = _build_tool_catalog()
 TOOL_DEFINITIONS = [spec.definition for spec in TOOL_CATALOG.values()]

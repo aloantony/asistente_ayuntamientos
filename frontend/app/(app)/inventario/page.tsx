@@ -16,8 +16,12 @@ export default function InventarioPage() {
     searchParams.get("organization_id"),
   );
 
+  const requestedAssetId = Number(searchParams.get("asset_id"));
+
   return (
     <AssetInventory
+      key={`${requestedOrganizationId}:${user.id}`}
+      initialAssetId={Number.isInteger(requestedAssetId) && requestedAssetId > 0 ? requestedAssetId : null}
       initialOrganizationId={
         Number.isInteger(requestedOrganizationId) && requestedOrganizationId > 0
           ? requestedOrganizationId

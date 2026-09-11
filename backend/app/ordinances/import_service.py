@@ -299,9 +299,8 @@ def run_import_job(job_id: int, db: Session | None = None) -> None:
             db.commit()
             return
 
-        # A valid seed/discovered candidate makes a partial discovery warning
-        # non-terminal; individual source failures remain on their import item.
-        job.error_message = None
+        # Preserve partial-discovery warnings even when some sources succeeded:
+        # a completed job does not imply every requested source was searched.
 
         item_ids = _create_items(db, job, candidates)
         for item_id in item_ids:
@@ -394,21 +393,23 @@ def _discover_candidates(
         for source in official_sources
         if source.domain.lower() == BOP_BURGOS_DOMAIN
     ]
-    if bop_burgos_sources:
-        return _discover_bop_burgos_candidates(
-            job,
-            bop_burgos_sources[0],
-            municipalities,
-        )
-    if not web_search_client.enabled:
-        return []
-
     candidates: list[SourceCandidate] = []
+    for source in bop_burgos_sources:
+        try:
+            candidates.extend(_discover_bop_burgos_candidates(job, source, municipalities))
+        except (ImportSourceError, ValueError, OSError):
+            job.error_message = "Descubrimiento parcial: falló el conector de Burgos."
+    other_sources = [source for source in official_sources if source not in bop_burgos_sources]
+    if not web_search_client.enabled:
+        if other_sources:
+            job.error_message = "Descubrimiento parcial: búsqueda web no disponible para las demás fuentes."
+        return candidates
+
     query_base = " ".join(
         part for part in [job.search_query, job.topic, job.subtopic, "ordenanza"] if part
     )
     for municipality in municipalities:
-        for source in official_sources:
+        for source in other_sources:
             query = f"{query_base} {municipality.name} site:{source.domain}"
             try:
                 results = web_search_client.search(
@@ -416,16 +417,16 @@ def _discover_candidates(
                     limit=settings.ordinance_import_search_limit,
                 )
             except WebSearchUnavailableError as error:
-                if not candidates:
-                    job.error_message = f"Proveedor de búsqueda no disponible: {error}"
+                prefix = "Descubrimiento parcial: " if candidates else ""
+                job.error_message = f"{prefix}Proveedor de búsqueda no disponible: {error}"
                 return candidates
             except ValueError as error:
-                if not candidates:
-                    job.error_message = f"Consulta de búsqueda no válida: {error}"
+                prefix = "Descubrimiento parcial: " if candidates else ""
+                job.error_message = f"{prefix}Consulta de búsqueda no válida: {error}"
                 return candidates
             for result in results:
                 url = str(result.get("url") or "").strip()
-                if url and _url_allowed(url, official_sources):
+                if url and _url_allowed(url, [source]):
                     candidates.append(
                         SourceCandidate(
                             url=url,
