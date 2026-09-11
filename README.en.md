@@ -10,7 +10,7 @@
 
 ## 1. Project overview
 
-Asistente Ayuntamientos is the FastAPI + Next.js codebase for iConcejo, an operational AI agent for municipal work.
+iConcejo is a FastAPI + Next.js platform for municipal work, built around an operational AI agent.
 
 The target product and its limits are defined in [docs/vision-producto.md](docs/vision-producto.md). The current codebase is transitional: its municipal modules and supervised assistant are useful foundations, but requirements intake is a capability of iConcejo rather than the product itself.
 

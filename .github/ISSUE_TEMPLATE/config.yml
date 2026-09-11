@@ -1,11 +1,11 @@
 blank_issues_enabled: false
 contact_links:
   - name: Fallo de seguridad
-    url: https://github.com/aloantony/asistente_ayuntamientos/security/advisories/new
+    url: https://github.com/aloantony/iconcejo/security/advisories/new
     about: No lo abras como incidencia pública. Avisa en privado por aquí; el alcance está en SECURITY.md.
   - name: Quiero usarlo en mi ayuntamiento
-    url: https://github.com/aloantony/asistente_ayuntamientos/blob/main/LICENSE
+    url: https://github.com/aloantony/iconcejo/blob/main/LICENSE
     about: El código es visible pero su uso requiere acuerdo previo. Abre una incidencia de tipo "Licencia de uso".
   - name: Documentación
-    url: https://github.com/aloantony/asistente_ayuntamientos/blob/main/docs/README.md
+    url: https://github.com/aloantony/iconcejo/blob/main/docs/README.md
     about: Antes de preguntar, mira el índice de la documentación y las 64 ADR.
