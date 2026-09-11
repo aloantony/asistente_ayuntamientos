@@ -153,3 +153,8 @@ class MunicipalTaskSummary(BaseModel):
     overdue: int
     unassigned: int
     reference_date: date
+
+
+class TaskLinkOptionRead(BaseModel):
+    id: int
+    name: str

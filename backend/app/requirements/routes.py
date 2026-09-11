@@ -98,6 +98,10 @@ def create_requirement(
     db: Annotated[Session, Depends(get_db)],
     current_user: Annotated[User, Depends(get_current_user)],
 ) -> Requirement:
+    return create_requirement_record(payload, db, current_user)
+
+
+def create_requirement_record(payload: RequirementCreate, db: Session, current_user: User, *, commit: bool = True) -> Requirement:
     ensure_organization_exists(db, payload.organization_id)
     require_requirement_permission(
         db,
@@ -149,7 +153,10 @@ def create_requirement(
         reviewed_by_id=reviewed_by_id,
     )
     db.add(requirement)
-    db.commit()
+    if commit:
+        db.commit()
+    else:
+        db.flush()
 
     return get_existing_requirement(db, requirement.id)
 

@@ -67,6 +67,10 @@ def create_project(
     db: Annotated[Session, Depends(get_db)],
     current_user: Annotated[User, Depends(get_current_user)],
 ) -> Project:
+    return create_project_record(payload, db, current_user)
+
+
+def create_project_record(payload: ProjectCreate, db: Session, current_user: User, *, commit: bool = True) -> Project:
     ensure_organization_exists(db, payload.organization_id)
     require_project_permission(
         db,
@@ -82,7 +86,10 @@ def create_project(
         organization_id=payload.organization_id,
     )
     db.add(project)
-    db.commit()
+    if commit:
+        db.commit()
+    else:
+        db.flush()
     db.refresh(project)
 
     created_project = get_project_with_memberships(db, project.id)

@@ -71,6 +71,8 @@ class Settings(BaseSettings):
     municipal_weather_cache_seconds: int = 1800
     assistant_runtime: str = "anthropic"
     anthropic_api_key: str | None = None
+    groq_api_key: str | None = None
+    groq_model: str = "openai/gpt-oss-120b"
     assistant_model: str = "claude-opus-4-8"
     assistant_max_tokens: int = 16000
     assistant_max_tool_iterations: int = 8
@@ -203,13 +205,14 @@ class Settings(BaseSettings):
         normalized = value.strip().lower()
         if normalized not in {
             "anthropic",
+            "groq",
             "hermes_agent",
             "openai_responses",
             "groq_responses",
             "codex_subscription",
         }:
             raise ValueError(
-                "assistant_runtime must be 'anthropic', 'hermes_agent', "
+                "assistant_runtime must be 'anthropic', 'groq', 'hermes_agent', "
                 "'openai_responses', 'groq_responses' or 'codex_subscription'"
             )
         return normalized

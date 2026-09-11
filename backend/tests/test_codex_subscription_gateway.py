@@ -1096,3 +1096,19 @@ def test_gateway_never_initializes_codex_without_both_opt_ins(
     )
 
     assert gateway.enabled is False
+
+
+def test_gateway_failure_logs_code_location_without_provider_content(caplog):
+    from app.assistant.gateway import _raise_codex_subscription_gateway_error, AssistantUnavailableError
+    from app.assistant.codex_app_server import CodexProtocolError
+
+    def provider_failure():
+        raise CodexProtocolError("private-provider-content")
+
+    try:
+        provider_failure()
+    except CodexProtocolError as error:
+        with pytest.raises(AssistantUnavailableError):
+            _raise_codex_subscription_gateway_error(error)
+    assert "failure_site=provider_failure:" in caplog.text
+    assert "private-provider-content" not in caplog.text

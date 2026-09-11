@@ -293,6 +293,18 @@ TOOL_INTENT_STOPWORDS = {
 TOOL_DOMAIN_KEYWORDS: dict[str, frozenset[str]] = {
     "organizations": frozenset({"entidad", "organizacion", "organizaciones"}),
     "projects": frozenset({"expediente", "expedientes", "proyecto", "proyectos"}),
+    "municipal": frozenset(
+        {"activo", "activos", "ficha", "fichas", "inventario", "municipal"}
+    ),
+    "assets": frozenset(
+        {"activo", "activos", "equipamiento", "infraestructura", "inventario"}
+    ),
+    "tasks": frozenset(
+        {"encargo", "encargos", "pendiente", "pendientes", "tarea", "tareas"}
+    ),
+    "maintenance": frozenset(
+        {"averia", "averias", "mantenimiento", "reparacion", "reparaciones"}
+    ),
     "map": frozenset(
         {"coordenada", "coordenadas", "donde", "localiza", "mapa", "ubicacion"}
     ),
@@ -335,7 +347,20 @@ TOOL_DOMAIN_KEYWORDS: dict[str, frozenset[str]] = {
     ),
     "memory": frozenset({"memoriza", "memoria", "recuerda", "recordar"}),
     "feedback": frozenset(
-        {"administrador", "envialo", "envio", "feedback", "sugerencia", "soporte"}
+        {
+            "administrador",
+            "desarrollo",
+            "envia",
+            "envialo",
+            "envio",
+            "equipo",
+            "error",
+            "feedback",
+            "mejora",
+            "mejoras",
+            "sugerencia",
+            "soporte",
+        }
     ),
     "agent_office": frozenset({"agente", "encarga", "investiga", "tarea", "tareas"}),
     "transversal_features": frozenset(
@@ -385,10 +410,14 @@ FOLLOWUP_INTENT_KEYWORDS = frozenset(
 )
 TOOL_DOMAIN_DEPENDENCIES: dict[str, frozenset[str]] = {
     "agent_office": frozenset({"organizations"}),
+    "assets": frozenset({"municipal", "organizations"}),
     "feedback": frozenset({"organizations"}),
+    "maintenance": frozenset({"municipal", "organizations"}),
     "memory": frozenset({"organizations"}),
+    "municipal": frozenset({"organizations"}),
     "projects": frozenset({"organizations"}),
     "requirements": frozenset({"organizations", "projects"}),
+    "tasks": frozenset({"municipal", "organizations"}),
     "transversal_features": frozenset({"organizations"}),
 }
 HISTORY_SUMMARY_MAX_CHARS = 1200

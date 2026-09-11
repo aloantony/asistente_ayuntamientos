@@ -115,6 +115,7 @@ def test_me_returns_sorted_permissions_and_member_organizations(
     assert body["organizations"][0]["municipality_id"] == municipality.id
     assert body["organizations"][0]["municipality"] == {
         "id": municipality.id,
+        "ine_code": municipality.ine_code,
         "name": municipality.name,
         "province": municipality.province,
         "autonomous_community": municipality.autonomous_community,

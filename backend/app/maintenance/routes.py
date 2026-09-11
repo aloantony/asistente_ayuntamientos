@@ -4,6 +4,8 @@ from typing import Annotated
 from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
 from sqlalchemy import or_, select
 from sqlalchemy.exc import IntegrityError
+
+from app.core.transactions import flush_or_conflict
 from sqlalchemy.orm import Session, selectinload
 
 from app.assets.access import (
@@ -138,6 +140,16 @@ def create_maintenance_order(
     db: Annotated[Session, Depends(get_db)],
     current_user: Annotated[User, Depends(get_current_user)],
 ) -> MaintenanceOrder:
+    result = create_maintenance_order_record(payload, db, current_user)
+    commit_or_conflict(db, "Municipal operation could not be saved")
+    return result
+
+
+def create_maintenance_order_record(
+    payload: MaintenanceOrderCreate,
+    db: Annotated[Session, Depends(get_db)],
+    current_user: Annotated[User, Depends(get_current_user)],
+) -> MaintenanceOrder:
     asset = get_existing_asset(db, payload.asset_id)
     require_visible_resource_permissions(
         db,
@@ -175,7 +187,7 @@ def create_maintenance_order(
         **values,
     )
     db.add(order)
-    db.flush()
+    flush_or_conflict(db)
     db.add(
         MaintenanceOrderEvent(
             order_id=order.id,
@@ -186,7 +198,7 @@ def create_maintenance_order(
             actor_id=current_user.id,
         )
     )
-    commit_or_conflict(db, "Maintenance order could not be created")
+    flush_or_conflict(db)
     return get_existing_order(db, order.id, include_events=True)
 
 
@@ -209,6 +221,17 @@ def get_maintenance_order(
 
 @router.patch("/{order_id}", response_model=MaintenanceOrderDetail)
 def update_maintenance_order(
+    order_id: int,
+    payload: MaintenanceOrderUpdate,
+    db: Annotated[Session, Depends(get_db)],
+    current_user: Annotated[User, Depends(get_current_user)],
+) -> MaintenanceOrder:
+    result = update_maintenance_order_record(order_id, payload, db, current_user)
+    commit_or_conflict(db, "Municipal operation could not be saved")
+    return result
+
+
+def update_maintenance_order_record(
     order_id: int,
     payload: MaintenanceOrderUpdate,
     db: Annotated[Session, Depends(get_db)],
@@ -286,7 +309,7 @@ def update_maintenance_order(
             actor_id=current_user.id,
         )
     )
-    commit_or_conflict(db, "Maintenance order could not be updated")
+    flush_or_conflict(db)
     return get_existing_order(db, order.id, include_events=True)
 
 
@@ -295,6 +318,17 @@ def update_maintenance_order(
     response_model=MaintenanceOrderDetail,
 )
 def transition_maintenance_order(
+    order_id: int,
+    payload: MaintenanceOrderTransition,
+    db: Annotated[Session, Depends(get_db)],
+    current_user: Annotated[User, Depends(get_current_user)],
+) -> MaintenanceOrder:
+    result = transition_maintenance_order_record(order_id, payload, db, current_user)
+    commit_or_conflict(db, "Municipal operation could not be saved")
+    return result
+
+
+def transition_maintenance_order_record(
     order_id: int,
     payload: MaintenanceOrderTransition,
     db: Annotated[Session, Depends(get_db)],
@@ -410,7 +444,7 @@ def transition_maintenance_order(
             actor_id=current_user.id,
         )
     )
-    commit_or_conflict(db, "Maintenance transition could not be saved")
+    flush_or_conflict(db)
     return get_existing_order(db, order.id, include_events=True)
 
 

@@ -28,7 +28,7 @@ export const ROADMAP_FILTERS: {
   label: string;
   filter: RoadmapTaskFilter;
 }[] = [
-  { key: "todas", label: "Todas", filter: {} },
+  { key: "todas", label: "Todas", filter: { includeClosed: true } },
   {
     key: "in_progress",
     label: "En curso",
@@ -60,14 +60,18 @@ export function fetchTaskSummary(
   );
 }
 
+export const ROADMAP_PAGE_SIZE = 50;
+
 export function fetchTasks(
   organizationId: number,
   filter: RoadmapTaskFilter = {},
   signal?: AbortSignal,
+  offset = 0,
 ) {
   const params = new URLSearchParams({
     organization_id: String(organizationId),
-    limit: "200",
+    limit: String(ROADMAP_PAGE_SIZE),
+    offset: String(offset),
   });
   if (filter.status) {
     params.set("status", filter.status);

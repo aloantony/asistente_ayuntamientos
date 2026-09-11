@@ -602,7 +602,16 @@ def test_asset_map_items_require_both_permissions_and_are_tenant_scoped(
     assert item["title"] == visible_context["asset"].name
     assert item["subtitle"] == "Farola · fair"
     assert item["priority"] is None
-    assert item["detail_path"] == "/ayuntamiento"
+    assert item["detail_path"] == f"/inventario?organization_id={item['organization_id']}&asset_id={item['entity_id']}"
+    from app.assistant.tools import execute_tool
+    result = execute_tool(db, viewer, "get_map_items", {"entity_type": "asset"})
+    assert result.ok, result.content
+    import json
+    results = json.loads(result.content)["results"]
+    assert [entry["entity_id"] for entry in results] == [item["entity_id"]]
+    assert results[0]["detail_path"] == item["detail_path"]
+    assert f"entity_id={item['entity_id']}" in results[0]["map_url"]
+
 
 
 def test_asset_map_uses_fallback_color_for_category_without_color(
@@ -1026,3 +1035,38 @@ def test_requirement_location_update_does_not_move_shared_asset(
     db.expire_all()
     assert db.get(MunicipalAsset, context["asset"].id).location_id == first_location_id
     assert db.get(GeoLocation, first_location_id).latitude == 42.34
+
+
+def test_map_registration_is_atomic_and_retryable(client, db, make_user, make_organization, grant_permissions):
+    import uuid
+    from sqlalchemy import func
+    user, organization = make_user(), make_organization()
+    grant_permissions(user, organization, ["map.view", "map.edit", "requirements.view", "requirements.create"])
+    payload = {"request_key": str(uuid.uuid4()), "entity_type": "requirement",
+               "organization_id": organization.id, "title": "Registro atómico",
+               "location": {"label": "Plaza", "latitude": 42, "longitude": -3}}
+    first = client.post('/geo/registrations', json=payload, headers=headers_for(user))
+    assert first.status_code == 201, first.text
+    second = client.post('/geo/registrations', json=payload, headers=headers_for(user))
+    assert second.status_code == 201, second.text
+    assert first.json()['entity_id'] == second.json()['entity_id']
+    assert db.scalar(select(func.count()).select_from(Requirement).where(Requirement.organization_id == organization.id)) == 1
+    conflicting = {**payload, 'title': 'Different content'}
+    assert client.post('/geo/registrations', json=conflicting, headers=headers_for(user)).status_code == 409
+    invalid = {**payload, 'request_key': str(uuid.uuid4()), 'location': {'label': 'Invalid', 'latitude': 99, 'longitude': -3}}
+    assert client.post('/geo/registrations', json=invalid, headers=headers_for(user)).status_code == 422
+    assert db.scalar(select(func.count()).select_from(Requirement).where(Requirement.organization_id == organization.id)) == 1
+
+
+def test_map_registration_rolls_back_entity_when_location_fails(client, db, make_user, make_organization, grant_permissions, monkeypatch):
+    import uuid
+    from fastapi import HTTPException
+    from sqlalchemy import func
+    from app.geo import registration
+    user, organization = make_user(), make_organization()
+    grant_permissions(user, organization, ['map.view','map.edit','requirements.view','requirements.create'])
+    def fail(*args, **kwargs): raise HTTPException(409, 'Location changed')
+    monkeypatch.setattr(registration, 'save_entity_location', fail)
+    payload={'request_key':str(uuid.uuid4()),'entity_type':'requirement','organization_id':organization.id,'title':'Rollback','location':{'label':'Plaza','latitude':42,'longitude':-3}}
+    assert client.post('/geo/registrations',json=payload,headers=headers_for(user)).status_code==409
+    assert db.scalar(select(func.count()).select_from(Requirement).where(Requirement.organization_id==organization.id))==0

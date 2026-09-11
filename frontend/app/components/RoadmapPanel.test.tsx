@@ -177,6 +177,7 @@ describe("RoadmapPanel", () => {
       1,
       { overdue: true },
       expect.anything(),
+      0,
     );
   });
 
@@ -221,4 +222,15 @@ describe("RoadmapPanel", () => {
     );
     expect(screen.getByRole("heading", { name: "Sin proyecto" })).toBeTruthy();
   });
+});
+
+it("pagina y vuelve al principio al cambiar el filtro", async () => {
+  fetchTasks.mockResolvedValue({ items: [task()], total: 101 });
+  render(<RoadmapPanel />);
+  await waitFor(() => expect(fetchTasks).toHaveBeenCalledWith(1, { includeClosed: true }, expect.anything(), 0));
+  await waitFor(() => expect((screen.getByRole("button", { name: "Siguiente" }) as HTMLButtonElement).disabled).toBe(false));
+  fireEvent.click(screen.getByRole("button", { name: "Siguiente" }));
+  await waitFor(() => expect(fetchTasks).toHaveBeenLastCalledWith(1, { includeClosed: true }, expect.anything(), 50));
+  fireEvent.click(screen.getByRole("button", { name: /Vencidas/ }));
+  await waitFor(() => expect(fetchTasks).toHaveBeenLastCalledWith(1, { overdue: true }, expect.anything(), 0));
 });

@@ -844,10 +844,12 @@ def _render_generic_confirmation_prompt(
 ) -> str:
     spec = TOOL_CATALOG.get(reference.tool)
     label = spec.label if spec is not None else reference.tool
+    visible_input = {key: value for key, value in reference.tool_input.items()
+                     if key != "_expected_version"}
     if input_mode == "voice":
         details = "; ".join(
             f"{field.replace('_', ' ')}: {_plain_confirmation_value(value)}"
-            for field, value in reference.tool_input.items()
+            for field, value in visible_input.items()
         )
         return (
             f"Acción pendiente de confirmación: {label}. "
@@ -855,7 +857,7 @@ def _render_generic_confirmation_prompt(
             "Para ejecutarla, responde: Confirmo; Adelante; o Hazlo."
         )
 
-    serialized = json.dumps(reference.tool_input, ensure_ascii=False, indent=2)
+    serialized = json.dumps(visible_input, ensure_ascii=False, indent=2)
     indented_payload = "\n".join(
         f"    {line}" for line in serialized.splitlines()
     )

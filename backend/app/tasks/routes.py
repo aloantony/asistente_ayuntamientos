@@ -1,13 +1,16 @@
-from typing import Annotated
+from typing import Annotated, Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
 from sqlalchemy import Select, and_, func, or_, select
 from sqlalchemy.exc import IntegrityError
+
+from app.core.transactions import flush_or_conflict
 from sqlalchemy.orm import Session, selectinload
 
 from app.auth.dependencies import get_current_user
 from app.core.pagination import PageParams, page_params, paginate
 from app.db.session import get_db
+from app.rbac.permissions import has_permission
 from app.projects.models import Project
 from app.staff.models import StaffWorker
 from app.tasks.access import (
@@ -22,6 +25,7 @@ from app.tasks.models import (
     MunicipalTaskEvent,
 )
 from app.tasks.schemas import (
+    TaskLinkOptionRead,
     MunicipalTaskCreate,
     MunicipalTaskDetail,
     MunicipalTaskPriority,
@@ -69,6 +73,28 @@ def overdue_condition():
         MunicipalTask.due_date < func.current_date(),
         MunicipalTask.status.in_(MUNICIPAL_TASK_OPEN_STATUSES),
     )
+
+
+@router.get("/link-options", response_model=list[TaskLinkOptionRead])
+def list_task_link_options(
+    organization_id: int,
+    kind: Literal["worker", "project"],
+    db: Annotated[Session, Depends(get_db)],
+    current_user: Annotated[User, Depends(get_current_user)],
+    response: Response,
+    page: Annotated[PageParams, Depends(page_params)],
+):
+    """Only names needed for task assignment, never personnel/project details."""
+    get_task_organization_for_write(db, organization_id)
+    if not any(has_permission(current_user, code, db, organization_id=organization_id)
+               for code in ("tasks.create", "tasks.edit", "tasks.manage")):
+        raise HTTPException(status_code=403, detail="Task editing permission required")
+    model = StaffWorker if kind == "worker" else Project
+    name = StaffWorker.full_name if kind == "worker" else Project.name
+    query = select(model.id, name.label("name")).where(
+        model.organization_id == organization_id, model.status != "archived",
+    ).order_by(name, model.id)
+    return list(db.execute(paginate(db, query, page, response)).mappings())
 
 
 @router.get("/summary", response_model=MunicipalTaskSummary)
@@ -180,6 +206,16 @@ def create_task(
     db: Annotated[Session, Depends(get_db)],
     current_user: Annotated[User, Depends(get_current_user)],
 ) -> MunicipalTask:
+    result = create_task_record(payload, db, current_user)
+    commit_or_conflict(db, "Municipal operation could not be saved")
+    return result
+
+
+def create_task_record(
+    payload: MunicipalTaskCreate,
+    db: Annotated[Session, Depends(get_db)],
+    current_user: Annotated[User, Depends(get_current_user)],
+) -> MunicipalTask:
     get_task_organization_for_write(db, payload.organization_id)
     require_task_permission(
         db,
@@ -206,7 +242,7 @@ def create_task(
         updated_by_id=current_user.id,
     )
     db.add(task)
-    commit_or_conflict(db, "Task could not be saved")
+    flush_or_conflict(db)
     db.refresh(task)
     record_event(
         db,
@@ -232,6 +268,17 @@ def get_task(
 
 @router.patch("/{task_id}", response_model=MunicipalTaskDetail)
 def update_task(
+    task_id: int,
+    payload: MunicipalTaskUpdate,
+    db: Annotated[Session, Depends(get_db)],
+    current_user: Annotated[User, Depends(get_current_user)],
+) -> MunicipalTask:
+    result = update_task_record(task_id, payload, db, current_user)
+    commit_or_conflict(db, "Municipal operation could not be saved")
+    return result
+
+
+def update_task_record(
     task_id: int,
     payload: MunicipalTaskUpdate,
     db: Annotated[Session, Depends(get_db)],
@@ -279,7 +326,7 @@ def update_task(
     for field, value in updates.items():
         setattr(task, field, value)
     task.updated_by_id = current_user.id
-    commit_or_conflict(db, "Task could not be saved")
+    flush_or_conflict(db)
     db.refresh(task)
 
     if task.assignee_worker_id != previous_assignee_id:
@@ -303,6 +350,17 @@ def update_task(
 
 @router.post("/{task_id}/transition", response_model=MunicipalTaskDetail)
 def transition_task(
+    task_id: int,
+    payload: MunicipalTaskTransition,
+    db: Annotated[Session, Depends(get_db)],
+    current_user: Annotated[User, Depends(get_current_user)],
+) -> MunicipalTask:
+    result = transition_task_record(task_id, payload, db, current_user)
+    commit_or_conflict(db, "Municipal operation could not be saved")
+    return result
+
+
+def transition_task_record(
     task_id: int,
     payload: MunicipalTaskTransition,
     db: Annotated[Session, Depends(get_db)],
@@ -344,7 +402,7 @@ def transition_task(
         func.now() if target_status == "completed" else None
     )
     task.updated_by_id = current_user.id
-    commit_or_conflict(db, "Task could not be saved")
+    flush_or_conflict(db)
     db.refresh(task)
 
     record_event(
@@ -481,7 +539,7 @@ def record_event(
         actor_id=actor_id,
     )
     db.add(event)
-    db.commit()
+    flush_or_conflict(db)
 
 
 def commit_or_conflict(db: Session, detail: str) -> None:

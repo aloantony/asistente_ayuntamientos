@@ -29,12 +29,12 @@ const { MapaGeneral, buildLayers, itemKey, matchesSearch } = await import(
 const { _vaciarCacheCartografia } = await import("../../lib/pueblo");
 
 /** El municipio que hoy tiene plano preparado. */
-const FUENTELCESPED = { name: "Fuentelcésped", ine_code: "09140" };
+const FUENTELCESPED = { name: "Fuentelcésped", ine_code: "09137" };
 
 const CARTOGRAFIA = {
   municipio: "Fuentelcésped",
   provincia: "Burgos",
-  ine: "09140",
+  ine: "09137",
   centro: [-3.64, 41.59],
   limite: { type: "Polygon", coordinates: [[[-3.65, 41.58], [-3.63, 41.58], [-3.63, 41.6], [-3.65, 41.58]]] },
   edificios: { type: "FeatureCollection", features: [] },

@@ -4,6 +4,7 @@ import { CircleAlert, ClipboardList, RefreshCw, ShieldCheck } from "lucide-react
 import { useEffect, useMemo, useState } from "react";
 import {
   ROADMAP_FILTERS,
+  ROADMAP_PAGE_SIZE,
   fetchRoadmapGovernment,
   fetchTaskSummary,
   fetchTasks,
@@ -13,6 +14,8 @@ import type { MunicipalCollection } from "../lib/municipalWorkspace";
 import { canViewGovernment, canViewTasks } from "../lib/permissions";
 import { useSession } from "../lib/session";
 import styles from "./RoadmapPanel.module.css";
+import { MunicipalTaskEditor } from "./MunicipalTaskEditor";
+import { userHasPermission } from "./types";
 import { EstructuraGobierno } from "./ayuntamiento/EstructuraGobierno";
 import { ResourceState, formatDate, getMunicipalContexts } from "./ayuntamiento/shared";
 import workspaceStyles from "./MunicipalWorkspace.module.css";
@@ -73,16 +76,18 @@ function taskTone(task: MunicipalTask, referenceDate: string | null) {
 function TaskCard({
   task,
   referenceDate,
+  onOpen,
 }: {
   task: MunicipalTask;
   referenceDate: string | null;
+  onOpen: () => void;
 }) {
   const overdue = isOverdue(task, referenceDate);
 
   return (
     <li className={styles.task} data-tone={taskTone(task, referenceDate)}>
       <div className={styles.taskHeading}>
-        <h3>{task.title}</h3>
+        <h3><button type="button" onClick={onOpen}>{task.title}</button></h3>
         <div className={styles.badges}>
           {overdue ? (
             <span className={styles.badge} data-tone="overdue">
@@ -156,10 +161,12 @@ function groupBy(
   );
 }
 
-export function RoadmapPanel() {
+export function RoadmapPanel({ initialOrganizationId, initialTaskId }: { initialOrganizationId?: number | null; initialTaskId?: number | null } = {}) {
   const { user, handleRequestError } = useSession();
+  const [editor, setEditor] = useState<number | "new" | null>(initialTaskId ?? null);
   const [activeTab, setActiveTab] = useState<RoadmapTab>("tareas");
   const [activeFilter, setActiveFilter] = useState<RoadmapFilterKey>("todas");
+  const [page, setPage] = useState({ context: "", offset: 0 });
   const [summary, setSummary] = useState<MunicipalTaskSummary | null>(null);
   const [tasks, setTasks] = useState<MunicipalCollection<MunicipalTask> | null>(
     null,
@@ -173,8 +180,12 @@ export function RoadmapPanel() {
   const [loadAttempt, setLoadAttempt] = useState(0);
 
   const contexts = user ? getMunicipalContexts(user) : [];
-  const selectedContext = contexts[0] ?? null;
+  const selectedContext = contexts.find(context => context.organization.id === initialOrganizationId) ?? contexts[0] ?? null;
   const organizationId = selectedContext?.organization.id ?? null;
+  const canWrite = selectedContext?.organization.status === "active";
+  const canManage = Boolean(user && canWrite && userHasPermission(user, "tasks.manage"));
+  const canCreate = Boolean(user && canWrite && (canManage || userHasPermission(user, "tasks.create")));
+  const canEdit = Boolean(user && canWrite && (canManage || userHasPermission(user, "tasks.edit")));
   const canSeeTasks = Boolean(user && canViewTasks(user));
   const canSeeGovernment = Boolean(user && canViewGovernment(user));
   const permissionSignature = (user?.permissions ?? []).slice().sort().join(",");
@@ -185,6 +196,9 @@ export function RoadmapPanel() {
       ROADMAP_FILTERS[0],
     [activeFilter],
   );
+
+  const pageContext = `${organizationId}:${permissionSignature}:${activeFilter}`;
+  const offset = page.context === pageContext ? page.offset : 0;
 
   useEffect(() => {
     if (organizationId === null || !canSeeTasks) {
@@ -200,7 +214,7 @@ export function RoadmapPanel() {
 
     Promise.allSettled([
       fetchTaskSummary(organizationId, controller.signal),
-      fetchTasks(organizationId, selectedFilter.filter, controller.signal),
+      fetchTasks(organizationId, selectedFilter.filter, controller.signal, offset),
     ])
       .then(([summaryResult, taskResult]) => {
         if (controller.signal.aborted) {
@@ -227,7 +241,7 @@ export function RoadmapPanel() {
 
     return () => controller.abort();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [organizationId, canSeeTasks, selectedFilter.key, permissionSignature, loadAttempt]);
+  }, [organizationId, canSeeTasks, selectedFilter.key, permissionSignature, loadAttempt, offset]);
 
   useEffect(() => {
     if (organizationId === null || !canSeeGovernment) {
@@ -296,7 +310,12 @@ export function RoadmapPanel() {
             Trabajo municipal en curso, con su responsable y su fecha límite.
           </small>
         </div>
+        {canSeeTasks && canCreate ? <button type="button" onClick={() => setEditor("new")}>Nueva tarea</button> : null}
       </header>
+      {editor !== null && organizationId !== null && canSeeTasks && (editor !== "new" || canCreate) ? <MunicipalTaskEditor
+        key={`${user?.id}:${organizationId}:${editor}:${permissionSignature}`} taskId={editor} organizationId={organizationId}
+        canEdit={editor === "new" ? canCreate : canEdit} canManage={canManage}
+        onClose={() => setEditor(null)} onSaved={() => setLoadAttempt(value => value + 1)} /> : null}
 
       {canSeeTasks && needsAttention > 0 ? (
         <div className={styles.attention} role="status">
@@ -377,6 +396,20 @@ export function RoadmapPanel() {
             ))}
           </div>
 
+          {tasks && tasks.total > ROADMAP_PAGE_SIZE ? (
+            <nav aria-label="Páginas de tareas" className={styles.chips}>
+              <button type="button" disabled={isLoading || offset === 0}
+                onClick={() => setPage({ context: pageContext, offset: Math.max(0, offset - ROADMAP_PAGE_SIZE) })}>
+                Anterior
+              </button>
+              <span aria-live="polite">{offset + 1}–{Math.min(offset + ROADMAP_PAGE_SIZE, tasks.total)} de {tasks.total}</span>
+              <button type="button" disabled={isLoading || offset + ROADMAP_PAGE_SIZE >= tasks.total}
+                onClick={() => setPage({ context: pageContext, offset: offset + ROADMAP_PAGE_SIZE })}>
+                Siguiente
+              </button>
+            </nav>
+          ) : null}
+
           {isLoading ? (
             <div
               aria-busy="true"
@@ -408,6 +441,7 @@ export function RoadmapPanel() {
                         key={task.id}
                         referenceDate={referenceDate}
                         task={task}
+                        onOpen={() => setEditor(task.id)}
                       />
                     ))}
                   </ul>
@@ -421,6 +455,7 @@ export function RoadmapPanel() {
                   key={task.id}
                   referenceDate={referenceDate}
                   task={task}
+                        onOpen={() => setEditor(task.id)}
                 />
               ))}
             </ul>

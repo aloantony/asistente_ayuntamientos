@@ -586,3 +586,24 @@ def test_unknown_task_and_organization_are_reported_as_missing(
 
     assert missing_task.status_code == 404
     assert missing_organization.status_code == 404
+
+
+@pytest.mark.parametrize("kind", ["worker", "project"])
+def test_link_options_only_expose_active_names_in_authorized_organization(
+    client, db, make_user, make_organization, grant_permissions, superuser, kind
+):
+    from app.staff.models import StaffWorker
+    target, other = make_organization(), make_organization()
+    user = make_user()
+    grant_permissions(user, target, ["tasks.create"])
+    model = StaffWorker if kind == "worker" else Project
+    name_key = "full_name" if kind == "worker" else "name"
+    records = [model(organization_id=org.id, **{name_key: name}, status=status_value)
+               for org, name, status_value in [(target, "A visible", "active"), (target, "B visible", "active"), (target, "Archived", "archived"), (other, "Other tenant", "active")]]
+    db.add_all(records); db.commit()
+    response = client.get("/tasks/link-options", params={"organization_id": target.id, "kind": kind, "limit": 1, "offset": 1}, headers=headers_for(user))
+    assert response.status_code == 200, response.text
+    assert response.headers["X-Total-Count"] == "2"
+    assert response.json() == [{"id": records[1].id, "name": "B visible"}]
+    denied = client.get("/tasks/link-options", params={"organization_id": other.id, "kind": kind}, headers=headers_for(user))
+    assert denied.status_code == 403

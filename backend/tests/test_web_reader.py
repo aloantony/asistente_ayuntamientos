@@ -11,7 +11,7 @@ import pytest
 from app.assistant import web_reader
 from app.assistant import tools as assistant_tools
 from app.assistant import turn as assistant_turn
-from app.assistant.prompts import ANACLETO_SYSTEM_PROMPT
+from app.assistant.prompts import WEB_PROMPT_BLOCK
 from app.core.config import settings
 
 
@@ -1542,7 +1542,7 @@ def test_read_web_page_activity_compacts_long_urls_without_losing_final_url():
 
 
 def test_prompt_requires_page_reading_and_exact_final_citations():
-    assert "`read_web_page` aparece entre las herramientas" in ANACLETO_SYSTEM_PROMPT
-    assert "No afirmes haber leído una página" in ANACLETO_SYSTEM_PROMPT
-    assert "cita su `final_url`" in ANACLETO_SYSTEM_PROMPT
-    assert "muestra también su `source_url`" in ANACLETO_SYSTEM_PROMPT
+    assert "`read_web_page` aparece entre las herramientas" in WEB_PROMPT_BLOCK
+    assert "No afirmes haber leído una página" in WEB_PROMPT_BLOCK
+    assert "cita su `final_url`" in WEB_PROMPT_BLOCK
+    assert "muestra también su `source_url`" in WEB_PROMPT_BLOCK
