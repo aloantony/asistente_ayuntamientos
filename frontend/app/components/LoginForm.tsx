@@ -26,7 +26,7 @@ export function LoginForm({
           <span className="app-brand-star" aria-hidden="true">
             <img alt="" src="/brand/logo-principal.svg" />
           </span>
-          <span className="login-brand-name">Asistente Anacleto</span>
+          <span className="login-brand-name">Asistente iConcejo</span>
         </div>
         <p className="eyebrow">Plataforma privada municipal</p>
         <h1>Iniciar sesión</h1>

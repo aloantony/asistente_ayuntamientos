@@ -1,8 +1,8 @@
 <p align="center">
-  <img src="frontend/public/anacleto-logo.svg" width="112" alt="Anacleto">
+  <img src="frontend/public/iconcejo-logo.svg" width="112" alt="iConcejo">
 </p>
 
-<h1 align="center">Anacleto</h1>
+<h1 align="center">iConcejo</h1>
 
 <p align="center">
   <strong>Agente operativo municipal.</strong><br>
@@ -36,7 +36,7 @@
 ## Qué es
 
 Un ayuntamiento de 500 habitantes tiene las mismas obligaciones legales que uno
-de 50.000 y una fracción del personal. Anacleto es la herramienta interna de
+de 50.000 y una fracción del personal. iConcejo es la herramienta interna de
 trabajo de ese ayuntamiento: reúne en un sitio el expediente, el inventario, la
 normativa, el mantenimiento y el mapa del municipio, y pone encima un asistente
 de IA que entiende ese contexto y ayuda a completar el trabajo.
@@ -60,8 +60,8 @@ La visión completa del producto está en
 | **Fase** | Piloto en producción con un ayuntamiento real |
 | **Multi-tenant** | Sí, por organización, como frontera de seguridad implementada |
 | **API** | Sin versionar todavía: puede cambiar sin aviso entre commits |
-| **Tests** | ~936 tests de backend (pytest) + 17 suites de frontend (vitest) |
-| **Decisiones** | 63 ADR registradas en [`docs/decisiones.md`](docs/decisiones.md) |
+| **Tests** | 1.151 tests de backend (pytest) + 146 de frontend en 17 suites (vitest) |
+| **Decisiones** | 64 ADR registradas en [`docs/decisiones.md`](docs/decisiones.md) |
 | **Idiomas** | Interfaz en español; código y commits en inglés |
 
 Es un proyecto en evolución activa y de un solo autor. Si te planteas usarlo,
@@ -71,7 +71,7 @@ lee antes [Privacidad y seguridad](#privacidad-y-seguridad).
 
 | Área | Ruta | Qué resuelve |
 |---|---|---|
-| **Anacleto** | `/asistente` | Conversación por texto y voz con el asistente, con herramientas municipales sujetas a los permisos de quien pregunta |
+| **iConcejo** | `/asistente` | Conversación por texto y voz con el asistente, con herramientas municipales sujetas a los permisos de quien pregunta |
 | **Ayuntamiento** | `/ayuntamiento` | Ficha del municipio, escudo, secciones configurables, personal y puestos |
 | **Mapa** | `/mapa` | Plano del municipio con necesidades, proyectos y bienes situados sobre él; selección por área y exportación CSV |
 | **Ordenanzas** | `/ordenanzas` | Biblioteca de normativa municipal, importación desde fuentes oficiales y matriz comparativa entre municipios |
@@ -197,9 +197,9 @@ Empieza por el [índice de `docs/`](docs/README.md). Los cuatro que más se usan
 
 | Documento | Para qué |
 |---|---|
-| [`docs/vision-producto.md`](docs/vision-producto.md) | Qué quiere ser Anacleto y dónde están sus límites |
+| [`docs/vision-producto.md`](docs/vision-producto.md) | Qué quiere ser iConcejo y dónde están sus límites |
 | [`docs/arquitectura.md`](docs/arquitectura.md) | Estado técnico actual |
-| [`docs/decisiones.md`](docs/decisiones.md) | Las 63 ADR, con el contexto de cada decisión |
+| [`docs/decisiones.md`](docs/decisiones.md) | Las 64 ADR, con el contexto de cada decisión |
 | [`docs/despliegue.md`](docs/despliegue.md) | Runbook de producción completo |
 
 `README.en.md` conserva la referencia operativa exhaustiva en inglés: cada

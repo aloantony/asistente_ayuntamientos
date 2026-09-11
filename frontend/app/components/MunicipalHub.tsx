@@ -147,7 +147,7 @@ function getModuleLinks(user: User, municipality: Municipality) {
   if (userHasPermission(user, "assistant.use")) {
     links.push({
       href: "/asistente",
-      label: "Anacleto",
+      label: "iConcejo",
       description: "Consulta al asistente con las herramientas autorizadas.",
     });
   }

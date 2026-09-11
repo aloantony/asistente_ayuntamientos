@@ -627,7 +627,7 @@ export async function streamAssistantVoiceTurn(
   signal?: AbortSignal,
 ) {
   const formData = new FormData();
-  formData.append("file", audio, "anacleto-audio.webm");
+  formData.append("file", audio, "iconcejo-audio.webm");
   await consumeAssistantStream(
     (streamSignal) =>
       performAdminRequest(

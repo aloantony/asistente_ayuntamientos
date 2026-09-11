@@ -53,7 +53,7 @@ body:
     id: runtime
     attributes:
       label: Runtime del asistente
-      description: Sólo si el fallo toca a Anacleto. Valor de `ASSISTANT_RUNTIME`.
+      description: Sólo si el fallo toca a iConcejo. Valor de `ASSISTANT_RUNTIME`.
       placeholder: anthropic
   - type: checkboxes
     id: comprobaciones

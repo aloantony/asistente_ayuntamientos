@@ -128,7 +128,7 @@ La seguridad del mapa combina permisos específicos (`map.view`, `map.edit`, `ma
 
 En frontend se usa Leaflet directo en un componente cliente, con import dinámico y marcadores propios, evitando React-Leaflet en esta primera versión para reducir riesgo de SSR/compatibilidad con Next.js y React.
 
-## ADR-020: Anacleto v2 delega la conversación al modelo (2026-07-06)
+## ADR-020: iConcejo v2 delega la conversación al modelo (2026-07-06)
 
 El asistente deja de responder mediante handlers deterministas, planner semántico y router multi-agente. Cada turno web o Telegram entra en un único motor model-first (`app/assistant/turn.py`) con agente persistido como `anacleto`, `routing=null`, catálogo de herramientas filtrado por permisos y guardas de seguridad en código. Las respuestas fijas quedan limitadas a error de gateway, respuesta vacía, refusal del proveedor y errores HTTP.
 
@@ -148,15 +148,15 @@ El estilo oral se decide por turno con `input_mode` (web y Telegram), altera el 
 
 ## ADR-022: Brave como proveedor controlado de búsqueda web (2026-07-15)
 
-La búsqueda web pública se desacopla de Hermes mediante una única fachada backend (`app/assistant/web_search.py`) compartida por Anacleto y el descubrimiento de fuentes de ordenanzas. `WEB_SEARCH_PROVIDER=brave|hermes|disabled` selecciona un único proveedor de forma explícita; una configuración incompleta, un límite de cuota o un fallo de Brave nunca provoca fallback a Hermes, porque eso enviaría la consulta a otro encargado sin una decisión consciente. La plantilla de nuevas instalaciones selecciona Brave; el valor interno sigue temporalmente en Hermes para que una actualización no cambie de encargado sin modificar el entorno.
+La búsqueda web pública se desacopla de Hermes mediante una única fachada backend (`app/assistant/web_search.py`) compartida por iConcejo y el descubrimiento de fuentes de ordenanzas. `WEB_SEARCH_PROVIDER=brave|hermes|disabled` selecciona un único proveedor de forma explícita; una configuración incompleta, un límite de cuota o un fallo de Brave nunca provoca fallback a Hermes, porque eso enviaría la consulta a otro encargado sin una decisión consciente. La plantilla de nuevas instalaciones selecciona Brave; el valor interno sigue temporalmente en Hermes para que una actualización no cambie de encargado sin modificar el entorno.
 
 El adaptador Brave usa exclusivamente el endpoint HTTPS fijo de Web Search y mantiene la clave en servidor. Envía la consulta pública normalizada —máximo 400 caracteres y 50 palabras— sin historial, documentos ni cabeceras de localización; fija versión de API, filtrado estricto de contenido adulto, límite de cinco resultados para la herramienta, timeout de 15 segundos, respuesta máxima de 1 MiB y rechazo de redirecciones. RBAC, auditoría, DLP y saneado de URLs siguen en el backend. Los snippets se consideran entrada externa no confiable y el modelo tiene prohibido obedecer instrucciones contenidas en ellos.
 
 El rastro de acciones conserva la consulta, URLs y snippets en todos los entornos. Brave exige derechos contractuales específicos para almacenar resultados total o parcialmente y documenta retención de consultas; por eso el cliente queda deshabilitado mientras `BRAVE_SEARCH_STORAGE_RIGHTS_CONFIRMED=false`, también en desarrollo. Ese indicador solo puede activarse después de confirmar un plan compatible, DPA/SCC, retención y política para nombres/direcciones. Referencias: [privacidad del API](https://api-dashboard.search.brave.com/privacy-policy), [términos del API](https://api-dashboard.search.brave.com/documentation/resources/terms-of-service) y [contrato Web Search](https://api-dashboard.search.brave.com/api-reference/web/search/get).
 
-## ADR-023: OpenAI Responses como runtime stateless de Anacleto (2026-07-15)
+## ADR-023: OpenAI Responses como runtime stateless de iConcejo (2026-07-15)
 
-Anacleto incorpora `ASSISTANT_RUNTIME=openai_responses` como motor conversacional adicional. No se sustituye la aplicación por la web de ChatGPT: conversación, memoria, RBAC, tenancy, herramientas, confirmaciones de escritura y auditoría siguen siendo responsabilidad del backend. La integración requiere un proyecto y una clave de la API de OpenAI con facturación propia; una suscripción de ChatGPT no concede acceso a la API.
+iConcejo incorpora `ASSISTANT_RUNTIME=openai_responses` como motor conversacional adicional. No se sustituye la aplicación por la web de ChatGPT: conversación, memoria, RBAC, tenancy, herramientas, confirmaciones de escritura y auditoría siguen siendo responsabilidad del backend. La integración requiere un proyecto y una clave de la API de OpenAI con facturación propia; una suscripción de ChatGPT no concede acceso a la API.
 
 El runtime usa la Responses API con `store=false`, `include=["reasoning.encrypted_content"]` y `gpt-5.6` como modelo configurable inicial. `OPENAI_RESPONSES_MAX_OUTPUT_TOKENS` parte de 25.000 porque el límite engloba razonamiento y salida visible; se mantiene separado del límite de Anthropic. Los elementos completos de `response.output`, incluido el razonamiento cifrado y el `phase` de cada mensaje, se conservan solo en memoria durante el bucle de herramientas y se reenvían junto al `function_call_output` identificado por `call_id`; no se guardan en PostgreSQL. Las respuestas históricas persistidas se reenvían como `phase="final_answer"`. Las herramientas se publican como funciones planas con `strict=false` para mantener compatibilidad con el catálogo JSON Schema existente. El backend sigue validando argumentos, límites, permisos y ejecución. Una migración futura a esquemas estrictos exige adaptar y probar todo el catálogo antes de activar `strict=true`.
 
@@ -219,7 +219,7 @@ Crear rechaza activos retirados o archivados. Retirar o archivar un activo bloqu
 Los índices siguen las consultas operativas por organización/estado/fecha, activo/estado/fecha y responsable/estado/fecha. La interfaz se compone dentro del detalle de activo de `/mapa`, con próximos trabajos, vencimientos, historial y acciones autorizadas. Se aplazan recurrencias, notificaciones, costes, partes de horas, adjuntos, configuración libre y ejecución autónoma; esos flujos requieren decisiones propias de retención, privacidad y operación. El contrato completo se documenta en `docs/mantenimiento-municipal.md`.
 ## ADR-028: Suscripción Codex como puente local desechable (2026-07-16)
 
-Anacleto admite `ASSISTANT_RUNTIME=codex_subscription` únicamente cuando `ENVIRONMENT=development`, como vía transitoria para evaluar el producto antes de contratar una API de producción. La integración usa la interfaz oficial `codex app-server` y su autenticación ChatGPT gestionada; no convierte la suscripción en una clave API, no llama a endpoints privados copiados de la web y no sustituye el backend propio. La configuración queda rechazada por validación fuera de desarrollo, incluso si existen binario y credenciales, y exige los opt-in independientes `CODEX_SUBSCRIPTION_ENABLED=true` y `CODEX_SUBSCRIPTION_REAL_DATA_ALLOWED=true`, ambos `false` por defecto.
+iConcejo admite `ASSISTANT_RUNTIME=codex_subscription` únicamente cuando `ENVIRONMENT=development`, como vía transitoria para evaluar el producto antes de contratar una API de producción. La integración usa la interfaz oficial `codex app-server` y su autenticación ChatGPT gestionada; no convierte la suscripción en una clave API, no llama a endpoints privados copiados de la web y no sustituye el backend propio. La configuración queda rechazada por validación fuera de desarrollo, incluso si existen binario y credenciales, y exige los opt-in independientes `CODEX_SUBSCRIPTION_ENABLED=true` y `CODEX_SUBSCRIPTION_REAL_DATA_ALLOWED=true`, ambos `false` por defecto.
 
 Las herramientas municipales se publican como `dynamicTools`, pero no se ejecutan dentro del gateway. Cuando app-server envía `item/tool/call`, el gateway conserva el proceso y la request pendientes, devuelve al bucle existente una llamada con nombre/argumentos normalizados y guarda en `provider_state` solo un handle aleatorio en memoria. `turn.py` mantiene RBAC, tenancy, confirmaciones, presupuestos, detección de repeticiones, auditoría y Brave; después devuelve el resultado al mismo request y reanuda el turno. Las sesiones son efímeras, tienen propietario, exclusión de uso, TTL, límite global y limpieza en terminal, error, timeout o cancelación. La síntesis forzada destruye primero una sesión con herramientas porque app-server no permite retirar `dynamicTools` de un turno activo.
 
@@ -231,7 +231,7 @@ Se acepta que esta vía no tiene SLA, comparte identidad y cuotas ChatGPT, puede
 
 La consulta normativa pasa de una herramienta interna y una tabla administrativa a una biblioteca explícita en `/ordenanzas`. Su contrato paginado (`GET /ordinances/search`) puntúa el corpus completo, ofrece ámbitos por fragmento, ordenanza o municipio y devuelve junto a los resultados la política de estados jurídicos y la cobertura de datos poblacionales. Filtros, página, ficha y comparación viven en la URL. La similitud vectorial se considera solo afinidad de recuperación: no se muestra como confianza jurídica y nunca sustituye estado, fechas, fuente oficial o revisión humana.
 
-El corpus recuperable exige conjuntamente ordenanza aprobada, chunk aprobado, embedding listo y modelo vigente. Se excluyen por defecto `repealed`, `superseded` y `archived`; `unknown` y `partially_repealed` siguen disponibles con advertencia obligatoria. La misma regla se aplica a búsqueda, comparación y resumen de cobertura de Anacleto. Cambiar texto reconstruye todos sus chunks como pendientes, y cambiar cualquier metadato jurídico sensible invalida la curación previa; aprobar es una decisión separada con `ordinances.review`. Las altas manuales ya no nacen aprobadas. Esta decisión amplía ADR-018 y sustituye su descripción temporal de una recuperación limitada y exclusivamente Python: PostgreSQL con la extensión `vector` hace hoy el ranking exacto y la paginación; la columna permanece textual y un índice ANN queda aplazado hasta fijar dimensión y medir completitud.
+El corpus recuperable exige conjuntamente ordenanza aprobada, chunk aprobado, embedding listo y modelo vigente. Se excluyen por defecto `repealed`, `superseded` y `archived`; `unknown` y `partially_repealed` siguen disponibles con advertencia obligatoria. La misma regla se aplica a búsqueda, comparación y resumen de cobertura de iConcejo. Cambiar texto reconstruye todos sus chunks como pendientes, y cambiar cualquier metadato jurídico sensible invalida la curación previa; aprobar es una decisión separada con `ordinances.review`. Las altas manuales ya no nacen aprobadas. Esta decisión amplía ADR-018 y sustituye su descripción temporal de una recuperación limitada y exclusivamente Python: PostgreSQL con la extensión `vector` hace hoy el ranking exacto y la paginación; la columna permanece textual y un índice ANN queda aplazado hasta fijar dimensión y medir completitud.
 
 La reconstrucción valida todos los fragmentos antes de sustituir los existentes y
 falla si excede el máximo configurado, en vez de truncar el texto silenciosamente.
@@ -1453,3 +1453,37 @@ reversibilidad por el camino.
 ADR-044 se mantiene: el árbol de capas del mapa sigue derivándose de lo que hay
 situado en él. Lo que desaparece es el otro árbol, el del catálogo del
 proveedor.
+
+## ADR-065: El asistente pasa a llamarse iConcejo (2026-09-11)
+
+El logotipo anterior —el emblema turquesa en forma de «A»— es la marca personal
+del titular, que la reserva para su perfil público. El producto necesitaba
+nombre y símbolo propios. El asistente pasa a llamarse **iConcejo**, con un
+monograma «iC» que conserva el lenguaje visual heredado: disco oscuro, aro
+blanco, degradado turquesa y brillo suave.
+
+El renombrado es deliberadamente **parcial**, y la regla que separa lo que
+cambia de lo que no es esta: se renombra lo que ve una persona y lo que vive
+solo dentro del código; se conserva `anacleto` allí donde ese nombre ya designa
+algo que existe fuera del repositorio.
+
+Conservan el nombre antiguo, y no es un descuido:
+
+- **El proyecto Compose de producción** (`docker-compose.prod.yml`) y, por
+  tanto, los volúmenes `anacleto_postgres_data` y `anacleto_document_storage`.
+  Cambiarlo haría que el siguiente `up` creara volúmenes nuevos y vacíos y
+  dejara huérfanos los reales —exactamente el accidente contra el que avisan
+  ADR-035 y las reglas duras del repositorio.
+- **Las unidades systemd y las rutas `/opt/anacleto`** (`ops/`,
+  `docs/despliegue.md`). Están instaladas en el servidor; el fichero versionado
+  no puede renombrarlas por su cuenta.
+- **El valor `agent_key="anacleto"`**, escrito ya en filas de `assistant_message`.
+  Cambiarlo exigiría una migración de datos y no aporta nada: es un
+  identificador interno que nunca se muestra.
+- **Las claves de `localStorage`** con prefijo `anacleto:`. Están escritas en el
+  navegador de cada usuario; renombrarlas reiniciaría el tour inicial y las
+  preferencias de quien ya las tenía.
+
+El nombre heredado «Asistente Ayuntamientos» sobrevive como nombre del
+repositorio y en `app_name`. Unificarlo es una decisión pendiente, no parte de
+esta.

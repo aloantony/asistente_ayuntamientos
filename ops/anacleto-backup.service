@@ -1,7 +1,7 @@
 [Unit]
 # Copia diaria de la base de datos y los documentos, más la purga de la traza
 # de seguridad por retención. Ver ADR-033.
-Description=Copia de seguridad de Anacleto
+Description=Copia de seguridad de iConcejo
 Requires=docker.service
 After=docker.service
 

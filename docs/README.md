@@ -19,16 +19,16 @@ es [`../README.en.md`](../README.en.md).
 
 | Documento | Qué contiene | Estado |
 |---|---|---|
-| [vision-producto.md](vision-producto.md) | Qué quiere ser Anacleto, sus límites explícitos y el modelo de autonomía por riesgo. Fuente principal de las decisiones de producto objetivo. | Vivo · 2026-07-13 |
+| [vision-producto.md](vision-producto.md) | Qué quiere ser iConcejo, sus límites explícitos y el modelo de autonomía por riesgo. Fuente principal de las decisiones de producto objetivo. | Vivo · 2026-07-13 |
 | [requisitos.md](requisitos.md) | Capacidades ya implementadas. Los requisitos nuevos entran por el módulo de Necesidades como borradores, no editando este fichero. | Vivo · 2026-07-29 |
-| [herramientas-asistente.md](herramientas-asistente.md) | Alcance y hoja de ruta de las herramientas de Anacleto: lectura web, adjuntos, análisis, imágenes, conectores y agentes duraderos, con sus puertas de seguridad. | Referencia · 2026-07-16 |
+| [herramientas-asistente.md](herramientas-asistente.md) | Alcance y hoja de ruta de las herramientas de iConcejo: lectura web, adjuntos, análisis, imágenes, conectores y agentes duraderos, con sus puertas de seguridad. | Referencia · 2026-07-16 |
 
 ## Arquitectura y decisiones
 
 | Documento | Qué contiene | Estado |
 |---|---|---|
 | [arquitectura.md](arquitectura.md) | Estado técnico actual: modelo de datos, control de acceso, módulos, colas y almacenamiento. | Vivo · 2026-09-04 |
-| [decisiones.md](decisiones.md) | Las 63 ADR del proyecto, numeradas hasta la ADR-064 y con su contexto. Es el fichero más grande de la carpeta y el que hay que leer antes de discutir un diseño. | Vivo |
+| [decisiones.md](decisiones.md) | Las 64 ADR del proyecto, numeradas hasta la ADR-065 y con su contexto. Es el fichero más grande de la carpeta y el que hay que leer antes de discutir un diseño. | Vivo |
 | [diseno-multiagente.md](diseno-multiagente.md) | Especificación cerrada de la estructura multi-agente del asistente. | Especificación |
 | [investigacion-api-ia.md](investigacion-api-ia.md) | Informe que sustentó la elección de LLM y de voz. Material histórico: los precios y modelos han cambiado. | Histórico · 2026-06 |
 
@@ -42,7 +42,7 @@ es [`../README.en.md`](../README.en.md).
 | [biblioteca-ordenanzas.md](biblioteca-ordenanzas.md) | Biblioteca de normativa: importación, revisión humana obligatoria y comparación temática. | Referencia |
 | [oficina-agentes.md](oficina-agentes.md) | Oficina de agentes municipales: trabajos supervisados en segundo plano. | Vivo · 2026-06-29 |
 | [catalogo-municipal-castilla-leon.md](catalogo-municipal-castilla-leon.md) | Cobertura oficial del catálogo de municipios y la procedencia de cada dato (INE, IGN). | Referencia |
-| [diseno-dialogo-voz.md](diseno-dialogo-voz.md) | Especificación del diálogo por voz con Anacleto, ya implementada (ADR-021). | Implementado · 2026-07-08 |
+| [diseno-dialogo-voz.md](diseno-dialogo-voz.md) | Especificación del diálogo por voz con iConcejo, ya implementada (ADR-021). | Implementado · 2026-07-08 |
 | [diseno-ayuntamiento-prototipo.md](diseno-ayuntamiento-prototipo.md) | Diseño de las pantallas de Ayuntamiento e Instalaciones. | Vivo · 2026-09-04 |
 
 ## Operación

@@ -71,7 +71,7 @@ export function HojaDeRuta({
       ? [
           {
             href: "/asistente",
-            title: "Anacleto",
+            title: "iConcejo",
             description: "Preparar borradores y ordenar próximos pasos con supervisión.",
             icon: ShieldCheck,
           },

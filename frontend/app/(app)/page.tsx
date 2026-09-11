@@ -442,7 +442,7 @@ export default function HomePage() {
 
   // Atajos reales: abren el asistente con la instrucción ya escrita. No son
   // salida inventada de la IA, sino accesos rápidos a tareas frecuentes.
-  function askAnacleto(prompt: string) {
+  function askiConcejo(prompt: string) {
     router.push(`/asistente?q=${encodeURIComponent(prompt)}`);
   }
 
@@ -467,9 +467,9 @@ export default function HomePage() {
             <StarIcon />
           </span>
           <input
-            aria-label="Preguntar a Anacleto"
+            aria-label="Preguntar a iConcejo"
             onChange={(event) => setAskText(event.target.value)}
-            placeholder="Cuéntale a Anacleto qué quieres mejorar o implementar…"
+            placeholder="Cuéntale a iConcejo qué quieres mejorar o implementar…"
             value={askText}
           />
           <button className="accent-button" type="submit">
@@ -533,21 +533,21 @@ export default function HomePage() {
         </section>
         ) : null}
 
-        <aside className="dashboard-anacleto">
-          <div className="dashboard-anacleto-head">
+        <aside className="dashboard-iconcejo">
+          <div className="dashboard-iconcejo-head">
             <StarIcon />
-            <span>Anacleto</span>
+            <span>iConcejo</span>
           </div>
-          <div className="dashboard-anacleto-body">
+          <div className="dashboard-iconcejo-body">
             {canUseAssistant ? (
               <>
                 <p className="small-muted">Sugerencias para empezar:</p>
-                <div className="dashboard-anacleto-suggestions">
+                <div className="dashboard-iconcejo-suggestions">
                   {ANACLETO_SUGGESTIONS.map((suggestion) => (
                     <button
                       className="dashboard-suggestion"
                       key={suggestion}
-                      onClick={() => askAnacleto(suggestion)}
+                      onClick={() => askiConcejo(suggestion)}
                       type="button"
                     >
                       <span aria-hidden="true">→</span>
@@ -561,7 +561,7 @@ export default function HomePage() {
                 No tienes acceso al asistente en esta cuenta.
               </p>
             )}
-            <p className="dashboard-anacleto-note">
+            <p className="dashboard-iconcejo-note">
               <ShieldIcon />
               Supervisado por humanos · datos pseudonimizados
             </p>

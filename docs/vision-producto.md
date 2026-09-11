@@ -1,4 +1,4 @@
-# Visión de producto: Anacleto
+# Visión de producto: iConcejo
 
 Actualizado: 2026-07-13.
 
@@ -9,22 +9,22 @@ roadmap de `README.md` resume la transición entre ambos.
 
 ## 1. Definición
 
-> Anacleto es un agente operativo municipal que comprende el contexto y las
+> iConcejo es un agente operativo municipal que comprende el contexto y las
 > competencias de cada usuario, utiliza los sistemas autorizados, coordina
 > personas y ejecuta trabajo de forma autónoma dentro de límites explícitos,
 > trazables y revocables.
 
-El producto es Anacleto y su capacidad de completar trabajo. Documentos, tareas,
+El producto es iConcejo y su capacidad de completar trabajo. Documentos, tareas,
 agenda, expedientes, normativa, proyectos o mapas son capacidades y superficies
-de trabajo que Anacleto utiliza; no son productos independientes que compitan por
+de trabajo que iConcejo utiliza; no son productos independientes que compitan por
 ser la entrada principal.
 
 ## 2. Usuarios y dominio
 
 - El primer usuario es el alcalde.
 - El producto se extenderá al resto de cargos y trabajadores del ayuntamiento.
-- Cada usuario conversa directamente con Anacleto.
-- Anacleto puede abordar cualquier trabajo relacionado con el dominio y las
+- Cada usuario conversa directamente con iConcejo.
+- iConcejo puede abordar cualquier trabajo relacionado con el dominio y las
   competencias del usuario, no solo una lista cerrada de casos de uso.
 - Los escenarios concretos se utilizarán para evaluar calidad y seguridad, no
   para limitar permanentemente el alcance del producto.
@@ -39,7 +39,7 @@ herramientas propios, y solo accederá a información expresamente publicada.
 ## 3. Experiencia principal
 
 La conversación por texto y voz es la entrada y el hilo conductor. No será la
-única representación de la información: Anacleto abrirá vistas específicas para
+única representación de la información: iConcejo abrirá vistas específicas para
 revisar documentos, tareas, agenda, expedientes, permisos, actividad o cualquier
 artefacto complejo.
 
@@ -48,9 +48,9 @@ conversación sin perder el contexto. Las vistas deben ayudar a comprender,
 comparar, aprobar o corregir; la navegación entre módulos no debe convertirse en
 el trabajo principal del usuario.
 
-## 4. Un Anacleto por ayuntamiento
+## 4. Un iConcejo por ayuntamiento
 
-Cada ayuntamiento tendrá un único Anacleto organizacional y una instancia propia
+Cada ayuntamiento tendrá un único iConcejo organizacional y una instancia propia
 del producto. Todos los usuarios comparten el mismo sistema de conocimiento y
 trabajo, pero cada uno solo accede a la información permitida por su identidad,
 cargo, competencias, departamento y delegaciones.
@@ -67,7 +67,7 @@ arquitectura separará:
 
 ## 5. Ciclo operativo
 
-Anacleto no espera siempre una petición. Puede iniciar trabajo ante eventos como
+iConcejo no espera siempre una petición. Puede iniciar trabajo ante eventos como
 plazos, correos, cambios de expediente, reuniones, tareas bloqueadas o
 solicitudes pendientes.
 
@@ -108,22 +108,22 @@ Los niveles de autonomía son:
   irreversibles o reservadas a una persona.
 
 La confirmación no se aplicará por igual a todas las escrituras. La política de
-riesgo decidirá cuándo Anacleto puede actuar, cuándo debe avisar y cuándo necesita
+riesgo decidirá cuándo iConcejo puede actuar, cuándo debe avisar y cuándo necesita
 una aprobación previa.
 
 ## 7. Identidad, colaboración y conflictos
 
-Anacleto tendrá identidad técnica propia. Una acción mostrará quién la delegó,
+iConcejo tendrá identidad técnica propia. Una acción mostrará quién la delegó,
 qué permisos se utilizaron y quién la confirmó cuando fuera necesario. Una
-comunicación externa o interna debe identificarse como enviada por Anacleto por
+comunicación externa o interna debe identificarse como enviada por iConcejo por
 delegación de una persona; nunca debe suplantarla silenciosamente.
 
-Los trabajadores también conversan directamente con Anacleto. Este puede hacer
+Los trabajadores también conversan directamente con iConcejo. Este puede hacer
 preguntas, asignar trabajo, solicitar información, coordinar participantes y
 hacer seguimiento dentro de sus márgenes de autonomía.
 
 Ante instrucciones incompatibles no prevalece automáticamente la jerarquía ni
-la instrucción más reciente. Anacleto aplica competencias legales,
+la instrucción más reciente. iConcejo aplica competencias legales,
 responsabilidad sobre el asunto y políticas vigentes. Si el conflicto continúa,
 detiene solo la actuación afectada, explica el bloqueo y lo escala.
 
@@ -133,7 +133,7 @@ información.
 
 ## 8. Memoria y ciclo de vida de la información
 
-Anacleto clasifica la información en ámbitos como personal, departamental, de
+iConcejo clasifica la información en ámbitos como personal, departamental, de
 expediente y municipal. El acceso no depende de que toda una conversación sea
 pública o privada, sino del ámbito, finalidad y permisos de cada dato o artefacto.
 
@@ -159,7 +159,7 @@ y registro de auditoría. No se conserva todo indefinidamente ni se aplica un
 
 El modelo es híbrido:
 
-- Anacleto mantiene conversación, memoria, planes, tareas y automatizaciones.
+- iConcejo mantiene conversación, memoria, planes, tareas y automatizaciones.
 - Los gestores de expedientes, registro, contabilidad y otros sistemas existentes
   continúan siendo la fuente oficial mientras no sean sustituidos expresamente.
 - Cada dato debe indicar su fuente, vigencia y autoridad.
@@ -180,7 +180,7 @@ minimización y se registra proveedor, modelo, finalidad y datos o categorías
 enviadas.
 
 El gateway es una abstracción propia y el único punto de política para llamadas
-LLM. Debe permitir cambiar de proveedor sin reescribir Anacleto. Más adelante se
+LLM. Debe permitir cambiar de proveedor sin reescribir iConcejo. Más adelante se
 incorporarán modelos propios detrás del mismo contrato y se migrarán tareas de
 forma gradual.
 
@@ -190,7 +190,7 @@ seguridad, subencargados y ubicación del tratamiento.
 
 ## 11. Fiabilidad, prioridad y atención
 
-Anacleto distingue hechos, inferencias, propuestas e incertidumbre. Las materias
+iConcejo distingue hechos, inferencias, propuestas e incertidumbre. Las materias
 jurídicas, económicas y las actuaciones oficiales exigen fuentes vigentes,
 trazabilidad y el nivel de validación correspondiente. Cuando la evidencia sea
 insuficiente, investiga, pregunta o detiene la actuación.
@@ -211,7 +211,7 @@ Las notificaciones se ajustan a la relevancia:
 
 La incorporación de un ayuntamiento es guiada. Configura estructura, cargos,
 competencias, permisos, calendarios, políticas, procedimientos, fuentes e
-integraciones. Después Anacleto aprende continuamente y propone cambios.
+integraciones. Después iConcejo aprende continuamente y propone cambios.
 
 Los cambios de permisos, competencias o políticas siempre requieren validación y
 versionado. La adaptación no puede convertir deducciones del modelo en autoridad
@@ -220,9 +220,9 @@ organizativa sin revisión.
 ## 13. Evolución del producto mediante el uso
 
 El sistema de requisitos es una capacidad de descubrimiento y evolución, no el
-propósito principal de Anacleto.
+propósito principal de iConcejo.
 
-Cuando detecta una carencia, Anacleto primero comprueba si puede resolverla con
+Cuando detecta una carencia, iConcejo primero comprueba si puede resolverla con
 una función, configuración o procedimiento existente. Después dialoga y debate
 con el usuario para comprender el problema, resultado esperado, contexto,
 excepciones, alternativas e impacto. Resume lo entendido y permite corregirlo
@@ -272,5 +272,5 @@ evaluará mediante:
 - Dar al desarrollador acceso indiscriminado y permanente al contenido.
 - Ejecutar silenciosamente acciones fuera de competencias o delegaciones.
 - Mezclar actividad institucional con actividad partidista o electoral.
-- Exponer el Anacleto interno directamente a ciudadanos.
+- Exponer el iConcejo interno directamente a ciudadanos.
 - Priorizar ahora el alojamiento de modelos propios frente al núcleo operativo.

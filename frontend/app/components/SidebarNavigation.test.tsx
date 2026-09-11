@@ -117,7 +117,7 @@ describe("SidebarNavigation", () => {
       .map((link) => link.textContent?.replace("BETA", "").trim());
 
     expect(linkLabels.slice(0, 4)).toEqual([
-      "Anacleto",
+      "iConcejo",
       "Inicio",
       "Ayuntamiento",
       "Mapa",
@@ -126,7 +126,7 @@ describe("SidebarNavigation", () => {
     expect(linkLabels).toContain("Necesidades4");
     expect(linkLabels.at(-1)).toBe("Mi cuenta");
     expect(
-      screen.getByRole("link", { name: /Anacleto/i }).className,
+      screen.getByRole("link", { name: /iConcejo/i }).className,
     ).toContain("app-nav-link--primary");
   });
 
@@ -247,8 +247,8 @@ describe("SidebarNavigation", () => {
 
   it("provides collapsed labels through native titles", () => {
     renderSidebar(USER_BASE, true);
-    expect(screen.getByRole("link", { name: /Anacleto/i }).title).toBe(
-      "Anacleto",
+    expect(screen.getByRole("link", { name: /iConcejo/i }).title).toBe(
+      "iConcejo",
     );
     expect(
       screen.getByRole("button", { name: "Todas las secciones" }).title,

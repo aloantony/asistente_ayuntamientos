@@ -30,7 +30,7 @@ export type SidebarItemId =
 export type SidebarNavIcon =
   | "account"
   | "admin"
-  | "anacleto"
+  | "iconcejo"
   | "home"
   | "inventory"
   | "maintenance"
@@ -147,9 +147,9 @@ function canUseOrdinancesAdmin(user: User) {
 const FIXED_DEFINITIONS = [
   {
     id: "fixed_assistant",
-    label: "Anacleto",
+    label: "iConcejo",
     href: "/asistente",
-    icon: "anacleto",
+    icon: "iconcejo",
     group: "Principal",
     tier: "fixed",
     prominent: true,

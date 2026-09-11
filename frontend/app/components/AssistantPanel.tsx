@@ -128,7 +128,7 @@ const EMPTY_THREAD_MESSAGES = [
   {
     title: "Empecemos con calma",
     body:
-      "Escribe tu consulta o tus notas. Anacleto te ayudará a ordenarlas y convertirlas en un trabajo claro.",
+      "Escribe tu consulta o tus notas. iConcejo te ayudará a ordenarlas y convertirlas en un trabajo claro.",
   },
   {
     title: "Cuéntame qué necesitas",
@@ -138,7 +138,7 @@ const EMPTY_THREAD_MESSAGES = [
   {
     title: "Pongamos orden a las ideas",
     body:
-      "Trae una duda, un documento o unas notas sueltas. Anacleto te ayudará a preparar el siguiente paso.",
+      "Trae una duda, un documento o unas notas sueltas. iConcejo te ayudará a preparar el siguiente paso.",
   },
   {
     title: "Vamos paso a paso",
@@ -1666,7 +1666,7 @@ export function AssistantPanel({
                       </div>
                       <div className="assistant-message-main">
                         <div className="assistant-message-meta">
-                          <span>{isAssistant ? "Anacleto" : "Tu"}</span>
+                          <span>{isAssistant ? "iConcejo" : "Tu"}</span>
                           <small>{formatDate(message.created_at)}</small>
                         </div>
                         <div className="assistant-message-bubble">
@@ -1738,7 +1738,7 @@ export function AssistantPanel({
                     <div className="assistant-message-main">
                       <div
                         className="assistant-message-bubble assistant-typing-bubble"
-                        aria-label="Anacleto está respondiendo"
+                        aria-label="iConcejo está respondiendo"
                         role="status"
                       >
                         <span className="assistant-typing-indicator" aria-hidden="true">
@@ -1989,7 +1989,7 @@ export function AssistantPanel({
                             useRealtimeVoice
                               ? "Voz en tiempo real"
                               : speechSupported
-                                ? "Grabar audio y transcribirlo con Anacleto"
+                                ? "Grabar audio y transcribirlo con iConcejo"
                                 : "Grabación de audio no disponible en este navegador"
                           }
                         >

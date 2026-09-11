@@ -7,7 +7,7 @@ export type SidebarNavIconName =
   | "maintenance"
   | "map"
   | "projects"
-  | "anacleto"
+  | "iconcejo"
   | "admin"
   | "account";
 
@@ -85,7 +85,7 @@ export function SidebarNavIcon({ name }: { name: SidebarNavIconName }) {
           <path d="m5.5 14.5-3 3a2.1 2.1 0 0 0 3 3l3-3" />
         </svg>
       );
-    case "anacleto":
+    case "iconcejo":
       return (
         <svg aria-hidden="true" height="17" viewBox="0 0 24 24" width="17">
           <use href="/icons/assistant-symbols.svg#icon-assistant-mark" />

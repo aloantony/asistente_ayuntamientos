@@ -1,5 +1,5 @@
 name: Licencia de uso
-description: Quiero usar Anacleto en un ayuntamiento o entidad
+description: Quiero usar iConcejo en un ayuntamiento o entidad
 labels: ["licencia"]
 body:
   - type: markdown

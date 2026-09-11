@@ -74,7 +74,7 @@ concurrentes desde el mismo estado producen un único éxito; la segunda observa
 el estado nuevo y responde conflicto sin duplicar el evento.
 
 Las transacciones no contienen llamadas externas ni trabajo de IA. La futura
-automatización por Anacleto deberá invocar el servicio de mantenimiento con un
+automatización por iConcejo deberá invocar el servicio de mantenimiento con un
 actor autorizado y conservar exactamente las mismas reglas y auditoría.
 
 ## API

@@ -27,6 +27,9 @@ import {
   useSession,
 } from "../lib/session";
 
+// Las claves de localStorage conservan el prefijo `anacleto:` a proposito: ya
+// estan escritas en el navegador de cada usuario. Renombrarlas reiniciaria el
+// tour inicial y la preferencia de la barra a quien ya las tenia guardadas.
 const ONBOARDING_STORAGE_PREFIX = "anacleto:onboarding:v1";
 const SIDEBAR_STORAGE_KEY = "anacleto:sidebar:v1";
 
@@ -53,7 +56,7 @@ function getMunicipalBrandName(user: User) {
     return organizationName.replace(/^Ayuntamiento\s+de\s+/i, "");
   }
 
-  return "Anacleto";
+  return "iConcejo";
 }
 
 // El tema (claro/oscuro) lo aplica el script anti-parpadeo del layout raíz
@@ -345,9 +348,9 @@ export default function AppLayout({
       ? [
           {
             id: "assistant" as const,
-            eyebrow: "Anacleto",
+            eyebrow: "iConcejo",
             title: "Asistente municipal",
-            body: "Abre Anacleto desde la sección Principal del menú lateral para consultar información, organizar trabajo o preparar borradores supervisados.",
+            body: "Abre iConcejo desde la sección Principal del menú lateral para consultar información, organizar trabajo o preparar borradores supervisados.",
           },
         ]
       : []),

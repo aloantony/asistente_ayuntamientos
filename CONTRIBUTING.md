@@ -15,7 +15,7 @@ Abre una incidencia primero y lo hablamos.
 ## Antes de escribir código
 
 1. Lee [`docs/arquitectura.md`](docs/arquitectura.md) para el estado técnico.
-2. Busca tu tema en [`docs/decisiones.md`](docs/decisiones.md). Hay 63 ADR: casi
+2. Busca tu tema en [`docs/decisiones.md`](docs/decisiones.md). Hay 64 ADR: casi
    todo lo que parece raro está explicado ahí, con el motivo.
 3. Levanta el entorno siguiendo el [arranque rápido](README.md#arranque-rápido).
 

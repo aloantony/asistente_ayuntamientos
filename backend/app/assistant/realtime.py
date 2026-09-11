@@ -1,4 +1,4 @@
-"""Realtime voice orchestration for Anacleto."""
+"""Realtime voice orchestration for iConcejo."""
 
 import hashlib
 import hmac
